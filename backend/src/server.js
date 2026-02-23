@@ -16,6 +16,13 @@ import { tenantMiddleware } from './middleware/tenant.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import webhookRoutes from './routes/webhooks/index.js';
+import empresasRoutes from './routes/empresas.js';
+import usuariosRoutes from './routes/usuarios.js';
+import agentesRoutes from './routes/agentes.js';
+import toolsRoutes from './routes/tools.js';
+import apiKeysRoutes from './routes/api-keys.js';
+import chatwootConfigRoutes from './routes/chatwoot-config.js';
+import analyticsRoutes from './routes/analytics.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -240,11 +247,13 @@ async function start() {
     await fastify.register(authRoutes, { prefix: '/api/auth' });
     await fastify.register(chatRoutes, { prefix: '/api/chat' });
     await fastify.register(webhookRoutes, { prefix: '/api/webhooks' });
-
-    // TODO: Register other routes as they are created
-    // await fastify.register(agentesRoutes, { prefix: '/api/agentes' });
-    // await fastify.register(empresasRoutes, { prefix: '/api/empresas' });
-    // etc...
+    await fastify.register(empresasRoutes, { prefix: '/api/empresas' });
+    await fastify.register(usuariosRoutes, { prefix: '/api/usuarios' });
+    await fastify.register(agentesRoutes, { prefix: '/api/agentes' });
+    await fastify.register(toolsRoutes, { prefix: '/api/tools' });
+    await fastify.register(apiKeysRoutes, { prefix: '/api/api-keys' });
+    await fastify.register(chatwootConfigRoutes, { prefix: '/api/chatwoot-config' });
+    await fastify.register(analyticsRoutes, { prefix: '/api/analytics' });
 
     // Start listening
     await fastify.listen({
