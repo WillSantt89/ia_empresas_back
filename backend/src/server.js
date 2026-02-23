@@ -8,6 +8,13 @@ import { logger } from './config/logger.js';
 import { testConnection, closePool } from './config/database.js';
 import { testRedisConnection, closeRedis } from './config/redis.js';
 
+// Import middlewares
+import { authMiddleware, webhookAuthMiddleware } from './middleware/auth.js';
+import { tenantMiddleware } from './middleware/tenant.js';
+
+// Import routes
+import authRoutes from './routes/auth.js';
+
 // Create Fastify instance
 const fastify = Fastify({
   logger: logger,
@@ -69,6 +76,13 @@ async function registerPlugins() {
 
   // Error handling
   await fastify.register(sensible);
+
+  // Register custom authentication decorator
+  fastify.decorate('authenticate', authMiddleware);
+  fastify.decorate('authenticateWebhook', webhookAuthMiddleware);
+
+  // Add tenant middleware to all routes except public ones
+  fastify.addHook('preHandler', tenantMiddleware);
 }
 
 // Health check route
@@ -202,9 +216,12 @@ async function start() {
       throw new Error('Failed to connect to required services');
     }
 
-    // TODO: Register routes here after creating them
-    // await fastify.register(authRoutes, { prefix: '/api/auth' });
+    // Register routes
+    await fastify.register(authRoutes, { prefix: '/api/auth' });
+
+    // TODO: Register other routes as they are created
     // await fastify.register(chatRoutes, { prefix: '/api/chat' });
+    // await fastify.register(agentesRoutes, { prefix: '/api/agentes' });
     // etc...
 
     // Start listening
