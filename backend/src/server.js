@@ -15,6 +15,7 @@ import { tenantMiddleware } from './middleware/tenant.js';
 // Import routes
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
+import webhookRoutes from './routes/webhooks/index.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -84,6 +85,24 @@ async function registerPlugins() {
 
   // Add tenant middleware to all routes except public ones
   fastify.addHook('preHandler', tenantMiddleware);
+
+  // Add raw body parser for webhook signature validation
+  fastify.addContentTypeParser('application/json', { parseAs: 'string' }, function (req, body, done) {
+    try {
+      const json = JSON.parse(body);
+      done(null, json);
+    } catch (err) {
+      err.statusCode = 400;
+      done(err, undefined);
+    }
+  });
+
+  fastify.addHook('preHandler', async (request, reply) => {
+    // Store raw body for webhook signature validation
+    if (request.routeOptions.config?.rawBody && request.body) {
+      request.rawBody = request.payload || JSON.stringify(request.body);
+    }
+  });
 }
 
 // Health check route
@@ -220,6 +239,7 @@ async function start() {
     // Register routes
     await fastify.register(authRoutes, { prefix: '/api/auth' });
     await fastify.register(chatRoutes, { prefix: '/api/chat' });
+    await fastify.register(webhookRoutes, { prefix: '/api/webhooks' });
 
     // TODO: Register other routes as they are created
     // await fastify.register(agentesRoutes, { prefix: '/api/agentes' });

@@ -90,16 +90,76 @@ const chatRoutes = async (fastify) => {
     const apiKey = request.headers['x-api-key'];
 
     try {
-      // Validate API key and get agent configuration
-      const keyData = await validateApiKey(apiKey);
-      if (!keyData) {
-        return reply.code(401).send({
-          success: false,
-          error: {
-            code: 'INVALID_API_KEY',
-            message: 'Invalid or expired API key'
-          }
-        });
+      let keyData;
+
+      // Check if this is an internal webhook call
+      if (apiKey === 'internal-webhook-call' &&
+          request.headers['x-empresa-id'] &&
+          request.headers['x-agente-id']) {
+
+        // Internal call from webhook - get agent data directly
+        const empresaId = request.headers['x-empresa-id'];
+        const agenteId = request.headers['x-agente-id'];
+
+        const agentQuery = `
+          SELECT
+            a.id as agente_id,
+            a.nome as agente_nome,
+            a.modelo,
+            a.temperatura,
+            a.max_tokens,
+            a.prompt_ativo,
+            ak.gemini_key_encrypted
+          FROM agentes a
+          INNER JOIN api_keys ak ON ak.agente_id = a.id
+          WHERE a.id = $1 AND a.empresa_id = $2
+            AND a.is_active = true AND ak.is_active = true
+          LIMIT 1
+        `;
+
+        const agentResult = await tenantQuery(
+          pool,
+          empresaId,
+          agentQuery,
+          [agenteId, empresaId]
+        );
+
+        if (agentResult.rows.length === 0) {
+          return reply.code(404).send({
+            success: false,
+            error: {
+              code: 'AGENT_NOT_FOUND',
+              message: 'Active agent not found'
+            }
+          });
+        }
+
+        const agent = agentResult.rows[0];
+        const { decrypt } = await import('../utils/encryption.js');
+
+        keyData = {
+          empresa_id: empresaId,
+          agente_id: agent.agente_id,
+          agente_nome: agent.agente_nome,
+          gemini_api_key: decrypt(agent.gemini_key_encrypted),
+          modelo: agent.modelo,
+          temperatura: agent.temperatura,
+          max_tokens: agent.max_tokens,
+          prompt_ativo: agent.prompt_ativo
+        };
+
+      } else {
+        // External call - validate API key normally
+        keyData = await validateApiKey(apiKey);
+        if (!keyData) {
+          return reply.code(401).send({
+            success: false,
+            error: {
+              code: 'INVALID_API_KEY',
+              message: 'Invalid or expired API key'
+            }
+          });
+        }
       }
 
       const {
