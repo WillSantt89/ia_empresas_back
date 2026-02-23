@@ -14,6 +14,7 @@ import { tenantMiddleware } from './middleware/tenant.js';
 
 // Import routes
 import authRoutes from './routes/auth.js';
+import chatRoutes from './routes/chat.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -218,10 +219,11 @@ async function start() {
 
     // Register routes
     await fastify.register(authRoutes, { prefix: '/api/auth' });
+    await fastify.register(chatRoutes, { prefix: '/api/chat' });
 
     // TODO: Register other routes as they are created
-    // await fastify.register(chatRoutes, { prefix: '/api/chat' });
     // await fastify.register(agentesRoutes, { prefix: '/api/agentes' });
+    // await fastify.register(empresasRoutes, { prefix: '/api/empresas' });
     // etc...
 
     // Start listening
