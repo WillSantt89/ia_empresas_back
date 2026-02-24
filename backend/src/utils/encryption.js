@@ -1,6 +1,8 @@
 import crypto from 'crypto';
+import bcrypt from 'bcrypt';
 
 const ALGORITHM = 'aes-256-gcm';
+const SALT_ROUNDS = 10;
 
 /**
  * Encrypt sensitive data
@@ -56,11 +58,30 @@ export function decrypt(encryptedData, key) {
 }
 
 /**
- * Hash a value using SHA256
+ * Hash a password using bcrypt
+ * @param {string} password - Password to hash
+ * @returns {Promise<string>} Hashed password
+ */
+export async function hash(password) {
+  return await bcrypt.hash(password, SALT_ROUNDS);
+}
+
+/**
+ * Compare a password with a hash
+ * @param {string} password - Plain text password
+ * @param {string} hash - Hashed password
+ * @returns {Promise<boolean>} True if password matches
+ */
+export async function compare(password, hash) {
+  return await bcrypt.compare(password, hash);
+}
+
+/**
+ * Hash a value using SHA256 (for non-password use)
  * @param {string} value - Value to hash
  * @returns {string} Hashed value
  */
-export function hash(value) {
+export function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
