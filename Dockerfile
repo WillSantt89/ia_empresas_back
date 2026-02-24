@@ -1,16 +1,16 @@
 FROM node:20-alpine AS builder
 RUN apk add --no-cache python3 make g++
 WORKDIR /build
-COPY backend/package*.json ./
-RUN npm ci
+COPY backend/package.json ./
+RUN npm install
 COPY backend/ ./
 
 FROM node:20-alpine
 RUN apk add --no-cache tini
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 WORKDIR /app
-COPY backend/package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY backend/package.json ./
+RUN npm install --omit=dev && npm cache clean --force
 COPY --from=builder /build/src ./src
 COPY --from=builder /build/migrations ./migrations
 COPY --from=builder /build/scripts ./scripts
