@@ -257,3 +257,11 @@ export function canAccessUser(request, targetUserId) {
   // Others can only access themselves
   return user.id === targetUserId;
 }
+
+/**
+ * Alias for requirePermission to maintain backward compatibility
+ * @param {string} resource - Resource name
+ * @param {string} action - Action name
+ * @returns {Function} Middleware function
+ */
+export const checkPermission = requirePermission;
