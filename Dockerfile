@@ -11,9 +11,12 @@ RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 WORKDIR /app
 COPY backend/package.json ./
 RUN npm install --omit=dev && npm cache clean --force
+# Copy all source files preserving directory structure
 COPY --from=builder /build/src ./src
 COPY --from=builder /build/migrations ./migrations
 COPY --from=builder /build/scripts ./scripts
+# Ensure .env.example is available
+COPY --from=builder /build/.env.example ./.env.example || true
 RUN chown -R nodejs:nodejs /app
 USER nodejs
 EXPOSE 3000
