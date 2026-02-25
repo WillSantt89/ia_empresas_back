@@ -11,8 +11,12 @@ import { testRedisConnection, closeRedis } from './config/redis.js';
 // Import middlewares
 import { authMiddleware, webhookAuthMiddleware } from './middleware/auth.js';
 import { tenantMiddleware } from './middleware/tenant.js';
+import { requirePermission } from './middleware/permission.js';
+import { checkLimit } from './middleware/limit.js';
+import { globalRateLimit, setupRouteRateLimits } from './middleware/rate-limit.js';
 
 // Import routes
+import healthRoutes from './routes/health.js';
 import authRoutes from './routes/auth.js';
 import chatRoutes from './routes/chat.js';
 import webhookRoutes from './routes/webhooks/index.js';
@@ -23,6 +27,23 @@ import toolsRoutes from './routes/tools.js';
 import apiKeysRoutes from './routes/api-keys.js';
 import chatwootConfigRoutes from './routes/chatwoot-config.js';
 import analyticsRoutes from './routes/analytics.js';
+import planosRoutes from './routes/planos.js';
+import itensCobraveisRoutes from './routes/itens-cobraveis.js';
+import assinaturasRoutes from './routes/assinaturas.js';
+import promptsRoutes from './routes/prompts.js';
+import transferenciasRoutes from './routes/transferencias.js';
+import agenteToolsRoutes from './routes/agente-tools.js';
+import inboxesRoutes from './routes/inboxes.js';
+import whatsappNumbersRoutes from './routes/whatsapp-numbers.js';
+import conversasRoutes from './routes/conversas.js';
+import dashboardRoutes from './routes/dashboard.js';
+import logsRoutes from './routes/logs.js';
+import configuracoesRoutes from './routes/configuracoes.js';
+import notificacoesRoutes from './routes/notificacoes.js';
+
+// Import jobs
+import timeoutChecker from './jobs/timeout-checker.js';
+import dailyReset from './jobs/daily-reset.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -61,27 +82,7 @@ async function registerPlugins() {
   });
 
   // Rate Limiting
-  await fastify.register(rateLimit, {
-    global: true,
-    max: config.RATE_LIMIT_MAX_REQUESTS,
-    timeWindow: config.RATE_LIMIT_WINDOW_MS,
-    cache: 10000,
-    skipOnError: false,
-    keyGenerator: (request) => {
-      return request.headers['x-empresa-id'] || request.ip;
-    },
-    errorResponseBuilder: (request, context) => {
-      return {
-        success: false,
-        error: {
-          code: 'RATE_LIMIT_EXCEEDED',
-          message: `Too many requests, please try again later. Retry after ${context.after}`,
-          statusCode: 429,
-          retry_after: context.after,
-        },
-      };
-    },
-  });
+  await fastify.register(rateLimit, globalRateLimit);
 
   // Error handling
   await fastify.register(sensible);
@@ -89,9 +90,12 @@ async function registerPlugins() {
   // Register custom authentication decorator
   fastify.decorate('authenticate', authMiddleware);
   fastify.decorate('authenticateWebhook', webhookAuthMiddleware);
+  fastify.decorate('requirePermission', requirePermission);
+  fastify.decorate('checkLimit', checkLimit);
+  fastify.decorate('addTenantFilter', tenantMiddleware);
 
-  // Add tenant middleware to all routes except public ones
-  fastify.addHook('preHandler', tenantMiddleware);
+  // Setup route-specific rate limits
+  setupRouteRateLimits(fastify);
 
   // Add raw body parser for webhook signature validation
   fastify.addContentTypeParser('application/json', { parseAs: 'string' }, function (req, body, done) {
@@ -244,6 +248,7 @@ async function start() {
     }
 
     // Register routes
+    await fastify.register(healthRoutes);  // Health routes without prefix
     await fastify.register(authRoutes, { prefix: '/api/auth' });
     await fastify.register(chatRoutes, { prefix: '/api/chat' });
     await fastify.register(webhookRoutes, { prefix: '/api/webhooks' });
@@ -254,6 +259,19 @@ async function start() {
     await fastify.register(apiKeysRoutes, { prefix: '/api/api-keys' });
     await fastify.register(chatwootConfigRoutes, { prefix: '/api/chatwoot-config' });
     await fastify.register(analyticsRoutes, { prefix: '/api/analytics' });
+    await fastify.register(planosRoutes, { prefix: '/api/planos' });
+    await fastify.register(itensCobraveisRoutes, { prefix: '/api/itens-cobraveis' });
+    await fastify.register(assinaturasRoutes, { prefix: '/api/assinaturas' });
+    await fastify.register(promptsRoutes, { prefix: '/api/agentes' });
+    await fastify.register(transferenciasRoutes, { prefix: '/api' });
+    await fastify.register(agenteToolsRoutes, { prefix: '/api/agentes' });
+    await fastify.register(inboxesRoutes, { prefix: '/api/inboxes' });
+    await fastify.register(whatsappNumbersRoutes, { prefix: '/api/whatsapp-numbers' });
+    await fastify.register(conversasRoutes, { prefix: '/api/conversas' });
+    await fastify.register(dashboardRoutes, { prefix: '/api/dashboard' });
+    await fastify.register(logsRoutes, { prefix: '/api/logs' });
+    await fastify.register(configuracoesRoutes, { prefix: '/api/configuracoes' });
+    await fastify.register(notificacoesRoutes, { prefix: '/api/notificacoes' });
 
     // Start listening
     await fastify.listen({
@@ -262,6 +280,11 @@ async function start() {
     });
 
     logger.info(`Server listening on port ${config.PORT} in ${config.NODE_ENV} mode`);
+
+    // Start background jobs
+    timeoutChecker.start();
+    dailyReset.start();
+    logger.info('Background jobs started');
   } catch (error) {
     logger.fatal(error, 'Failed to start server');
     process.exit(1);
