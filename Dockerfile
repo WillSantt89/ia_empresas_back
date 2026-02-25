@@ -15,8 +15,6 @@ RUN npm install --omit=dev && npm cache clean --force
 COPY --from=builder /build/src ./src
 COPY --from=builder /build/migrations ./migrations
 COPY --from=builder /build/scripts ./scripts
-# Ensure .env.example is available
-COPY --from=builder /build/.env.example ./.env.example || true
 RUN chown -R nodejs:nodejs /app
 USER nodejs
 EXPOSE 3000
