@@ -18,7 +18,7 @@ COPY --from=builder /build/scripts ./scripts
 # Copy debug servers
 COPY --from=builder /build/debug-server.js ./debug-server.js
 COPY --from=builder /build/test-server.js ./test-server.js
-COPY --from=builder /build/simple-server.js ./simple-server.js
+COPY --from=builder /build/simple-server.cjs ./simple-server.cjs
 RUN chown -R nodejs:nodejs /app
 USER nodejs
 EXPOSE 3001
@@ -26,4 +26,4 @@ ENTRYPOINT ["/sbin/tini", "--"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3001/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 # Use simple server for now
-CMD ["node", "simple-server.js"]
+CMD ["node", "simple-server.cjs"]
