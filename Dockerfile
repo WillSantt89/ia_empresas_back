@@ -20,9 +20,9 @@ COPY --from=builder /build/debug-server.js ./debug-server.js
 COPY --from=builder /build/test-server.js ./test-server.js
 RUN chown -R nodejs:nodejs /app
 USER nodejs
-EXPOSE 3000
+EXPOSE 3001
 ENTRYPOINT ["/sbin/tini", "--"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD node -e "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+  CMD node -e "fetch('http://localhost:3001/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 # Temporarily use debug server
 CMD ["node", "debug-server.js"]
