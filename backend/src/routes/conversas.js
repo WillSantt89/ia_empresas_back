@@ -87,11 +87,11 @@ export default async function conversasRoutes(fastify, opts) {
         query += ` AND ${conditions.join(' AND ')}`;
       }
 
-      // Query para contagem total
-      const countQuery = query.replace(
-        /SELECT[\s\S]+?FROM/,
-        'SELECT COUNT(DISTINCT c.id) FROM'
-      ).replace(/LEFT JOIN usuarios[\s\S]+?WHERE/, 'WHERE');
+      // Query para contagem total - construída separadamente para evitar problemas com subqueries
+      let countQuery = `SELECT COUNT(*) as count FROM conversas c WHERE c.empresa_id = $1`;
+      if (conditions.length > 0) {
+        countQuery += ` AND ${conditions.join(' AND ')}`;
+      }
 
       const totalResult = await pool.query(countQuery, params);
       const total = parseInt(totalResult.rows[0].count);
