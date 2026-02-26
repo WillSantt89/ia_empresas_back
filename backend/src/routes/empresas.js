@@ -698,6 +698,74 @@ const empresasRoutes = async (fastify) => {
   });
 
   /**
+   * PUT /api/empresas/:empresaId/usuarios/:userId/reset-senha
+   * Reset password of any user in a company (master only)
+   */
+  fastify.put('/:empresaId/usuarios/:userId/reset-senha', {
+    preHandler: fastify.authenticate
+  }, async (request, reply) => {
+    const { role } = request.user;
+    const { empresaId, userId } = request.params;
+    const { nova_senha } = request.body || {};
+
+    if (role !== 'master') {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Apenas master pode resetar senhas' }
+      });
+    }
+
+    if (!nova_senha || nova_senha.length < 8) {
+      return reply.code(400).send({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Nova senha deve ter no minimo 8 caracteres' }
+      });
+    }
+
+    try {
+      // Verify user belongs to the empresa
+      const userResult = await pool.query(
+        'SELECT id, nome, email, empresa_id FROM usuarios WHERE id = $1 AND empresa_id = $2',
+        [userId, empresaId]
+      );
+
+      if (userResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'Usuario nao encontrado nesta empresa' }
+        });
+      }
+
+      const usuario = userResult.rows[0];
+
+      // Hash new password
+      const hashedPassword = await hash(nova_senha);
+
+      // Update password
+      await pool.query(
+        'UPDATE usuarios SET senha_hash = $1, atualizado_em = CURRENT_TIMESTAMP WHERE id = $2',
+        [hashedPassword, userId]
+      );
+
+      createLogger.info('Password reset by master', {
+        empresa_id: empresaId,
+        user_id: userId,
+        user_email: usuario.email
+      });
+
+      return {
+        success: true,
+        data: {
+          message: `Senha do usuario ${usuario.email} resetada com sucesso`
+        }
+      };
+    } catch (error) {
+      createLogger.error('Failed to reset password', { empresaId, userId, error: error.message });
+      throw error;
+    }
+  });
+
+  /**
    * PUT /api/empresas/deactivate
    * Deactivate own company (kept for backwards compat)
    */
