@@ -55,8 +55,8 @@ const analyticsRoutes = async (fastify) => {
           COALESCE(AVG(ca.tempo_processamento_ms), 0) as avg_response_time
         FROM conversacao_analytics ca
         WHERE ca.empresa_id = $1
-          AND ca.created_at::date >= $2
-          AND ca.created_at::date <= $3
+          AND ca.criado_em::date >= $2
+          AND ca.criado_em::date <= $3
           ${agentFilter}
       `, params);
 
@@ -74,8 +74,8 @@ const analyticsRoutes = async (fastify) => {
           END as success_rate
         FROM agentes a
         LEFT JOIN conversacao_analytics ca ON a.id = ca.agente_id
-          AND ca.created_at::date >= $2
-          AND ca.created_at::date <= $3
+          AND ca.criado_em::date >= $2
+          AND ca.criado_em::date <= $3
         WHERE a.empresa_id = $1 AND a.ativo = true
         GROUP BY a.id, a.nome
         ORDER BY messages DESC
@@ -166,10 +166,10 @@ const analyticsRoutes = async (fastify) => {
 
       // Define date truncation based on interval
       const dateTrunc = {
-        hour: "date_trunc('hour', ca.created_at)",
-        day: "date_trunc('day', ca.created_at)",
-        week: "date_trunc('week', ca.created_at)",
-        month: "date_trunc('month', ca.created_at)"
+        hour: "date_trunc('hour', ca.criado_em)",
+        day: "date_trunc('day', ca.criado_em)",
+        week: "date_trunc('week', ca.criado_em)",
+        month: "date_trunc('month', ca.criado_em)"
       }[interval];
 
       const query = `
@@ -183,14 +183,14 @@ const analyticsRoutes = async (fastify) => {
           COUNT(*) FILTER (WHERE ca.sucesso = false) as failed
         FROM conversacao_analytics ca
         WHERE ca.empresa_id = $1
-          AND ca.created_at::date >= $2
-          AND ca.created_at::date <= $3
+          AND ca.criado_em::date >= $2
+          AND ca.criado_em::date <= $3
           ${agentFilter}
         GROUP BY period
         ORDER BY period ASC
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, params);
+      const result = await pool.query(query, params);
 
       const timeline = result.rows.map(row => ({
         period: row.period,
@@ -262,8 +262,8 @@ const analyticsRoutes = async (fastify) => {
         WITH conversation_summary AS (
           SELECT
             ca.conversation_id,
-            MIN(ca.created_at) as first_message,
-            MAX(ca.created_at) as last_message,
+            MIN(ca.criado_em) as first_message,
+            MAX(ca.criado_em) as last_message,
             COUNT(*) as message_count,
             SUM(ca.tokens_input + ca.tokens_output) as total_tokens,
             AVG(ca.tempo_processamento_ms) as avg_response_time,
@@ -273,8 +273,8 @@ const analyticsRoutes = async (fastify) => {
             array_agg(DISTINCT ca.agente_id) as agent_ids
           FROM conversacao_analytics ca
           WHERE ca.empresa_id = $1
-            AND ca.created_at::date >= $2
-            AND ca.created_at::date <= $3
+            AND ca.criado_em::date >= $2
+            AND ca.criado_em::date <= $3
       `;
 
       const params = [empresa_id, start_date, end_date];
@@ -421,7 +421,7 @@ const analyticsRoutes = async (fastify) => {
         ORDER BY total_calls DESC
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, params);
+      const result = await pool.query(query, params);
 
       const tools = result.rows.map(row => ({
         id: row.id,

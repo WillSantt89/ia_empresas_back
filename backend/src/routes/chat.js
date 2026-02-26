@@ -111,18 +111,13 @@ const chatRoutes = async (fastify) => {
             a.prompt_ativo,
             ak.gemini_key_encrypted
           FROM agentes a
-          INNER JOIN api_keys ak ON ak.agente_id = a.id
+          LEFT JOIN api_keys ak ON ak.agente_id = a.id AND ak.status = 'ativo'
           WHERE a.id = $1 AND a.empresa_id = $2
-            AND a.is_active = true AND ak.is_active = true
+            AND a.ativo = true
           LIMIT 1
         `;
 
-        const agentResult = await tenantQuery(
-          pool,
-          empresaId,
-          agentQuery,
-          [agenteId, empresaId]
-        );
+        const agentResult = await pool.query(agentQuery, [agenteId, empresaId]);
 
         if (agentResult.rows.length === 0) {
           return reply.code(404).send({
@@ -193,18 +188,13 @@ const chatRoutes = async (fastify) => {
           t.parametros_schema_json,
           t.timeout_ms
         FROM tools t
-        INNER JOIN agent_tools at ON t.id = at.tool_id
-        WHERE at.agente_id = $1 AND at.empresa_id = $2
-          AND t.is_active = true
-        ORDER BY at.prioridade ASC
+        INNER JOIN agente_tools at2 ON t.id = at2.tool_id
+        WHERE at2.agente_id = $1
+          AND t.ativo = true
+        ORDER BY at2.ordem_prioridade ASC
       `;
 
-      const toolsResult = await tenantQuery(
-        pool,
-        empresa_id,
-        toolsQuery,
-        [agente_id, empresa_id]
-      );
+      const toolsResult = await pool.query(toolsQuery, [agente_id]);
 
       const tools = toolsResult.rows;
 

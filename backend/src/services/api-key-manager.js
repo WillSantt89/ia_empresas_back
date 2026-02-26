@@ -1,12 +1,18 @@
 import crypto from 'crypto';
-import { pool, tenantQuery } from '../config/database.js';
+import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
-import { encrypt, decrypt, hash } from '../utils/encryption.js';
+import { encrypt, decrypt } from '../utils/encryption.js';
 import { redis, setWithExpiry, getJSON } from '../config/redis.js';
 
 /**
  * API Key Manager Service
  * Handles creation, validation, and management of API keys for Gemini
+ *
+ * DB schema for api_keys:
+ *   id, empresa_id, provedor, nome_exibicao, api_key_encrypted, status,
+ *   prioridade, total_requests_hoje, total_tokens_hoje, ultimo_uso,
+ *   ultimo_erro, retry_apos, ultimo_erro_msg, tentativas_erro,
+ *   criado_por, criado_em, atualizado_em, agente_id
  */
 
 const createLogger = logger.child({ module: 'api-key-manager' });
@@ -16,24 +22,7 @@ const API_KEY_CACHE_PREFIX = 'apikey:';
 const API_KEY_CACHE_TTL = 300; // 5 minutes
 
 /**
- * Generate a secure API key identifier
- * @returns {string} API key in format: sk_live_[random]
- */
-function generateApiKey() {
-  const prefix = 'sk_live_';
-  const randomBytes = crypto.randomBytes(32).toString('base64url');
-  return `${prefix}${randomBytes}`;
-}
-
-/**
  * Create a new API key for an agent
- * @param {Object} options - API key creation options
- * @param {string} options.empresaId - Company ID
- * @param {number} options.agenteId - Agent ID
- * @param {string} options.geminiApiKey - Gemini API key to encrypt
- * @param {string} options.nome - Key name/description
- * @param {number} options.createdBy - User ID who created the key
- * @returns {Promise<Object>} Created API key details
  */
 export async function createApiKey(options) {
   const { empresaId, agenteId, geminiApiKey, nome, createdBy } = options;
@@ -42,36 +31,30 @@ export async function createApiKey(options) {
   try {
     await client.query('BEGIN');
 
-    // Generate API key
-    const apiKey = generateApiKey();
-    const apiKeyHash = await hash(apiKey);
-
     // Encrypt the Gemini API key
-    const encryptedGeminiKey = encrypt(geminiApiKey);
+    const encryptedKey = encrypt(geminiApiKey);
 
     // Store in database
     const query = `
       INSERT INTO api_keys (
         empresa_id,
         agente_id,
-        nome,
-        key_hash,
-        gemini_key_encrypted,
-        created_by,
-        last_used_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NULL)
+        provedor,
+        nome_exibicao,
+        api_key_encrypted,
+        status,
+        prioridade,
+        criado_por
+      ) VALUES ($1, $2, 'gemini', $3, $4, 'ativo', 1, $5)
       RETURNING
         id,
-        nome,
-        created_at,
-        is_active
+        nome_exibicao,
+        status,
+        criado_em
     `;
 
-    const result = await tenantQuery(
-      client,
-      empresaId,
-      query,
-      [empresaId, agenteId, nome, apiKeyHash, encryptedGeminiKey, createdBy]
+    const result = await client.query(query,
+      [empresaId, agenteId, nome, encryptedKey, createdBy]
     );
 
     await client.query('COMMIT');
@@ -85,14 +68,12 @@ export async function createApiKey(options) {
       created_by: createdBy
     });
 
-    // Return the key only once (won't be shown again)
     return {
       id: created.id,
-      api_key: apiKey, // Only returned on creation
-      nome: created.nome,
-      created_at: created.created_at,
-      is_active: created.is_active,
-      message: 'Store this API key securely. It will not be shown again.'
+      nome: created.nome_exibicao,
+      created_at: created.criado_em,
+      is_active: created.status === 'ativo',
+      message: 'API key created successfully.'
     };
 
   } catch (error) {
@@ -110,8 +91,6 @@ export async function createApiKey(options) {
 
 /**
  * Validate API key and get associated Gemini key
- * @param {string} apiKey - API key to validate
- * @returns {Promise<Object|null>} Validated key data or null
  */
 export async function validateApiKey(apiKey) {
   try {
@@ -124,92 +103,85 @@ export async function validateApiKey(apiKey) {
       return cached;
     }
 
-    // Hash the provided key
-    const apiKeyHash = await hash(apiKey);
-
-    // Query database
+    // Query database - match by decrypting stored keys
     const query = `
       SELECT
         ak.id,
         ak.empresa_id,
         ak.agente_id,
-        ak.gemini_key_encrypted,
-        ak.is_active,
-        ak.expires_at,
+        ak.api_key_encrypted,
+        ak.status,
         a.nome as agente_nome,
         a.modelo,
         a.temperatura,
         a.max_tokens,
         a.prompt_ativo,
-        e.is_active as empresa_active
+        e.ativo as empresa_active
       FROM api_keys ak
-      INNER JOIN agentes a ON ak.agente_id = a.id
+      LEFT JOIN agentes a ON ak.agente_id = a.id
       INNER JOIN empresas e ON ak.empresa_id = e.id
-      WHERE ak.key_hash = $1
-        AND ak.is_active = true
-        AND a.is_active = true
+      WHERE ak.status = 'ativo'
+        AND (a.ativo = true OR ak.agente_id IS NULL)
     `;
 
-    const result = await pool.query(query, [apiKeyHash]);
+    const result = await pool.query(query);
 
-    if (result.rows.length === 0) {
+    // Find matching key by trying to decrypt
+    let matchedKey = null;
+    for (const row of result.rows) {
+      try {
+        const decryptedKey = decrypt(row.api_key_encrypted);
+        if (decryptedKey === apiKey) {
+          matchedKey = row;
+          break;
+        }
+      } catch (e) {
+        // Skip keys that fail to decrypt
+        continue;
+      }
+    }
+
+    if (!matchedKey) {
       createLogger.warn('Invalid API key attempt');
       return null;
     }
 
-    const keyData = result.rows[0];
-
     // Check if company is active
-    if (!keyData.empresa_active) {
+    if (!matchedKey.empresa_active) {
       createLogger.warn('API key for inactive company', {
-        empresa_id: keyData.empresa_id
+        empresa_id: matchedKey.empresa_id
       });
       return null;
     }
 
-    // Check expiration
-    if (keyData.expires_at && new Date(keyData.expires_at) < new Date()) {
-      createLogger.warn('Expired API key', {
-        key_id: keyData.id,
-        expired_at: keyData.expires_at
-      });
-      return null;
-    }
-
-    // Decrypt Gemini key
-    const geminiApiKey = decrypt(keyData.gemini_key_encrypted);
+    // Decrypt Gemini key (the key itself IS the Gemini key in this schema)
+    const geminiApiKey = decrypt(matchedKey.api_key_encrypted);
 
     // Update last used timestamp
     pool.query(
-      'UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1',
-      [keyData.id]
+      'UPDATE api_keys SET ultimo_uso = CURRENT_TIMESTAMP WHERE id = $1',
+      [matchedKey.id]
     ).catch(err => {
-      createLogger.error('Failed to update last_used_at', {
-        key_id: keyData.id,
+      createLogger.error('Failed to update ultimo_uso', {
+        key_id: matchedKey.id,
         error: err.message
       });
     });
 
     const validatedData = {
-      id: keyData.id,
-      empresa_id: keyData.empresa_id,
-      agente_id: keyData.agente_id,
-      agente_nome: keyData.agente_nome,
+      id: matchedKey.id,
+      empresa_id: matchedKey.empresa_id,
+      agente_id: matchedKey.agente_id,
+      agente_nome: matchedKey.agente_nome,
       gemini_api_key: geminiApiKey,
-      modelo: keyData.modelo,
-      temperatura: keyData.temperatura,
-      max_tokens: keyData.max_tokens,
-      prompt_ativo: keyData.prompt_ativo
+      modelo: matchedKey.modelo,
+      temperatura: matchedKey.temperatura,
+      max_tokens: matchedKey.max_tokens,
+      prompt_ativo: matchedKey.prompt_ativo
     };
 
     // Cache the validated data
     await setWithExpiry(cacheKey, validatedData, API_KEY_CACHE_TTL);
-
-    createLogger.debug('API key validated', {
-      key_id: keyData.id,
-      empresa_id: keyData.empresa_id,
-      agente_id: keyData.agente_id
-    });
 
     return validatedData;
 
@@ -223,26 +195,25 @@ export async function validateApiKey(apiKey) {
 
 /**
  * List API keys for a company
- * @param {string} empresaId - Company ID
- * @param {number} agenteId - Optional agent ID filter
- * @returns {Promise<Array>} List of API keys
  */
 export async function listApiKeys(empresaId, agenteId = null) {
   try {
     let query = `
       SELECT
         ak.id,
-        ak.nome,
+        ak.nome_exibicao as nome,
         ak.agente_id,
+        ak.provedor,
+        ak.status,
+        ak.prioridade,
+        ak.ultimo_uso,
+        ak.criado_em,
+        ak.atualizado_em,
         a.nome as agente_nome,
-        ak.created_at,
-        ak.last_used_at,
-        ak.expires_at,
-        ak.is_active,
         u.nome as created_by_nome
       FROM api_keys ak
-      INNER JOIN agentes a ON ak.agente_id = a.id
-      LEFT JOIN usuarios u ON ak.created_by = u.id
+      LEFT JOIN agentes a ON ak.agente_id = a.id
+      LEFT JOIN usuarios u ON ak.criado_por = u.id
       WHERE ak.empresa_id = $1
     `;
 
@@ -253,22 +224,22 @@ export async function listApiKeys(empresaId, agenteId = null) {
       params.push(agenteId);
     }
 
-    query += ' ORDER BY ak.created_at DESC';
+    query += ' ORDER BY ak.criado_em DESC';
 
-    const result = await tenantQuery(pool, empresaId, query, params);
+    const result = await pool.query(query, params);
 
     return result.rows.map(key => ({
       id: key.id,
       nome: key.nome,
-      agente: {
+      provedor: key.provedor,
+      agente: key.agente_id ? {
         id: key.agente_id,
         nome: key.agente_nome
-      },
-      created_at: key.created_at,
+      } : null,
+      created_at: key.criado_em,
       created_by: key.created_by_nome,
-      last_used_at: key.last_used_at,
-      expires_at: key.expires_at,
-      is_active: key.is_active
+      last_used_at: key.ultimo_uso,
+      is_active: key.status === 'ativo'
     }));
 
   } catch (error) {
@@ -283,30 +254,22 @@ export async function listApiKeys(empresaId, agenteId = null) {
 
 /**
  * Revoke an API key
- * @param {string} empresaId - Company ID
- * @param {string} keyId - API key ID
- * @param {number} revokedBy - User ID who revoked the key
- * @returns {Promise<boolean>} True if revoked
  */
 export async function revokeApiKey(empresaId, keyId, revokedBy) {
   try {
     const query = `
       UPDATE api_keys
       SET
-        is_active = false,
-        revoked_at = CURRENT_TIMESTAMP,
-        revoked_by = $3
-      WHERE empresa_id = $1 AND id = $2 AND is_active = true
+        status = 'revogado',
+        atualizado_em = CURRENT_TIMESTAMP
+      WHERE empresa_id = $1 AND id = $2 AND status = 'ativo'
     `;
 
-    const result = await tenantQuery(pool, empresaId, query, [empresaId, keyId, revokedBy]);
+    const result = await pool.query(query, [empresaId, keyId]);
 
     if (result.rowCount === 0) {
       return false;
     }
-
-    // Clear from cache
-    // Note: We can't clear by API key value, but the cache will expire
 
     createLogger.info('API key revoked', {
       empresa_id: empresaId,
@@ -328,11 +291,6 @@ export async function revokeApiKey(empresaId, keyId, revokedBy) {
 
 /**
  * Rotate an API key (create new, revoke old)
- * @param {string} empresaId - Company ID
- * @param {string} oldKeyId - Current API key ID
- * @param {string} geminiApiKey - New Gemini API key
- * @param {number} rotatedBy - User ID who rotated the key
- * @returns {Promise<Object>} New API key details
  */
 export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy) {
   const client = await pool.connect();
@@ -342,17 +300,12 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
 
     // Get current key details
     const currentQuery = `
-      SELECT agente_id, nome
+      SELECT agente_id, nome_exibicao as nome
       FROM api_keys
-      WHERE empresa_id = $1 AND id = $2 AND is_active = true
+      WHERE empresa_id = $1 AND id = $2 AND status = 'ativo'
     `;
 
-    const currentResult = await tenantQuery(
-      client,
-      empresaId,
-      currentQuery,
-      [empresaId, oldKeyId]
-    );
+    const currentResult = await client.query(currentQuery, [empresaId, oldKeyId]);
 
     if (currentResult.rows.length === 0) {
       throw new Error('API key not found or already revoked');
@@ -398,10 +351,6 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
 
 /**
  * Update Gemini API key for an existing key
- * @param {string} empresaId - Company ID
- * @param {string} keyId - API key ID
- * @param {string} newGeminiKey - New Gemini API key
- * @returns {Promise<boolean>} True if updated
  */
 export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
   try {
@@ -409,22 +358,15 @@ export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
 
     const query = `
       UPDATE api_keys
-      SET gemini_key_encrypted = $3
-      WHERE empresa_id = $1 AND id = $2 AND is_active = true
+      SET api_key_encrypted = $3, atualizado_em = CURRENT_TIMESTAMP
+      WHERE empresa_id = $1 AND id = $2 AND status = 'ativo'
     `;
 
-    const result = await tenantQuery(
-      pool,
-      empresaId,
-      query,
-      [empresaId, keyId, encryptedKey]
-    );
+    const result = await pool.query(query, [empresaId, keyId, encryptedKey]);
 
     if (result.rowCount === 0) {
       return false;
     }
-
-    // Clear cache for this key (we don't have the actual key, but cache will expire)
 
     createLogger.info('Gemini key updated', {
       empresa_id: empresaId,
@@ -444,23 +386,22 @@ export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
 }
 
 /**
- * Clean up expired keys
- * @returns {Promise<number>} Number of keys cleaned
+ * Clean up expired/errored keys
  */
 export async function cleanupExpiredKeys() {
   try {
     const query = `
       UPDATE api_keys
-      SET is_active = false
-      WHERE expires_at < CURRENT_TIMESTAMP
-        AND is_active = true
+      SET status = 'inativo'
+      WHERE tentativas_erro >= 10
+        AND status = 'ativo'
       RETURNING id
     `;
 
     const result = await pool.query(query);
 
     if (result.rowCount > 0) {
-      createLogger.info('Expired keys cleaned up', {
+      createLogger.info('Problem keys cleaned up', {
         count: result.rowCount,
         key_ids: result.rows.map(r => r.id)
       });
@@ -469,7 +410,7 @@ export async function cleanupExpiredKeys() {
     return result.rowCount;
 
   } catch (error) {
-    createLogger.error('Failed to cleanup expired keys', {
+    createLogger.error('Failed to cleanup keys', {
       error: error.message
     });
     return 0;
@@ -478,30 +419,28 @@ export async function cleanupExpiredKeys() {
 
 /**
  * Get API key statistics for a company
- * @param {string} empresaId - Company ID
- * @returns {Promise<Object>} Statistics
  */
 export async function getApiKeyStats(empresaId) {
   try {
     const query = `
       SELECT
-        COUNT(*) FILTER (WHERE is_active = true) as active_count,
-        COUNT(*) FILTER (WHERE is_active = false) as revoked_count,
-        COUNT(*) FILTER (WHERE last_used_at > CURRENT_TIMESTAMP - INTERVAL '24 hours') as used_today,
-        COUNT(*) FILTER (WHERE expires_at < CURRENT_TIMESTAMP AND is_active = true) as expired_count,
-        MAX(created_at) as last_created_at,
-        MAX(last_used_at) as last_used_at
+        COUNT(*) FILTER (WHERE status = 'ativo') as active_count,
+        COUNT(*) FILTER (WHERE status != 'ativo') as revoked_count,
+        COUNT(*) FILTER (WHERE ultimo_uso > CURRENT_TIMESTAMP - INTERVAL '24 hours') as used_today,
+        COUNT(*) FILTER (WHERE tentativas_erro > 0) as error_count,
+        MAX(criado_em) as last_created_at,
+        MAX(ultimo_uso) as last_used_at
       FROM api_keys
       WHERE empresa_id = $1
     `;
 
-    const result = await tenantQuery(pool, empresaId, query, [empresaId]);
+    const result = await pool.query(query, [empresaId]);
 
     return {
       active_keys: parseInt(result.rows[0].active_count) || 0,
       revoked_keys: parseInt(result.rows[0].revoked_count) || 0,
       used_today: parseInt(result.rows[0].used_today) || 0,
-      expired_keys: parseInt(result.rows[0].expired_count) || 0,
+      error_keys: parseInt(result.rows[0].error_count) || 0,
       last_created: result.rows[0].last_created_at,
       last_used: result.rows[0].last_used_at
     };

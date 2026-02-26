@@ -332,12 +332,12 @@ const empresasRoutes = async (fastify) => {
       values.push(empresa_id);
       const query = `
         UPDATE empresas
-        SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP
+        SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
         WHERE id = $${index}
-        RETURNING id, nome, email, telefone, documento, endereco, config_json, updated_at
+        RETURNING id, nome, telefone, atualizado_em
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, values);
+      const result = await pool.query(query, values);
 
       createLogger.info('Company updated', {
         empresa_id,
@@ -385,45 +385,42 @@ const empresasRoutes = async (fastify) => {
         SELECT
           -- User stats
           (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1) as total_usuarios,
-          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND is_active = true) as usuarios_ativos,
+          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as usuarios_ativos,
 
           -- Agent stats
           (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1) as total_agentes,
-          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND is_active = true) as agentes_ativos,
+          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
 
           -- Tool stats
-          (SELECT COUNT(DISTINCT t.id)
-           FROM tools t
-           INNER JOIN agent_tools at ON t.id = at.tool_id
-           WHERE at.empresa_id = $1) as total_tools,
+          (SELECT COUNT(*) FROM tools WHERE empresa_id = $1 OR is_global = true) as total_tools,
 
           -- API Key stats
-          (SELECT COUNT(*) FROM api_keys WHERE empresa_id = $1 AND is_active = true) as api_keys_ativas,
+          (SELECT COUNT(*) FROM api_keys WHERE empresa_id = $1 AND status = 'ativo') as api_keys_ativas,
 
           -- Conversation stats (current period)
           (SELECT COUNT(DISTINCT conversation_id)
            FROM conversacao_analytics
            WHERE empresa_id = $1
-             AND created_at >= (SELECT start_date FROM date_range)
-             AND created_at <= (SELECT end_date FROM date_range)) as conversas_periodo,
+             AND criado_em >= (SELECT start_date FROM date_range)
+             AND criado_em <= (SELECT end_date FROM date_range)) as conversas_periodo,
 
           (SELECT COUNT(*)
            FROM conversacao_analytics
            WHERE empresa_id = $1
-             AND created_at >= (SELECT start_date FROM date_range)
-             AND created_at <= (SELECT end_date FROM date_range)) as mensagens_periodo,
+             AND criado_em >= (SELECT start_date FROM date_range)
+             AND criado_em <= (SELECT end_date FROM date_range)) as mensagens_periodo,
 
           (SELECT COALESCE(SUM(tokens_input + tokens_output), 0)
            FROM conversacao_analytics
            WHERE empresa_id = $1
-             AND created_at >= (SELECT start_date FROM date_range)
-             AND created_at <= (SELECT end_date FROM date_range)) as tokens_periodo,
+             AND criado_em >= (SELECT start_date FROM date_range)
+             AND criado_em <= (SELECT end_date FROM date_range)) as tokens_periodo,
 
           (SELECT COALESCE(AVG(tempo_processamento_ms), 0)
            FROM conversacao_analytics
            WHERE empresa_id = $1
-             AND created_at >= (SELECT start_date FROM date_range)
-             AND created_at <= (SELECT end_date FROM date_range)) as tempo_medio_ms,
+             AND criado_em >= (SELECT start_date FROM date_range)
+             AND criado_em <= (SELECT end_date FROM date_range)) as tempo_medio_ms,
 
           -- Success rate
           (SELECT
@@ -433,15 +430,15 @@ const empresasRoutes = async (fastify) => {
             END
            FROM conversacao_analytics
            WHERE empresa_id = $1
-             AND created_at >= (SELECT start_date FROM date_range)
-             AND created_at <= (SELECT end_date FROM date_range)) as taxa_sucesso,
+             AND criado_em >= (SELECT start_date FROM date_range)
+             AND criado_em <= (SELECT end_date FROM date_range)) as taxa_sucesso,
 
           -- Period dates
           (SELECT start_date FROM date_range) as periodo_inicio,
           (SELECT end_date FROM date_range) as periodo_fim
       `;
 
-      const result = await tenantQuery(pool, empresa_id, statsQuery, [empresa_id]);
+      const result = await pool.query(statsQuery, [empresa_id]);
       const stats = result.rows[0];
 
       return {
@@ -507,34 +504,26 @@ const empresasRoutes = async (fastify) => {
       await client.query('BEGIN');
 
       // Deactivate company
-      await tenantQuery(
-        client,
-        empresa_id,
-        'UPDATE empresas SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+      await client.query(
+        'UPDATE empresas SET ativo = false, atualizado_em = CURRENT_TIMESTAMP WHERE id = $1',
         [empresa_id]
       );
 
       // Deactivate all users
-      await tenantQuery(
-        client,
-        empresa_id,
-        'UPDATE usuarios SET is_active = false WHERE empresa_id = $1',
+      await client.query(
+        'UPDATE usuarios SET ativo = false WHERE empresa_id = $1',
         [empresa_id]
       );
 
       // Deactivate all agents
-      await tenantQuery(
-        client,
-        empresa_id,
-        'UPDATE agentes SET is_active = false WHERE empresa_id = $1',
+      await client.query(
+        'UPDATE agentes SET ativo = false WHERE empresa_id = $1',
         [empresa_id]
       );
 
       // Revoke all API keys
-      await tenantQuery(
-        client,
-        empresa_id,
-        'UPDATE api_keys SET is_active = false, revoked_at = CURRENT_TIMESTAMP WHERE empresa_id = $1',
+      await client.query(
+        'UPDATE api_keys SET status = \'revogado\', atualizado_em = CURRENT_TIMESTAMP WHERE empresa_id = $1',
         [empresa_id]
       );
 

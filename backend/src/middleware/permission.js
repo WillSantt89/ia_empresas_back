@@ -259,9 +259,9 @@ export function canAccessUser(request, targetUserId) {
 }
 
 /**
- * Alias for requirePermission to maintain backward compatibility
- * @param {string} resource - Resource name
- * @param {string} action - Action name
+ * Role-based permission check (takes array of allowed roles)
+ * Used in routes like: checkPermission(['master', 'admin'])
+ * @param {string[]} allowedRoles - Array of allowed roles
  * @returns {Function} Middleware function
  */
-export const checkPermission = requirePermission;
+export const checkPermission = requireRole;

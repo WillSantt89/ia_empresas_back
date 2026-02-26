@@ -65,13 +65,13 @@ const agentesRoutes = async (fastify) => {
           a.atualizado_em,
           (
             SELECT COUNT(*)
-            FROM agent_tools at
-            WHERE at.agente_id = a.id AND at.empresa_id = $1
+            FROM agente_tools at2
+            WHERE at2.agente_id = a.id
           ) as tool_count,
           (
             SELECT COUNT(*)
             FROM api_keys ak
-            WHERE ak.agente_id = a.id AND ak.empresa_id = $1 AND ak.ativo = true
+            WHERE ak.agente_id = a.id AND ak.empresa_id = $1 AND ak.status = 'ativo'
           ) as active_keys,
           (
             SELECT json_build_object(
@@ -297,19 +297,19 @@ const agentesRoutes = async (fastify) => {
               'id', t.id,
               'nome', t.nome,
               'descricao', t.descricao,
-              'prioridade', at.prioridade
-            ) ORDER BY at.prioridade)
+              'prioridade', at2.ordem_prioridade
+            ) ORDER BY at2.ordem_prioridade)
             FROM tools t
-            INNER JOIN agent_tools at ON t.id = at.tool_id
-            WHERE at.agente_id = a.id AND at.empresa_id = $1
+            INNER JOIN agente_tools at2 ON t.id = at2.tool_id
+            WHERE at2.agente_id = a.id
           ) as tools,
           (
             SELECT json_agg(json_build_object(
               'id', ak.id,
-              'nome', ak.nome,
+              'nome', ak.nome_exibicao,
               'criado_em', ak.criado_em,
-              'last_used_at', ak.last_used_at,
-              'ativo', ak.ativo
+              'ultimo_uso', ak.ultimo_uso,
+              'status', ak.status
             ))
             FROM api_keys ak
             WHERE ak.agente_id = a.id AND ak.empresa_id = $1
@@ -497,7 +497,7 @@ const agentesRoutes = async (fastify) => {
 
       // Revoke all API keys for this agent
       await client.query(`UPDATE api_keys
-         SET ativo = false, revoked_at = CURRENT_TIMESTAMP
+         SET status = 'revogado', atualizado_em = CURRENT_TIMESTAMP
          WHERE empresa_id = $1 AND agente_id = $2`,
         [empresa_id, id]
       );
@@ -581,8 +581,8 @@ const agentesRoutes = async (fastify) => {
       }
 
       // Remove existing tools
-      await client.query('DELETE FROM agent_tools WHERE empresa_id = $1 AND agente_id = $2',
-        [empresa_id, id]
+      await client.query('DELETE FROM agente_tools WHERE agente_id = $1',
+        [id]
       );
 
       // Add new tools
@@ -591,13 +591,13 @@ const agentesRoutes = async (fastify) => {
         const placeholders = [];
 
         tool_ids.forEach((toolId, index) => {
-          const baseIndex = index * 4;
-          placeholders.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4})`);
-          values.push(empresa_id, id, toolId, index + 1);
+          const baseIndex = index * 3;
+          placeholders.push(`($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3})`);
+          values.push(id, toolId, index + 1);
         });
 
         const insertQuery = `
-          INSERT INTO agent_tools (empresa_id, agente_id, tool_id, prioridade)
+          INSERT INTO agente_tools (agente_id, tool_id, ordem_prioridade)
           VALUES ${placeholders.join(', ')}
         `;
 
@@ -612,14 +612,14 @@ const agentesRoutes = async (fastify) => {
           t.id,
           t.nome,
           t.descricao,
-          at.prioridade
+          at2.ordem_prioridade as prioridade
         FROM tools t
-        INNER JOIN agent_tools at ON t.id = at.tool_id
-        WHERE at.empresa_id = $1 AND at.agente_id = $2
-        ORDER BY at.prioridade
+        INNER JOIN agente_tools at2 ON t.id = at2.tool_id
+        WHERE at2.agente_id = $1
+        ORDER BY at2.ordem_prioridade
       `;
 
-      const toolsResult = await pool.query(toolsQuery, [empresa_id, id]);
+      const toolsResult = await pool.query(toolsQuery, [id]);
 
       createLogger.info('Agent tools updated', {
         empresa_id,
@@ -683,10 +683,10 @@ const agentesRoutes = async (fastify) => {
           a.prompt_ativo,
           a.temperatura,
           a.max_tokens,
-          ak.gemini_key_encrypted
+          ak.api_key_encrypted as gemini_key_encrypted
         FROM agentes a
         LEFT JOIN api_keys ak ON ak.agente_id = a.id
-          AND ak.empresa_id = $1 AND ak.ativo = true
+          AND ak.empresa_id = $1 AND ak.status = 'ativo'
         WHERE a.empresa_id = $1 AND a.id = $2 AND a.ativo = true
         LIMIT 1
       `;

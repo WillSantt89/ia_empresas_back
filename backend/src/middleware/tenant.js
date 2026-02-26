@@ -43,8 +43,8 @@ export async function tenantMiddleware(request, reply) {
           empresa_id: empresaIdHeader
         });
       } else {
-        // Master in global context
-        request.empresaId = null;
+        // Master in global context - use their own empresa_id if they have one
+        request.empresaId = user.empresa_id || null;
         request.isMaster = true;
         request.isImpersonating = false;
       }
