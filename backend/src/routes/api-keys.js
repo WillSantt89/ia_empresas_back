@@ -5,6 +5,7 @@ import {
   revokeApiKey,
   rotateApiKey,
   updateGeminiKey,
+  updateApiKeyInfo,
   getApiKeyStats
 } from '../services/api-key-manager.js';
 import { checkPermission } from '../middleware/permission.js';
@@ -102,6 +103,64 @@ const apiKeysRoutes = async (fastify) => {
       createLogger.error('Failed to create API key', {
         empresa_id,
         agente_id,
+        error: error.message
+      });
+      throw error;
+    }
+  });
+
+  /**
+   * PUT /api/api-keys/:id
+   * Update API key info (name, priority, gemini key)
+   */
+  fastify.put('/:id', {
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      },
+      body: {
+        type: 'object',
+        properties: {
+          nome: { type: 'string', minLength: 2, maxLength: 100 },
+          prioridade: { type: 'integer', minimum: 1, maximum: 100 },
+          gemini_api_key: { type: 'string', minLength: 20 },
+          status: { type: 'string', enum: ['ativo', 'inativo'] }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id } = request.user;
+    const { id } = request.params;
+    const updates = request.body;
+
+    try {
+      const updated = await updateApiKeyInfo(empresa_id, id, updates);
+
+      if (!updated) {
+        return reply.code(404).send({
+          success: false,
+          error: {
+            code: 'KEY_NOT_FOUND',
+            message: 'API key not found'
+          }
+        });
+      }
+
+      return {
+        success: true,
+        data: {
+          key: updated
+        }
+      };
+
+    } catch (error) {
+      createLogger.error('Failed to update API key', {
+        empresa_id,
+        key_id: id,
         error: error.message
       });
       throw error;

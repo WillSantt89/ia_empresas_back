@@ -1,9 +1,10 @@
 import { logger } from '../config/logger.js';
-import { validateApiKey } from '../services/api-key-manager.js';
+import { validateApiKey, getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../services/tool-runner.js';
 import { sendMessage as sendToChatwoot, sendTypingIndicator } from '../services/chatwoot.js';
+import { decrypt } from '../config/encryption.js';
 import { pool, tenantQuery } from '../config/database.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
 
@@ -92,7 +93,9 @@ const chatRoutes = async (fastify) => {
 
     try {
 
-      // Check if this is an internal webhook call
+      // Resolve agent data and available API keys
+      let availableKeys = [];
+
       if (apiKey === 'internal-webhook-call' &&
           request.headers['x-empresa-id'] &&
           request.headers['x-agente-id']) {
@@ -108,10 +111,8 @@ const chatRoutes = async (fastify) => {
             a.modelo,
             a.temperatura,
             a.max_tokens,
-            a.prompt_ativo,
-            ak.gemini_key_encrypted
+            a.prompt_ativo
           FROM agentes a
-          LEFT JOIN api_keys ak ON ak.agente_id = a.id AND ak.status = 'ativo'
           WHERE a.id = $1 AND a.empresa_id = $2
             AND a.ativo = true
           LIMIT 1
@@ -130,13 +131,25 @@ const chatRoutes = async (fastify) => {
         }
 
         const agent = agentResult.rows[0];
-        const { decrypt } = await import('../utils/encryption.js');
+
+        // Get all active keys for failover
+        availableKeys = await getActiveKeysForAgent(empresaId, agenteId);
+
+        if (availableKeys.length === 0) {
+          return reply.code(400).send({
+            success: false,
+            error: {
+              code: 'NO_API_KEYS',
+              message: 'No active API keys configured for this agent'
+            }
+          });
+        }
 
         keyData = {
           empresa_id: empresaId,
           agente_id: agent.agente_id,
           agente_nome: agent.agente_nome,
-          gemini_api_key: decrypt(agent.gemini_key_encrypted),
+          gemini_api_key: availableKeys[0].gemini_api_key,
           modelo: agent.modelo,
           temperatura: agent.temperatura,
           max_tokens: agent.max_tokens,
@@ -154,6 +167,14 @@ const chatRoutes = async (fastify) => {
               message: 'Invalid or expired API key'
             }
           });
+        }
+
+        // Also load all keys for failover
+        if (keyData.agente_id) {
+          availableKeys = await getActiveKeysForAgent(keyData.empresa_id, keyData.agente_id);
+        }
+        if (availableKeys.length === 0) {
+          availableKeys = [{ id: null, gemini_api_key: keyData.gemini_api_key }];
         }
       }
 
@@ -294,20 +315,75 @@ const chatRoutes = async (fastify) => {
         return transformResultForLLM(result, 2000); // Limit result size
       };
 
-      // Process message with Gemini
-      const result = await processMessageWithTools(
-        {
-          apiKey: gemini_api_key,
-          model: modelo,
-          systemPrompt: prompt_ativo,
-          tools: toolDeclarations,
-          history: formatHistoryForGemini(history),
-          message,
-          temperature: temperatura,
-          maxTokens: max_tokens
-        },
-        toolExecutor
-      );
+      // Process message with Gemini (with failover across API keys)
+      let result = null;
+      let usedKeyId = availableKeys[0]?.id;
+
+      for (let keyIndex = 0; keyIndex < availableKeys.length; keyIndex++) {
+        const currentKey = availableKeys[keyIndex];
+        usedKeyId = currentKey.id;
+
+        try {
+          result = await processMessageWithTools(
+            {
+              apiKey: currentKey.gemini_api_key,
+              model: modelo,
+              systemPrompt: prompt_ativo,
+              tools: toolDeclarations,
+              history: formatHistoryForGemini(history),
+              message,
+              temperature: temperatura,
+              maxTokens: max_tokens
+            },
+            toolExecutor
+          );
+
+          // Success - record it and break
+          if (currentKey.id) {
+            recordKeySuccess(currentKey.id).catch(() => {});
+          }
+
+          if (keyIndex > 0) {
+            createLogger.info('Failover successful', {
+              empresa_id,
+              agente_id,
+              failed_keys: keyIndex,
+              successful_key_index: keyIndex
+            });
+          }
+
+          break; // Success, exit loop
+
+        } catch (error) {
+          const isRetryable = error.code === 'RATE_LIMITED' || error.code === 'INVALID_KEY' || error.code === 'API_ERROR';
+
+          // Record error on this key
+          if (currentKey.id) {
+            recordKeyError(currentKey.id, error.message || error.code || 'Unknown error').catch(() => {});
+          }
+
+          createLogger.warn('API key failed, attempting failover', {
+            empresa_id,
+            agente_id,
+            key_index: keyIndex,
+            total_keys: availableKeys.length,
+            error_code: error.code,
+            error_message: error.message,
+            will_retry: isRetryable && keyIndex < availableKeys.length - 1
+          });
+
+          // If it's the last key or non-retryable error, throw
+          if (!isRetryable || keyIndex >= availableKeys.length - 1) {
+            throw error;
+          }
+
+          // Otherwise continue to next key
+        }
+      }
+
+      if (!result) {
+        throw new Error('All API keys failed');
+      }
 
       // Add assistant response to history
       await addToHistory(empresa_id, conversation_id, 'model', result.text);

@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
-import { encrypt, decrypt } from '../utils/encryption.js';
+import { encrypt, decrypt } from '../config/encryption.js';
 import { redis, setWithExpiry, getJSON } from '../config/redis.js';
 
 /**
@@ -209,6 +209,10 @@ export async function listApiKeys(empresaId, agenteId = null) {
         ak.ultimo_uso,
         ak.criado_em,
         ak.atualizado_em,
+        ak.tentativas_erro,
+        ak.ultimo_erro,
+        ak.ultimo_erro_msg,
+        ak.total_requests_hoje,
         a.nome as agente_nome,
         u.nome as created_by_nome
       FROM api_keys ak
@@ -232,6 +236,8 @@ export async function listApiKeys(empresaId, agenteId = null) {
       id: key.id,
       nome: key.nome,
       provedor: key.provedor,
+      status: key.status,
+      prioridade: key.prioridade,
       agente: key.agente_id ? {
         id: key.agente_id,
         nome: key.agente_nome
@@ -239,7 +245,11 @@ export async function listApiKeys(empresaId, agenteId = null) {
       created_at: key.criado_em,
       created_by: key.created_by_nome,
       last_used_at: key.ultimo_uso,
-      is_active: key.status === 'ativo'
+      is_active: key.status === 'ativo',
+      tentativas_erro: key.tentativas_erro || 0,
+      ultimo_erro: key.ultimo_erro,
+      ultimo_erro_msg: key.ultimo_erro_msg,
+      total_requests_hoje: key.total_requests_hoje || 0
     }));
 
   } catch (error) {
@@ -350,6 +360,63 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
 }
 
 /**
+ * Update API key metadata (name, priority, and optionally the Gemini key)
+ */
+export async function updateApiKeyInfo(empresaId, keyId, updates) {
+  try {
+    const setClauses = ['atualizado_em = CURRENT_TIMESTAMP'];
+    const params = [empresaId, keyId];
+    let paramIdx = 3;
+
+    if (updates.nome !== undefined) {
+      setClauses.push(`nome_exibicao = $${paramIdx++}`);
+      params.push(updates.nome);
+    }
+    if (updates.prioridade !== undefined) {
+      setClauses.push(`prioridade = $${paramIdx++}`);
+      params.push(updates.prioridade);
+    }
+    if (updates.gemini_api_key) {
+      setClauses.push(`api_key_encrypted = $${paramIdx++}`);
+      params.push(encrypt(updates.gemini_api_key));
+    }
+    if (updates.status !== undefined) {
+      setClauses.push(`status = $${paramIdx++}`);
+      params.push(updates.status);
+    }
+
+    const query = `
+      UPDATE api_keys
+      SET ${setClauses.join(', ')}
+      WHERE empresa_id = $1 AND id = $2
+      RETURNING id, nome_exibicao as nome, prioridade, status, atualizado_em
+    `;
+
+    const result = await pool.query(query, params);
+
+    if (result.rowCount === 0) {
+      return null;
+    }
+
+    createLogger.info('API key info updated', {
+      empresa_id: empresaId,
+      key_id: keyId,
+      fields: Object.keys(updates)
+    });
+
+    return result.rows[0];
+
+  } catch (error) {
+    createLogger.error('Failed to update API key info', {
+      empresa_id: empresaId,
+      key_id: keyId,
+      error: error.message
+    });
+    throw error;
+  }
+}
+
+/**
  * Update Gemini API key for an existing key
  */
 export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
@@ -382,6 +449,107 @@ export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
       error: error.message
     });
     throw error;
+  }
+}
+
+/**
+ * Get all active API keys for an agent, ordered by priority
+ * Used for failover: when one key fails, try the next
+ */
+export async function getActiveKeysForAgent(empresaId, agenteId) {
+  try {
+    const query = `
+      SELECT
+        id,
+        api_key_encrypted,
+        prioridade,
+        tentativas_erro,
+        ultimo_erro,
+        retry_apos
+      FROM api_keys
+      WHERE empresa_id = $1
+        AND agente_id = $2
+        AND status = 'ativo'
+        AND (retry_apos IS NULL OR retry_apos < CURRENT_TIMESTAMP)
+      ORDER BY prioridade ASC, tentativas_erro ASC, criado_em ASC
+    `;
+
+    const result = await pool.query(query, [empresaId, agenteId]);
+
+    return result.rows.map(row => ({
+      id: row.id,
+      gemini_api_key: decrypt(row.api_key_encrypted),
+      prioridade: row.prioridade,
+      tentativas_erro: row.tentativas_erro
+    }));
+
+  } catch (error) {
+    createLogger.error('Failed to get active keys for agent', {
+      empresa_id: empresaId,
+      agente_id: agenteId,
+      error: error.message
+    });
+    return [];
+  }
+}
+
+/**
+ * Record an error on an API key (for failover tracking)
+ */
+export async function recordKeyError(keyId, errorMessage) {
+  try {
+    // After 5 consecutive errors, set retry_apos to 30 min from now
+    const query = `
+      UPDATE api_keys
+      SET
+        tentativas_erro = tentativas_erro + 1,
+        ultimo_erro = CURRENT_TIMESTAMP,
+        ultimo_erro_msg = $2,
+        retry_apos = CASE
+          WHEN tentativas_erro + 1 >= 5 THEN CURRENT_TIMESTAMP + INTERVAL '30 minutes'
+          WHEN tentativas_erro + 1 >= 3 THEN CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+          ELSE NULL
+        END,
+        atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `;
+
+    await pool.query(query, [keyId, errorMessage]);
+
+    createLogger.warn('API key error recorded', {
+      key_id: keyId,
+      error: errorMessage
+    });
+  } catch (error) {
+    createLogger.error('Failed to record key error', {
+      key_id: keyId,
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Reset error count on successful use
+ */
+export async function recordKeySuccess(keyId) {
+  try {
+    await pool.query(`
+      UPDATE api_keys
+      SET
+        tentativas_erro = 0,
+        ultimo_erro = NULL,
+        ultimo_erro_msg = NULL,
+        retry_apos = NULL,
+        ultimo_uso = CURRENT_TIMESTAMP,
+        total_requests_hoje = total_requests_hoje + 1,
+        atualizado_em = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `, [keyId]);
+  } catch (error) {
+    createLogger.error('Failed to record key success', {
+      key_id: keyId,
+      error: error.message
+    });
   }
 }
 
