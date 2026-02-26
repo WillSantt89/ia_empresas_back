@@ -1,191 +1,125 @@
 import { logger } from '../config/logger.js';
-import { pool, tenantQuery } from '../config/database.js';
+import { pool } from '../config/database.js';
 import { hash } from '../utils/encryption.js';
-import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Empresas Routes
- * Multi-tenant company management
+ * Master (WSCHAT) manages all companies
  */
 
 const createLogger = logger.child({ module: 'empresas-routes' });
 
 const empresasRoutes = async (fastify) => {
-  // Company schema
-  const empresaSchema = {
-    type: 'object',
-    properties: {
-      nome: { type: 'string', minLength: 2, maxLength: 255 },
-      email: { type: 'string', format: 'email' },
-      telefone: { type: 'string', maxLength: 20 },
-      documento: { type: 'string', maxLength: 20 },
-      endereco: { type: 'string', maxLength: 500 },
-      config_json: { type: 'object' }
-    }
-  };
 
-  // Create company schema (public endpoint for onboarding)
-  const createEmpresaSchema = {
-    ...empresaSchema,
-    properties: {
-      ...empresaSchema.properties,
-      user: {
-        type: 'object',
-        properties: {
-          nome: { type: 'string', minLength: 2, maxLength: 255 },
-          email: { type: 'string', format: 'email' },
-          senha: { type: 'string', minLength: 8 },
-          telefone: { type: 'string' }
-        },
-        required: ['nome', 'email', 'senha']
-      }
-    },
-    required: ['nome', 'email', 'user']
+  // Helper: generate slug from name
+  const generateSlug = (nome) => {
+    return nome
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
   };
 
   /**
-   * POST /api/empresas
-   * Create a new company (public endpoint for self-service)
+   * GET /api/empresas
+   * List all companies (master only)
    */
-  fastify.post('/', {
-    schema: {
-      body: createEmpresaSchema
-    },
-    config: {
-      rateLimit: {
-        max: 5,
-        timeWindow: '15 minutes'
-      }
-    }
+  fastify.get('/', {
+    preHandler: fastify.authenticate
   }, async (request, reply) => {
-    const { nome, email, telefone, documento, endereco, config_json, user } = request.body;
-    const client = await pool.connect();
+    const { role } = request.user;
+
+    if (role !== 'master') {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Acesso restrito ao master' }
+      });
+    }
+
+    const { search, tipo, ativo, page = 1, per_page = 50 } = request.query;
+    const conditions = [];
+    const params = [];
+    let idx = 1;
+
+    if (search) {
+      conditions.push(`(e.nome ILIKE $${idx} OR e.email ILIKE $${idx} OR e.documento ILIKE $${idx})`);
+      params.push(`%${search}%`);
+      idx++;
+    }
+
+    if (tipo) {
+      conditions.push(`e.tipo = $${idx}`);
+      params.push(tipo);
+      idx++;
+    }
+
+    if (ativo !== undefined && ativo !== '') {
+      conditions.push(`e.ativo = $${idx}`);
+      params.push(ativo === 'true' || ativo === true);
+      idx++;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const offset = (parseInt(page) - 1) * parseInt(per_page);
 
     try {
-      await client.query('BEGIN');
+      const countResult = await pool.query(
+        `SELECT COUNT(*) as total FROM empresas e ${whereClause}`,
+        params
+      );
 
-      // Check if company email already exists
-      const existingQuery = 'SELECT id FROM empresas WHERE email = $1';
-      const existing = await client.query(existingQuery, [email]);
-
-      if (existing.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return reply.code(409).send({
-          success: false,
-          error: {
-            code: 'COMPANY_EXISTS',
-            message: 'Company with this email already exists'
-          }
-        });
-      }
-
-      // Check if user email already exists
-      const existingUserQuery = 'SELECT id FROM usuarios WHERE email = $1';
-      const existingUser = await client.query(existingUserQuery, [user.email]);
-
-      if (existingUser.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return reply.code(409).send({
-          success: false,
-          error: {
-            code: 'USER_EXISTS',
-            message: 'User with this email already exists'
-          }
-        });
-      }
-
-      // Create company
-      const empresaQuery = `
-        INSERT INTO empresas (
-          nome, email, telefone, documento,
-          endereco, config_json, is_active
-        ) VALUES ($1, $2, $3, $4, $5, $6, true)
-        RETURNING id, nome, email, created_at
+      const query = `
+        SELECT
+          e.id,
+          e.nome,
+          e.slug,
+          e.email,
+          e.telefone,
+          e.documento,
+          e.tipo,
+          e.plano_id,
+          e.ativo,
+          e.criado_em,
+          p.nome as plano_nome,
+          el.max_agentes,
+          el.max_usuarios,
+          el.max_mensagens_mes,
+          el.max_tokens_mes,
+          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = e.id AND ativo = true) as usuarios_ativos,
+          (SELECT COUNT(*) FROM agentes WHERE empresa_id = e.id AND ativo = true) as agentes_ativos
+        FROM empresas e
+        LEFT JOIN planos p ON e.plano_id = p.id
+        LEFT JOIN empresa_limits el ON e.id = el.empresa_id
+        ${whereClause}
+        ORDER BY e.criado_em DESC
+        LIMIT $${idx} OFFSET $${idx + 1}
       `;
 
-      const empresaResult = await client.query(empresaQuery, [
-        nome, email, telefone, documento, endereco, config_json || {}
-      ]);
-
-      const empresa = empresaResult.rows[0];
-
-      // Hash user password
-      const hashedPassword = await hash(user.senha);
-
-      // Create master user
-      const userQuery = `
-        INSERT INTO usuarios (
-          empresa_id, nome, email, senha_hash,
-          telefone, role, is_active, email_verified
-        ) VALUES ($1, $2, $3, $4, $5, 'master', true, false)
-        RETURNING id, nome, email, role
-      `;
-
-      const userResult = await client.query(userQuery, [
-        empresa.id, user.nome, user.email, hashedPassword, user.telefone
-      ]);
-
-      const createdUser = userResult.rows[0];
-
-      // Create default limits
-      const limitsQuery = `
-        INSERT INTO empresa_limits (
-          empresa_id,
-          max_agentes,
-          max_usuarios,
-          max_mensagens_mes,
-          max_tokens_mes
-        ) VALUES ($1, $2, $3, $4, $5)
-      `;
-
-      await client.query(limitsQuery, [
-        empresa.id,
-        5,      // 5 agents
-        10,     // 10 users
-        10000,  // 10k messages/month
-        1000000 // 1M tokens/month
-      ]);
-
-      await client.query('COMMIT');
-
-      createLogger.info('Company created', {
-        empresa_id: empresa.id,
-        user_id: createdUser.id
-      });
+      params.push(parseInt(per_page), offset);
+      const result = await pool.query(query, params);
 
       return {
         success: true,
         data: {
-          empresa: {
-            id: empresa.id,
-            nome: empresa.nome,
-            email: empresa.email,
-            created_at: empresa.created_at
-          },
-          user: {
-            id: createdUser.id,
-            nome: createdUser.nome,
-            email: createdUser.email,
-            role: createdUser.role
-          },
-          message: 'Company created successfully. Please check your email to verify your account.'
+          empresas: result.rows,
+          pagination: {
+            total: parseInt(countResult.rows[0].total),
+            page: parseInt(page),
+            per_page: parseInt(per_page),
+            pages: Math.ceil(parseInt(countResult.rows[0].total) / parseInt(per_page))
+          }
         }
       };
-
     } catch (error) {
-      await client.query('ROLLBACK');
-      createLogger.error('Failed to create company', {
-        error: error.message
-      });
+      createLogger.error('Failed to list empresas', { error: error.message });
       throw error;
-    } finally {
-      client.release();
     }
   });
 
   /**
    * GET /api/empresas/me
-   * Get current company details
+   * Get current company details (any authenticated user)
    */
   fastify.get('/me', {
     preHandler: fastify.authenticate
@@ -195,51 +129,33 @@ const empresasRoutes = async (fastify) => {
     try {
       const result = await pool.query(`
         SELECT
-          e.id,
-          e.nome,
-          e.slug,
-          e.logo_url,
-          e.ativo,
-          e.criado_em,
-          e.atualizado_em,
-          el.max_agentes,
-          el.max_usuarios,
-          el.max_mensagens_mes,
-          el.max_tokens_mes,
-          el.periodo_inicio,
-          el.periodo_fim
+          e.id, e.nome, e.slug, e.email, e.telefone, e.documento,
+          e.endereco, e.logo_url, e.tipo, e.plano_id, e.ativo,
+          e.criado_em, e.atualizado_em,
+          el.max_agentes, el.max_usuarios, el.max_mensagens_mes,
+          el.max_tokens_mes, el.periodo_inicio, el.periodo_fim,
+          p.nome as plano_nome
         FROM empresas e
         LEFT JOIN empresa_limits el ON e.id = el.empresa_id
+        LEFT JOIN planos p ON e.plano_id = p.id
         WHERE e.id = $1
       `, [empresa_id]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
           success: false,
-          error: {
-            code: 'COMPANY_NOT_FOUND',
-            message: 'Company not found'
-          }
+          error: { code: 'COMPANY_NOT_FOUND', message: 'Empresa não encontrada' }
         });
       }
 
       const empresa = result.rows[0];
 
-      // Get usage statistics
       const usageResult = await pool.query(`
         SELECT
           (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as usuarios_ativos,
           (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
-          (
-            SELECT COALESCE(SUM(tokens_input + tokens_output), 0)
-            FROM conversacao_analytics
-            WHERE empresa_id = $1
-          ) as tokens_usados,
-          (
-            SELECT COUNT(*)
-            FROM conversacao_analytics
-            WHERE empresa_id = $1
-          ) as mensagens_processadas
+          (SELECT COALESCE(SUM(tokens_input + tokens_output), 0) FROM conversacao_analytics WHERE empresa_id = $1) as tokens_usados,
+          (SELECT COUNT(*) FROM conversacao_analytics WHERE empresa_id = $1) as mensagens_processadas
       `, [empresa_id]);
 
       const usage = usageResult.rows[0];
@@ -251,7 +167,13 @@ const empresasRoutes = async (fastify) => {
             id: empresa.id,
             nome: empresa.nome,
             slug: empresa.slug,
+            email: empresa.email,
+            telefone: empresa.telefone,
+            documento: empresa.documento,
+            endereco: empresa.endereco,
             logo_url: empresa.logo_url,
+            tipo: empresa.tipo,
+            plano_nome: empresa.plano_nome,
             is_active: empresa.ativo,
             created_at: empresa.criado_em,
             updated_at: empresa.atualizado_em
@@ -272,90 +194,378 @@ const empresasRoutes = async (fastify) => {
           }
         }
       };
-
     } catch (error) {
-      createLogger.error('Failed to get company', {
-        empresa_id,
-        error: error.message
-      });
+      createLogger.error('Failed to get company', { empresa_id, error: error.message });
       throw error;
     }
   });
 
   /**
-   * PUT /api/empresas/me
-   * Update current company
+   * GET /api/empresas/:id
+   * Get company details by ID (master only)
    */
-  fastify.put('/me', {
-    preHandler: [fastify.authenticate],
-    schema: {
-      body: empresaSchema
-    }
+  fastify.get('/:id', {
+    preHandler: fastify.authenticate
   }, async (request, reply) => {
-    const { empresa_id, role } = request.user;
-    const updates = request.body;
+    const { role } = request.user;
+    const { id } = request.params;
 
-    // Only master users can update company
     if (role !== 'master') {
       return reply.code(403).send({
         success: false,
-        error: {
-          code: 'FORBIDDEN',
-          message: 'Only master users can update company details'
-        }
+        error: { code: 'FORBIDDEN', message: 'Acesso restrito ao master' }
       });
     }
 
     try {
-      const fields = [];
-      const values = [];
-      let index = 1;
+      const result = await pool.query(`
+        SELECT
+          e.*,
+          el.max_agentes, el.max_usuarios, el.max_mensagens_mes,
+          el.max_tokens_mes, el.periodo_inicio, el.periodo_fim,
+          p.nome as plano_nome, p.preco_base_mensal
+        FROM empresas e
+        LEFT JOIN empresa_limits el ON e.id = el.empresa_id
+        LEFT JOIN planos p ON e.plano_id = p.id
+        WHERE e.id = $1
+      `, [id]);
 
-      // Build dynamic update query
-      Object.entries(updates).forEach(([key, value]) => {
-        if (value !== undefined && key !== 'id') {
-          fields.push(`${key} = $${index}`);
-          values.push(value);
-          index++;
-        }
-      });
-
-      if (fields.length === 0) {
-        return {
-          success: true,
-          data: {
-            message: 'No fields to update'
-          }
-        };
+      if (result.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'Empresa não encontrada' }
+        });
       }
 
-      values.push(empresa_id);
-      const query = `
-        UPDATE empresas
-        SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
-        WHERE id = $${index}
-        RETURNING id, nome, telefone, atualizado_em
-      `;
+      const empresa = result.rows[0];
 
-      const result = await pool.query(query, values);
+      // Get users of this company
+      const usersResult = await pool.query(`
+        SELECT id, nome, email, role, ativo, criado_em, ultimo_login
+        FROM usuarios WHERE empresa_id = $1
+        ORDER BY criado_em ASC
+      `, [id]);
 
-      createLogger.info('Company updated', {
-        empresa_id,
-        updated_fields: Object.keys(updates)
+      // Get usage stats
+      const usageResult = await pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as usuarios_ativos,
+          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
+          (SELECT COALESCE(SUM(tokens_input + tokens_output), 0) FROM conversacao_analytics WHERE empresa_id = $1) as tokens_usados,
+          (SELECT COUNT(*) FROM conversacao_analytics WHERE empresa_id = $1) as mensagens_processadas
+      `, [id]);
+
+      const usage = usageResult.rows[0];
+
+      return {
+        success: true,
+        data: {
+          empresa,
+          usuarios: usersResult.rows,
+          limits: {
+            max_agentes: empresa.max_agentes || 5,
+            max_usuarios: empresa.max_usuarios || 10,
+            max_mensagens_mes: empresa.max_mensagens_mes || 10000,
+            max_tokens_mes: empresa.max_tokens_mes || 5000000
+          },
+          usage: {
+            usuarios_ativos: parseInt(usage.usuarios_ativos) || 0,
+            agentes_ativos: parseInt(usage.agentes_ativos) || 0,
+            tokens_usados: parseInt(usage.tokens_usados) || 0,
+            mensagens_processadas: parseInt(usage.mensagens_processadas) || 0
+          }
+        }
+      };
+    } catch (error) {
+      createLogger.error('Failed to get empresa', { id, error: error.message });
+      throw error;
+    }
+  });
+
+  /**
+   * POST /api/empresas
+   * Create a new company (master only - WSCHAT creates companies)
+   */
+  fastify.post('/', {
+    preHandler: fastify.authenticate
+  }, async (request, reply) => {
+    const { role } = request.user;
+
+    if (role !== 'master') {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Apenas master pode criar empresas' }
+      });
+    }
+
+    const { nome, email, telefone, documento, endereco, tipo, user, limits } = request.body;
+
+    if (!nome || !user?.nome || !user?.email || !user?.senha) {
+      return reply.code(400).send({
+        success: false,
+        error: { code: 'VALIDATION_ERROR', message: 'Nome da empresa, nome/email/senha do usuário são obrigatórios' }
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Check duplicates
+      const existingEmpresa = await client.query('SELECT id FROM empresas WHERE email = $1', [email]);
+      if (email && existingEmpresa.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({
+          success: false,
+          error: { code: 'COMPANY_EXISTS', message: 'Já existe uma empresa com este email' }
+        });
+      }
+
+      const existingUser = await client.query('SELECT id FROM usuarios WHERE email = $1', [user.email]);
+      if (existingUser.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({
+          success: false,
+          error: { code: 'USER_EXISTS', message: 'Já existe um usuário com este email' }
+        });
+      }
+
+      // Generate unique slug
+      let slug = generateSlug(nome);
+      const slugCheck = await client.query('SELECT id FROM empresas WHERE slug = $1', [slug]);
+      if (slugCheck.rows.length > 0) {
+        slug = `${slug}-${Date.now().toString(36)}`;
+      }
+
+      // Determine user role: parceiro gets 'master', cliente gets 'admin'
+      const empresaTipo = tipo || 'cliente';
+      const userRole = empresaTipo === 'parceiro' ? 'master' : 'admin';
+
+      // Create company
+      const empresaResult = await client.query(`
+        INSERT INTO empresas (nome, slug, email, telefone, documento, endereco, tipo, ativo)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+        RETURNING id, nome, slug, email, tipo, criado_em
+      `, [nome, slug, email, telefone, documento, endereco, empresaTipo]);
+
+      const empresa = empresaResult.rows[0];
+
+      // Hash password and create user
+      const hashedPassword = await hash(user.senha);
+      const userResult = await client.query(`
+        INSERT INTO usuarios (empresa_id, nome, email, senha_hash, telefone, role, ativo, email_verified)
+        VALUES ($1, $2, $3, $4, $5, $6, true, true)
+        RETURNING id, nome, email, role
+      `, [empresa.id, user.nome, user.email, hashedPassword, user.telefone, userRole]);
+
+      const createdUser = userResult.rows[0];
+
+      // Create limits
+      const maxAgentes = limits?.max_agentes || 5;
+      const maxUsuarios = limits?.max_usuarios || 10;
+      const maxMensagens = limits?.max_mensagens_mes || 10000;
+      const maxTokens = limits?.max_tokens_mes || 1000000;
+
+      await client.query(`
+        INSERT INTO empresa_limits (empresa_id, max_agentes, max_usuarios, max_mensagens_mes, max_tokens_mes)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [empresa.id, maxAgentes, maxUsuarios, maxMensagens, maxTokens]);
+
+      await client.query('COMMIT');
+
+      createLogger.info('Company created by master', {
+        empresa_id: empresa.id,
+        user_id: createdUser.id,
+        tipo: empresaTipo
       });
 
       return {
         success: true,
         data: {
-          empresa: result.rows[0]
+          empresa: {
+            id: empresa.id,
+            nome: empresa.nome,
+            slug: empresa.slug,
+            email: empresa.email,
+            tipo: empresa.tipo,
+            criado_em: empresa.criado_em
+          },
+          user: {
+            id: createdUser.id,
+            nome: createdUser.nome,
+            email: createdUser.email,
+            role: createdUser.role
+          },
+          limits: { max_agentes: maxAgentes, max_usuarios: maxUsuarios, max_mensagens_mes: maxMensagens, max_tokens_mes: maxTokens },
+          message: `Empresa criada com sucesso. Usuário ${createdUser.email} com acesso ${createdUser.role}.`
         }
       };
 
     } catch (error) {
-      createLogger.error('Failed to update company', {
-        empresa_id,
-        error: error.message
+      await client.query('ROLLBACK');
+      createLogger.error('Failed to create company', { error: error.message });
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  /**
+   * PUT /api/empresas/:id
+   * Update any company (master only)
+   */
+  fastify.put('/:id', {
+    preHandler: fastify.authenticate
+  }, async (request, reply) => {
+    const { role } = request.user;
+    const { id } = request.params;
+
+    if (role !== 'master') {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Acesso restrito ao master' }
       });
+    }
+
+    const { nome, email, telefone, documento, endereco, tipo, ativo, limits } = request.body;
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Build dynamic update for empresas
+      const allowedFields = { nome, email, telefone, documento, endereco, tipo, ativo };
+      const fields = [];
+      const values = [];
+      let idx = 1;
+
+      Object.entries(allowedFields).forEach(([key, value]) => {
+        if (value !== undefined) {
+          fields.push(`${key} = $${idx}`);
+          values.push(value);
+          idx++;
+        }
+      });
+
+      if (fields.length > 0) {
+        values.push(id);
+        await client.query(`
+          UPDATE empresas SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
+          WHERE id = $${idx}
+        `, values);
+      }
+
+      // Update limits if provided
+      if (limits) {
+        const limitsFields = [];
+        const limitsValues = [];
+        let lidx = 1;
+
+        const allowedLimits = {
+          max_agentes: limits.max_agentes,
+          max_usuarios: limits.max_usuarios,
+          max_mensagens_mes: limits.max_mensagens_mes,
+          max_tokens_mes: limits.max_tokens_mes
+        };
+
+        Object.entries(allowedLimits).forEach(([key, value]) => {
+          if (value !== undefined) {
+            limitsFields.push(`${key} = $${lidx}`);
+            limitsValues.push(value);
+            lidx++;
+          }
+        });
+
+        if (limitsFields.length > 0) {
+          limitsValues.push(id);
+          // Upsert limits
+          const existingLimits = await client.query('SELECT id FROM empresa_limits WHERE empresa_id = $1', [id]);
+
+          if (existingLimits.rows.length > 0) {
+            await client.query(`
+              UPDATE empresa_limits SET ${limitsFields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
+              WHERE empresa_id = $${lidx}
+            `, limitsValues);
+          } else {
+            await client.query(`
+              INSERT INTO empresa_limits (empresa_id, max_agentes, max_usuarios, max_mensagens_mes, max_tokens_mes)
+              VALUES ($1, $2, $3, $4, $5)
+            `, [id, limits.max_agentes || 5, limits.max_usuarios || 10, limits.max_mensagens_mes || 10000, limits.max_tokens_mes || 1000000]);
+          }
+        }
+      }
+
+      await client.query('COMMIT');
+
+      // Fetch updated data
+      const result = await pool.query(`
+        SELECT e.*, el.max_agentes, el.max_usuarios, el.max_mensagens_mes, el.max_tokens_mes
+        FROM empresas e
+        LEFT JOIN empresa_limits el ON e.id = el.empresa_id
+        WHERE e.id = $1
+      `, [id]);
+
+      createLogger.info('Company updated by master', { empresa_id: id });
+
+      return {
+        success: true,
+        data: { empresa: result.rows[0] }
+      };
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      createLogger.error('Failed to update empresa', { id, error: error.message });
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  /**
+   * PUT /api/empresas/me
+   * Update own company (admin+)
+   */
+  fastify.put('/me', {
+    preHandler: fastify.authenticate
+  }, async (request, reply) => {
+    const { empresa_id, role } = request.user;
+
+    if (!['master', 'admin'].includes(role)) {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Acesso restrito' }
+      });
+    }
+
+    const allowedFields = ['nome', 'telefone', 'endereco'];
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    allowedFields.forEach(key => {
+      if (request.body[key] !== undefined) {
+        fields.push(`${key} = $${idx}`);
+        values.push(request.body[key]);
+        idx++;
+      }
+    });
+
+    if (fields.length === 0) {
+      return { success: true, data: { message: 'Nada a atualizar' } };
+    }
+
+    try {
+      values.push(empresa_id);
+      const result = await pool.query(`
+        UPDATE empresas SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
+        WHERE id = $${idx}
+        RETURNING id, nome, telefone, atualizado_em
+      `, values);
+
+      return { success: true, data: { empresa: result.rows[0] } };
+    } catch (error) {
+      createLogger.error('Failed to update company', { empresa_id, error: error.message });
       throw error;
     }
   });
@@ -383,57 +593,21 @@ const empresasRoutes = async (fastify) => {
             ) as end_date
         )
         SELECT
-          -- User stats
           (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1) as total_usuarios,
           (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as usuarios_ativos,
-
-          -- Agent stats
           (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1) as total_agentes,
           (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
-
-          -- Tool stats
           (SELECT COUNT(*) FROM tools WHERE empresa_id = $1 OR is_global = true) as total_tools,
-
-          -- API Key stats
           (SELECT COUNT(*) FROM api_keys WHERE empresa_id = $1 AND status = 'ativo') as api_keys_ativas,
-
-          -- Conversation stats (current period)
-          (SELECT COUNT(DISTINCT conversation_id)
-           FROM conversacao_analytics
-           WHERE empresa_id = $1
-             AND criado_em >= (SELECT start_date FROM date_range)
+          (SELECT COUNT(DISTINCT conversation_id) FROM conversacao_analytics
+           WHERE empresa_id = $1 AND criado_em >= (SELECT start_date FROM date_range)
              AND criado_em <= (SELECT end_date FROM date_range)) as conversas_periodo,
-
-          (SELECT COUNT(*)
-           FROM conversacao_analytics
-           WHERE empresa_id = $1
-             AND criado_em >= (SELECT start_date FROM date_range)
+          (SELECT COUNT(*) FROM conversacao_analytics
+           WHERE empresa_id = $1 AND criado_em >= (SELECT start_date FROM date_range)
              AND criado_em <= (SELECT end_date FROM date_range)) as mensagens_periodo,
-
-          (SELECT COALESCE(SUM(tokens_input + tokens_output), 0)
-           FROM conversacao_analytics
-           WHERE empresa_id = $1
-             AND criado_em >= (SELECT start_date FROM date_range)
+          (SELECT COALESCE(SUM(tokens_input + tokens_output), 0) FROM conversacao_analytics
+           WHERE empresa_id = $1 AND criado_em >= (SELECT start_date FROM date_range)
              AND criado_em <= (SELECT end_date FROM date_range)) as tokens_periodo,
-
-          (SELECT COALESCE(AVG(tempo_processamento_ms), 0)
-           FROM conversacao_analytics
-           WHERE empresa_id = $1
-             AND criado_em >= (SELECT start_date FROM date_range)
-             AND criado_em <= (SELECT end_date FROM date_range)) as tempo_medio_ms,
-
-          -- Success rate
-          (SELECT
-            CASE
-              WHEN COUNT(*) = 0 THEN 0
-              ELSE (COUNT(*) FILTER (WHERE sucesso = true))::float / COUNT(*) * 100
-            END
-           FROM conversacao_analytics
-           WHERE empresa_id = $1
-             AND criado_em >= (SELECT start_date FROM date_range)
-             AND criado_em <= (SELECT end_date FROM date_range)) as taxa_sucesso,
-
-          -- Period dates
           (SELECT start_date FROM date_range) as periodo_inicio,
           (SELECT end_date FROM date_range) as periodo_fim
       `;
@@ -444,44 +618,88 @@ const empresasRoutes = async (fastify) => {
       return {
         success: true,
         data: {
-          usuarios: {
-            total: parseInt(stats.total_usuarios) || 0,
-            ativos: parseInt(stats.usuarios_ativos) || 0
-          },
-          agentes: {
-            total: parseInt(stats.total_agentes) || 0,
-            ativos: parseInt(stats.agentes_ativos) || 0
-          },
-          tools: {
-            total: parseInt(stats.total_tools) || 0
-          },
-          api_keys: {
-            ativas: parseInt(stats.api_keys_ativas) || 0
-          },
+          usuarios: { total: parseInt(stats.total_usuarios) || 0, ativos: parseInt(stats.usuarios_ativos) || 0 },
+          agentes: { total: parseInt(stats.total_agentes) || 0, ativos: parseInt(stats.agentes_ativos) || 0 },
+          tools: { total: parseInt(stats.total_tools) || 0 },
+          api_keys: { ativas: parseInt(stats.api_keys_ativas) || 0 },
           periodo_atual: {
             inicio: stats.periodo_inicio,
             fim: stats.periodo_fim,
             conversas: parseInt(stats.conversas_periodo) || 0,
             mensagens: parseInt(stats.mensagens_periodo) || 0,
-            tokens: parseInt(stats.tokens_periodo) || 0,
-            tempo_medio_ms: Math.round(parseFloat(stats.tempo_medio_ms)) || 0,
-            taxa_sucesso: Math.round(parseFloat(stats.taxa_sucesso) * 100) / 100
+            tokens: parseInt(stats.tokens_periodo) || 0
           }
         }
       };
-
     } catch (error) {
-      createLogger.error('Failed to get company stats', {
-        empresa_id,
-        error: error.message
-      });
+      createLogger.error('Failed to get company stats', { empresa_id, error: error.message });
       throw error;
     }
   });
 
   /**
+   * PUT /api/empresas/:id/toggle
+   * Activate/Deactivate a company (master only)
+   */
+  fastify.put('/:id/toggle', {
+    preHandler: fastify.authenticate
+  }, async (request, reply) => {
+    const { role } = request.user;
+    const { id } = request.params;
+
+    if (role !== 'master') {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Acesso restrito ao master' }
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // Get current state
+      const current = await client.query('SELECT ativo FROM empresas WHERE id = $1', [id]);
+      if (current.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({ success: false, error: { code: 'NOT_FOUND', message: 'Empresa não encontrada' } });
+      }
+
+      const newState = !current.rows[0].ativo;
+
+      await client.query('UPDATE empresas SET ativo = $1, atualizado_em = CURRENT_TIMESTAMP WHERE id = $2', [newState, id]);
+
+      if (!newState) {
+        // Deactivating: disable users, agents, api keys
+        await client.query('UPDATE usuarios SET ativo = false WHERE empresa_id = $1', [id]);
+        await client.query('UPDATE agentes SET ativo = false WHERE empresa_id = $1', [id]);
+        await client.query("UPDATE api_keys SET status = 'revogado', atualizado_em = CURRENT_TIMESTAMP WHERE empresa_id = $1", [id]);
+      }
+
+      await client.query('COMMIT');
+
+      createLogger.info(`Company ${newState ? 'activated' : 'deactivated'}`, { empresa_id: id });
+
+      return {
+        success: true,
+        data: {
+          ativo: newState,
+          message: newState ? 'Empresa ativada com sucesso' : 'Empresa desativada com sucesso'
+        }
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      createLogger.error('Failed to toggle empresa', { id, error: error.message });
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  /**
    * PUT /api/empresas/deactivate
-   * Deactivate company (soft delete)
+   * Deactivate own company (kept for backwards compat)
    */
   fastify.put('/deactivate', {
     preHandler: fastify.authenticate
@@ -491,61 +709,22 @@ const empresasRoutes = async (fastify) => {
     if (role !== 'master') {
       return reply.code(403).send({
         success: false,
-        error: {
-          code: 'FORBIDDEN',
-          message: 'Only master users can deactivate the company'
-        }
+        error: { code: 'FORBIDDEN', message: 'Apenas master pode desativar empresa' }
       });
     }
 
     const client = await pool.connect();
-
     try {
       await client.query('BEGIN');
-
-      // Deactivate company
-      await client.query(
-        'UPDATE empresas SET ativo = false, atualizado_em = CURRENT_TIMESTAMP WHERE id = $1',
-        [empresa_id]
-      );
-
-      // Deactivate all users
-      await client.query(
-        'UPDATE usuarios SET ativo = false WHERE empresa_id = $1',
-        [empresa_id]
-      );
-
-      // Deactivate all agents
-      await client.query(
-        'UPDATE agentes SET ativo = false WHERE empresa_id = $1',
-        [empresa_id]
-      );
-
-      // Revoke all API keys
-      await client.query(
-        'UPDATE api_keys SET status = \'revogado\', atualizado_em = CURRENT_TIMESTAMP WHERE empresa_id = $1',
-        [empresa_id]
-      );
-
+      await client.query('UPDATE empresas SET ativo = false, atualizado_em = CURRENT_TIMESTAMP WHERE id = $1', [empresa_id]);
+      await client.query('UPDATE usuarios SET ativo = false WHERE empresa_id = $1', [empresa_id]);
+      await client.query('UPDATE agentes SET ativo = false WHERE empresa_id = $1', [empresa_id]);
+      await client.query("UPDATE api_keys SET status = 'revogado', atualizado_em = CURRENT_TIMESTAMP WHERE empresa_id = $1", [empresa_id]);
       await client.query('COMMIT');
 
-      createLogger.info('Company deactivated', {
-        empresa_id
-      });
-
-      return {
-        success: true,
-        data: {
-          message: 'Company deactivated successfully'
-        }
-      };
-
+      return { success: true, data: { message: 'Empresa desativada com sucesso' } };
     } catch (error) {
       await client.query('ROLLBACK');
-      createLogger.error('Failed to deactivate company', {
-        empresa_id,
-        error: error.message
-      });
       throw error;
     } finally {
       client.release();
