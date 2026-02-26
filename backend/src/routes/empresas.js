@@ -193,18 +193,15 @@ const empresasRoutes = async (fastify) => {
     const { empresa_id } = request.user;
 
     try {
-      const query = `
+      const result = await pool.query(`
         SELECT
           e.id,
           e.nome,
-          e.email,
-          e.telefone,
-          e.documento,
-          e.endereco,
-          e.config_json,
-          e.is_active,
-          e.created_at,
-          e.updated_at,
+          e.slug,
+          e.logo_url,
+          e.ativo,
+          e.criado_em,
+          e.atualizado_em,
           el.max_agentes,
           el.max_usuarios,
           el.max_mensagens_mes,
@@ -214,9 +211,7 @@ const empresasRoutes = async (fastify) => {
         FROM empresas e
         LEFT JOIN empresa_limits el ON e.id = el.empresa_id
         WHERE e.id = $1
-      `;
-
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id]);
+      `, [empresa_id]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -231,32 +226,21 @@ const empresasRoutes = async (fastify) => {
       const empresa = result.rows[0];
 
       // Get usage statistics
-      const usageQuery = `
+      const usageResult = await pool.query(`
         SELECT
-          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND is_active = true) as usuarios_ativos,
-          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND is_active = true) as agentes_ativos,
+          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as usuarios_ativos,
+          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
           (
             SELECT COALESCE(SUM(tokens_input + tokens_output), 0)
             FROM conversacao_analytics
             WHERE empresa_id = $1
-              AND created_at >= $2
-              AND created_at < $3
           ) as tokens_usados,
           (
             SELECT COUNT(*)
             FROM conversacao_analytics
             WHERE empresa_id = $1
-              AND created_at >= $2
-              AND created_at < $3
           ) as mensagens_processadas
-      `;
-
-      const usageResult = await tenantQuery(
-        pool,
-        empresa_id,
-        usageQuery,
-        [empresa_id, empresa.periodo_inicio || '2024-01-01', empresa.periodo_fim || '2099-12-31']
-      );
+      `, [empresa_id]);
 
       const usage = usageResult.rows[0];
 
@@ -266,20 +250,17 @@ const empresasRoutes = async (fastify) => {
           empresa: {
             id: empresa.id,
             nome: empresa.nome,
-            email: empresa.email,
-            telefone: empresa.telefone,
-            documento: empresa.documento,
-            endereco: empresa.endereco,
-            config: empresa.config_json,
-            is_active: empresa.is_active,
-            created_at: empresa.created_at,
-            updated_at: empresa.updated_at
+            slug: empresa.slug,
+            logo_url: empresa.logo_url,
+            is_active: empresa.ativo,
+            created_at: empresa.criado_em,
+            updated_at: empresa.atualizado_em
           },
           limits: {
-            max_agentes: empresa.max_agentes,
-            max_usuarios: empresa.max_usuarios,
-            max_mensagens_mes: empresa.max_mensagens_mes,
-            max_tokens_mes: empresa.max_tokens_mes,
+            max_agentes: empresa.max_agentes || 5,
+            max_usuarios: empresa.max_usuarios || 10,
+            max_mensagens_mes: empresa.max_mensagens_mes || 10000,
+            max_tokens_mes: empresa.max_tokens_mes || 5000000,
             periodo_inicio: empresa.periodo_inicio,
             periodo_fim: empresa.periodo_fim
           },

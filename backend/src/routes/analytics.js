@@ -42,127 +42,71 @@ const analyticsRoutes = async (fastify) => {
         params.push(agente_id);
       }
 
-      const query = `
-        WITH period_data AS (
-          SELECT
-            COUNT(DISTINCT ca.conversation_id) as total_conversations,
-            COUNT(*) as total_messages,
-            COUNT(*) FILTER (WHERE ca.sucesso = true) as successful_messages,
-            COUNT(*) FILTER (WHERE ca.sucesso = false) as failed_messages,
-            COALESCE(SUM(ca.tokens_input), 0) as total_tokens_input,
-            COALESCE(SUM(ca.tokens_output), 0) as total_tokens_output,
-            COALESCE(SUM(ca.tools_chamadas), 0) as total_tool_calls,
-            COALESCE(AVG(ca.tempo_processamento_ms), 0) as avg_response_time,
-            COALESCE(MAX(ca.tempo_processamento_ms), 0) as max_response_time,
-            COALESCE(MIN(ca.tempo_processamento_ms), 0) as min_response_time
-          FROM conversacao_analytics ca
-          WHERE ca.empresa_id = $1
-            AND ca.created_at::date >= $2
-            AND ca.created_at::date <= $3
-            ${agentFilter}
-        ),
-        agent_breakdown AS (
-          SELECT
-            a.id,
-            a.nome,
-            COUNT(DISTINCT ca.conversation_id) as conversations,
-            COUNT(*) as messages,
-            COALESCE(SUM(ca.tokens_input + ca.tokens_output), 0) as tokens,
-            CASE
-              WHEN COUNT(*) = 0 THEN 0
-              ELSE (COUNT(*) FILTER (WHERE ca.sucesso = true))::float / COUNT(*) * 100
-            END as success_rate
-          FROM agentes a
-          LEFT JOIN conversacao_analytics ca ON a.id = ca.agente_id
-            AND ca.empresa_id = $1
-            AND ca.created_at::date >= $2
-            AND ca.created_at::date <= $3
-          WHERE a.empresa_id = $1 AND a.is_active = true
-          GROUP BY a.id, a.nome
-          ORDER BY messages DESC
-          LIMIT 10
-        ),
-        error_summary AS (
-          SELECT
-            ca.erro,
-            COUNT(*) as count
-          FROM conversacao_analytics ca
-          WHERE ca.empresa_id = $1
-            AND ca.created_at::date >= $2
-            AND ca.created_at::date <= $3
-            AND ca.sucesso = false
-            AND ca.erro IS NOT NULL
-            ${agentFilter}
-          GROUP BY ca.erro
-          ORDER BY count DESC
-          LIMIT 5
-        )
+      // Get period data
+      const periodResult = await pool.query(`
         SELECT
-          pd.*,
-          (
-            SELECT json_agg(row_to_json(ab.*))
-            FROM agent_breakdown ab
-          ) as agents,
-          (
-            SELECT json_agg(row_to_json(es.*))
-            FROM error_summary es
-          ) as top_errors,
-          el.max_mensagens_mes as message_limit,
-          el.max_tokens_mes as token_limit
-        FROM period_data pd
-        CROSS JOIN empresa_limits el
-        WHERE el.empresa_id = $1
-      `;
+          COUNT(DISTINCT ca.conversation_id) as total_conversations,
+          COUNT(*) as total_messages,
+          COUNT(*) FILTER (WHERE ca.sucesso = true) as successful_messages,
+          COUNT(*) FILTER (WHERE ca.sucesso = false) as failed_messages,
+          COALESCE(SUM(ca.tokens_input), 0) as total_tokens_input,
+          COALESCE(SUM(ca.tokens_output), 0) as total_tokens_output,
+          COALESCE(SUM(ca.tools_chamadas), 0) as total_tool_calls,
+          COALESCE(AVG(ca.tempo_processamento_ms), 0) as avg_response_time
+        FROM conversacao_analytics ca
+        WHERE ca.empresa_id = $1
+          AND ca.created_at::date >= $2
+          AND ca.created_at::date <= $3
+          ${agentFilter}
+      `, params);
 
-      const result = await tenantQuery(pool, empresa_id, query, params);
+      // Get agent breakdown
+      const agentsResult = await pool.query(`
+        SELECT
+          a.id,
+          a.nome,
+          COUNT(DISTINCT ca.conversation_id) as conversations,
+          COUNT(ca.id) as messages,
+          COALESCE(SUM(ca.tokens_input + ca.tokens_output), 0) as tokens,
+          CASE
+            WHEN COUNT(ca.id) = 0 THEN 0
+            ELSE (COUNT(*) FILTER (WHERE ca.sucesso = true))::float / NULLIF(COUNT(ca.id), 0) * 100
+          END as success_rate
+        FROM agentes a
+        LEFT JOIN conversacao_analytics ca ON a.id = ca.agente_id
+          AND ca.created_at::date >= $2
+          AND ca.created_at::date <= $3
+        WHERE a.empresa_id = $1 AND a.ativo = true
+        GROUP BY a.id, a.nome
+        ORDER BY messages DESC
+        LIMIT 10
+      `, [empresa_id, start_date, end_date]);
 
-      if (result.rows.length === 0) {
-        return {
-          success: true,
-          data: {
-            overview: {
-              total_conversations: 0,
-              total_messages: 0,
-              successful_messages: 0,
-              failed_messages: 0,
-              total_tokens_input: 0,
-              total_tokens_output: 0,
-              total_tokens: 0,
-              total_tool_calls: 0,
-              avg_response_time: 0,
-              success_rate: 0,
-              agents: [],
-              top_errors: []
-            },
-            period: {
-              start_date,
-              end_date
-            }
-          }
-        };
-      }
+      // Get limits
+      const limitsResult = await pool.query(`
+        SELECT max_mensagens_mes, max_tokens_mes
+        FROM empresa_limits
+        WHERE empresa_id = $1
+        LIMIT 1
+      `, [empresa_id]);
 
-      const data = result.rows[0];
+      const pd = periodResult.rows[0] || {};
+      const limits = limitsResult.rows[0] || {};
 
       const overview = {
-        total_conversations: parseInt(data.total_conversations) || 0,
-        total_messages: parseInt(data.total_messages) || 0,
-        successful_messages: parseInt(data.successful_messages) || 0,
-        failed_messages: parseInt(data.failed_messages) || 0,
-        total_tokens_input: parseInt(data.total_tokens_input) || 0,
-        total_tokens_output: parseInt(data.total_tokens_output) || 0,
-        total_tokens: parseInt(data.total_tokens_input) + parseInt(data.total_tokens_output) || 0,
-        total_tool_calls: parseInt(data.total_tool_calls) || 0,
-        avg_response_time: Math.round(parseFloat(data.avg_response_time)) || 0,
-        max_response_time: parseInt(data.max_response_time) || 0,
-        min_response_time: parseInt(data.min_response_time) || 0,
-        success_rate: data.total_messages > 0
-          ? Math.round((data.successful_messages / data.total_messages) * 100)
+        total_conversations: parseInt(pd.total_conversations) || 0,
+        total_messages: parseInt(pd.total_messages) || 0,
+        successful_messages: parseInt(pd.successful_messages) || 0,
+        failed_messages: parseInt(pd.failed_messages) || 0,
+        total_tokens: (parseInt(pd.total_tokens_input) || 0) + (parseInt(pd.total_tokens_output) || 0),
+        total_tool_calls: parseInt(pd.total_tool_calls) || 0,
+        avg_response_time: Math.round(parseFloat(pd.avg_response_time)) || 0,
+        success_rate: pd.total_messages > 0
+          ? Math.round((pd.successful_messages / pd.total_messages) * 100)
           : 0,
-        message_limit: parseInt(data.message_limit) || 0,
-        token_limit: parseInt(data.token_limit) || 0,
-        agents: data.agents || [],
-        top_errors: data.top_errors || []
+        message_limit: parseInt(limits.max_mensagens_mes) || 10000,
+        token_limit: parseInt(limits.max_tokens_mes) || 5000000,
+        agents: agentsResult.rows || []
       };
 
       return {
@@ -525,52 +469,29 @@ const analyticsRoutes = async (fastify) => {
     const { empresa_id } = request.user;
 
     try {
-      const query = `
-        WITH current_period AS (
-          SELECT
-            COALESCE(el.periodo_inicio, date_trunc('month', CURRENT_DATE)) as start_date,
-            COALESCE(el.periodo_fim, date_trunc('month', CURRENT_DATE) + interval '1 month' - interval '1 day') as end_date
-          FROM empresa_limits el
-          WHERE el.empresa_id = $1
-        ),
-        usage_data AS (
-          SELECT
-            COUNT(*) as messages_used,
-            COALESCE(SUM(tokens_input + tokens_output), 0) as tokens_used
-          FROM conversacao_analytics ca
-          CROSS JOIN current_period cp
-          WHERE ca.empresa_id = $1
-            AND ca.created_at >= cp.start_date
-            AND ca.created_at <= cp.end_date
-        )
+      const result = await pool.query(`
         SELECT
-          el.max_usuarios,
-          el.max_agentes,
-          el.max_mensagens_mes,
-          el.max_tokens_mes,
-          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND is_active = true) as usuarios_ativos,
-          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND is_active = true) as agentes_ativos,
-          ud.messages_used,
-          ud.tokens_used,
-          cp.start_date as periodo_inicio,
-          cp.end_date as periodo_fim
+          COALESCE(el.max_usuarios, 10) as max_usuarios,
+          COALESCE(el.max_agentes, 5) as max_agentes,
+          COALESCE(el.max_mensagens_mes, 10000) as max_mensagens_mes,
+          COALESCE(el.max_tokens_mes, 5000000) as max_tokens_mes,
+          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as usuarios_ativos,
+          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
+          (SELECT COUNT(*) FROM conversacao_analytics WHERE empresa_id = $1) as messages_used,
+          (SELECT COALESCE(SUM(tokens_input + tokens_output), 0) FROM conversacao_analytics WHERE empresa_id = $1) as tokens_used
         FROM empresa_limits el
-        CROSS JOIN usage_data ud
-        CROSS JOIN current_period cp
         WHERE el.empresa_id = $1
-      `;
-
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id]);
+      `, [empresa_id]);
 
       if (result.rows.length === 0) {
         return {
           success: true,
           data: {
             usage: {
-              usuarios: { used: 0, limit: 0, percentage: 0 },
-              agentes: { used: 0, limit: 0, percentage: 0 },
-              mensagens: { used: 0, limit: 0, percentage: 0 },
-              tokens: { used: 0, limit: 0, percentage: 0 }
+              usuarios: { used: 0, limit: 10, percentage: 0 },
+              agentes: { used: 0, limit: 5, percentage: 0 },
+              mensagens: { used: 0, limit: 10000, percentage: 0 },
+              tokens: { used: 0, limit: 5000000, percentage: 0 }
             }
           }
         };
@@ -581,35 +502,31 @@ const analyticsRoutes = async (fastify) => {
       const usage = {
         usuarios: {
           used: parseInt(data.usuarios_ativos) || 0,
-          limit: parseInt(data.max_usuarios) || 0,
+          limit: parseInt(data.max_usuarios) || 10,
           percentage: data.max_usuarios > 0
             ? Math.round((data.usuarios_ativos / data.max_usuarios) * 100)
             : 0
         },
         agentes: {
           used: parseInt(data.agentes_ativos) || 0,
-          limit: parseInt(data.max_agentes) || 0,
+          limit: parseInt(data.max_agentes) || 5,
           percentage: data.max_agentes > 0
             ? Math.round((data.agentes_ativos / data.max_agentes) * 100)
             : 0
         },
         mensagens: {
           used: parseInt(data.messages_used) || 0,
-          limit: parseInt(data.max_mensagens_mes) || 0,
+          limit: parseInt(data.max_mensagens_mes) || 10000,
           percentage: data.max_mensagens_mes > 0
             ? Math.round((data.messages_used / data.max_mensagens_mes) * 100)
             : 0
         },
         tokens: {
           used: parseInt(data.tokens_used) || 0,
-          limit: parseInt(data.max_tokens_mes) || 0,
+          limit: parseInt(data.max_tokens_mes) || 5000000,
           percentage: data.max_tokens_mes > 0
             ? Math.round((data.tokens_used / data.max_tokens_mes) * 100)
             : 0
-        },
-        period: {
-          start: data.periodo_inicio,
-          end: data.periodo_fim
         }
       };
 
