@@ -116,33 +116,6 @@ async function registerPlugins() {
   });
 }
 
-// Health check route
-fastify.get('/health', {
-  config: {
-    rateLimit: false,
-  },
-}, async (request, reply) => {
-  const dbHealthy = await testConnection();
-  const redisHealthy = await testRedisConnection();
-
-  const status = {
-    status: dbHealthy && redisHealthy ? 'healthy' : 'unhealthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    services: {
-      database: dbHealthy ? 'connected' : 'disconnected',
-      redis: redisHealthy ? 'connected' : 'disconnected',
-    },
-    environment: config.NODE_ENV,
-  };
-
-  if (!dbHealthy || !redisHealthy) {
-    reply.code(503);
-  }
-
-  return status;
-});
-
 // Global error handler
 fastify.setErrorHandler((error, request, reply) => {
   const { statusCode = 500, validation, code } = error;
