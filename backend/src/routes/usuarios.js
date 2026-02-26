@@ -1,5 +1,5 @@
 import { logger } from '../config/logger.js';
-import { pool, tenantQuery } from '../config/database.js';
+import { pool } from '../config/database.js';
 import { hash, compare } from '../utils/encryption.js';
 import { checkPermission } from '../middleware/permission.js';
 
@@ -20,7 +20,7 @@ const usuariosRoutes = async (fastify) => {
       senha: { type: 'string', minLength: 8 },
       telefone: { type: 'string', maxLength: 20 },
       role: { type: 'string', enum: ['master', 'admin', 'operador', 'viewer'] },
-      is_active: { type: 'boolean' }
+      ativo: { type: 'boolean' }
     }
   };
 
@@ -38,13 +38,13 @@ const usuariosRoutes = async (fastify) => {
           limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           search: { type: 'string' },
           role: { type: 'string', enum: ['master', 'admin', 'operador', 'viewer'] },
-          is_active: { type: 'boolean' }
+          ativo: { type: 'boolean' }
         }
       }
     }
   }, async (request, reply) => {
     const { empresa_id } = request.user;
-    const { page, limit, search, role, is_active } = request.query;
+    const { page, limit, search, role, ativo } = request.query;
     const offset = (page - 1) * limit;
 
     try {
@@ -55,11 +55,11 @@ const usuariosRoutes = async (fastify) => {
           email,
           telefone,
           role,
-          is_active,
+          ativo,
           email_verified,
-          last_login,
-          created_at,
-          updated_at
+          ultimo_login,
+          criado_em,
+          atualizado_em
         FROM usuarios
         WHERE empresa_id = $1
       `;
@@ -80,26 +80,26 @@ const usuariosRoutes = async (fastify) => {
         paramIndex++;
       }
 
-      if (is_active !== undefined) {
-        query += ` AND is_active = $${paramIndex}`;
-        params.push(is_active);
+      if (ativo !== undefined) {
+        query += ` AND ativo = $${paramIndex}`;
+        params.push(ativo);
         paramIndex++;
       }
 
       // Get total count
       const countQuery = query.replace(
-        'SELECT id, nome, email, telefone, role, is_active, email_verified, last_login, created_at, updated_at',
+        'SELECT id, nome, email, telefone, role, ativo, email_verified, ultimo_login, criado_em, atualizado_em',
         'SELECT COUNT(*) as total'
       );
 
-      const countResult = await tenantQuery(pool, empresa_id, countQuery, params);
+      const countResult = await pool.query(countQuery, params);
       const total = parseInt(countResult.rows[0].total) || 0;
 
       // Add pagination
-      query += ` ORDER BY created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      query += ` ORDER BY criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       params.push(limit, offset);
 
-      const result = await tenantQuery(pool, empresa_id, query, params);
+      const result = await pool.query(query, params);
 
       return {
         success: true,
@@ -138,7 +138,7 @@ const usuariosRoutes = async (fastify) => {
     }
   }, async (request, reply) => {
     const { empresa_id, role: userRole } = request.user;
-    const { nome, email, senha, telefone, role, is_active = true } = request.body;
+    const { nome, email, senha, telefone, role, ativo = true } = request.body;
 
     try {
       // Check role hierarchy
@@ -156,12 +156,12 @@ const usuariosRoutes = async (fastify) => {
       const limitQuery = `
         SELECT
           el.max_usuarios,
-          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND is_active = true) as current_users
+          (SELECT COUNT(*) FROM usuarios WHERE empresa_id = $1 AND ativo = true) as current_users
         FROM empresa_limits el
         WHERE el.empresa_id = $1
       `;
 
-      const limitResult = await tenantQuery(pool, empresa_id, limitQuery, [empresa_id]);
+      const limitResult = await pool.query(limitQuery, [empresa_id]);
 
       if (limitResult.rows.length > 0) {
         const { max_usuarios, current_users } = limitResult.rows[0];
@@ -197,16 +197,14 @@ const usuariosRoutes = async (fastify) => {
       const createQuery = `
         INSERT INTO usuarios (
           empresa_id, nome, email, senha_hash,
-          telefone, role, is_active
+          telefone, role, ativo
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, nome, email, telefone, role, is_active, created_at
+        RETURNING id, nome, email, telefone, role, ativo, criado_em
       `;
 
-      const result = await tenantQuery(
-        pool,
-        empresa_id,
+      const result = await pool.query(
         createQuery,
-        [empresa_id, nome, email, hashedPassword, telefone, role, is_active]
+        [empresa_id, nome, email, hashedPassword, telefone, role, ativo]
       );
 
       const user = result.rows[0];
@@ -260,26 +258,26 @@ const usuariosRoutes = async (fastify) => {
           email,
           telefone,
           role,
-          is_active,
+          ativo,
           email_verified,
-          last_login,
-          created_at,
-          updated_at,
+          ultimo_login,
+          criado_em,
+          atualizado_em,
           (
             SELECT json_build_object(
               'total_conversations', COUNT(DISTINCT conversation_id),
               'total_messages', COUNT(*),
-              'last_activity', MAX(created_at)
+              'last_activity', MAX(criado_em)
             )
             FROM conversacao_analytics
             WHERE empresa_id = $1
-              AND created_at >= CURRENT_DATE - INTERVAL '30 days'
+              AND criado_em >= CURRENT_DATE - INTERVAL '30 days'
           ) as activity_stats
         FROM usuarios
         WHERE empresa_id = $1 AND id = $2
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id, id]);
+      const result = await pool.query(query, [empresa_id, id]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -345,7 +343,7 @@ const usuariosRoutes = async (fastify) => {
         // Admin cannot update master users
         if (currentUserRole === 'admin') {
           const targetUserQuery = 'SELECT role FROM usuarios WHERE empresa_id = $1 AND id = $2';
-          const targetUser = await tenantQuery(pool, empresa_id, targetUserQuery, [empresa_id, id]);
+          const targetUser = await pool.query(targetUserQuery, [empresa_id, id]);
 
           if (targetUser.rows.length > 0 && targetUser.rows[0].role === 'master') {
             return reply.code(403).send({
@@ -397,12 +395,12 @@ const usuariosRoutes = async (fastify) => {
       values.push(empresa_id, id);
       const query = `
         UPDATE usuarios
-        SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP
+        SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
         WHERE empresa_id = $${index} AND id = $${index + 1}
-        RETURNING id, nome, email, telefone, role, is_active, updated_at
+        RETURNING id, nome, email, telefone, role, ativo, atualizado_em
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, values);
+      const result = await pool.query(query, values);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -471,7 +469,7 @@ const usuariosRoutes = async (fastify) => {
       // Check role hierarchy
       if (currentUserRole === 'admin') {
         const targetUserQuery = 'SELECT role FROM usuarios WHERE empresa_id = $1 AND id = $2';
-        const targetUser = await tenantQuery(pool, empresa_id, targetUserQuery, [empresa_id, id]);
+        const targetUser = await pool.query(targetUserQuery, [empresa_id, id]);
 
         if (targetUser.rows.length > 0 && targetUser.rows[0].role === 'master') {
           return reply.code(403).send({
@@ -487,12 +485,12 @@ const usuariosRoutes = async (fastify) => {
       // Soft delete
       const query = `
         UPDATE usuarios
-        SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        SET ativo = false, atualizado_em = CURRENT_TIMESTAMP
         WHERE empresa_id = $1 AND id = $2
         RETURNING id, nome, email
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id, id]);
+      const result = await pool.query(query, [empresa_id, id]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -551,7 +549,7 @@ const usuariosRoutes = async (fastify) => {
     try {
       // Get current password hash
       const query = 'SELECT senha_hash FROM usuarios WHERE empresa_id = $1 AND id = $2';
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id, userId]);
+      const result = await pool.query(query, [empresa_id, userId]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -581,11 +579,11 @@ const usuariosRoutes = async (fastify) => {
       // Update password
       const updateQuery = `
         UPDATE usuarios
-        SET senha_hash = $3, updated_at = CURRENT_TIMESTAMP
+        SET senha_hash = $3, atualizado_em = CURRENT_TIMESTAMP
         WHERE empresa_id = $1 AND id = $2
       `;
 
-      await tenantQuery(pool, empresa_id, updateQuery, [empresa_id, userId, newHash]);
+      await pool.query(updateQuery, [empresa_id, userId, newHash]);
 
       createLogger.info('Password changed', {
         empresa_id,

@@ -1,5 +1,5 @@
 import { logger } from '../config/logger.js';
-import { pool, tenantQuery } from '../config/database.js';
+import { pool } from '../config/database.js';
 import { checkPermission } from '../middleware/permission.js';
 import { validateTool, testTool } from '../services/tool-runner.js';
 
@@ -32,7 +32,7 @@ const toolsRoutes = async (fastify) => {
         required: ['type', 'properties']
       },
       timeout_ms: { type: 'integer', minimum: 100, maximum: 30000, default: 5000 },
-      is_active: { type: 'boolean' }
+      ativo: { type: 'boolean' }
     }
   };
 
@@ -49,14 +49,14 @@ const toolsRoutes = async (fastify) => {
           page: { type: 'integer', minimum: 1, default: 1 },
           limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           search: { type: 'string' },
-          is_active: { type: 'boolean' },
+          ativo: { type: 'boolean' },
           is_global: { type: 'boolean' }
         }
       }
     }
   }, async (request, reply) => {
     const { empresa_id } = request.user;
-    const { page, limit, search, is_active, is_global } = request.query;
+    const { page, limit, search, ativo, is_global } = request.query;
     const offset = (page - 1) * limit;
 
     try {
@@ -67,11 +67,11 @@ const toolsRoutes = async (fastify) => {
           t.descricao,
           t.url,
           t.metodo,
-          t.is_active,
+          t.ativo,
           t.is_global,
           t.timeout_ms,
-          t.created_at,
-          t.updated_at,
+          t.criado_em,
+          t.atualizado_em,
           CASE
             WHEN t.is_global = true THEN NULL
             ELSE t.empresa_id
@@ -87,7 +87,7 @@ const toolsRoutes = async (fastify) => {
             FROM conversacao_analytics ca
             WHERE ca.tools_chamadas > 0
               AND ca.empresa_id = $1
-              AND ca.created_at >= CURRENT_DATE - INTERVAL '7 days'
+              AND ca.criado_em >= CURRENT_DATE - INTERVAL '7 days'
               AND EXISTS (
                 SELECT 1 FROM conversas c
                 WHERE c.id = ca.conversation_id
@@ -108,9 +108,9 @@ const toolsRoutes = async (fastify) => {
         paramIndex++;
       }
 
-      if (is_active !== undefined) {
-        query += ` AND t.is_active = $${paramIndex}`;
-        params.push(is_active);
+      if (ativo !== undefined) {
+        query += ` AND t.ativo = $${paramIndex}`;
+        params.push(ativo);
         paramIndex++;
       }
 
@@ -130,7 +130,7 @@ const toolsRoutes = async (fastify) => {
       const total = parseInt(countResult.rows[0].total) || 0;
 
       // Add pagination
-      query += ` ORDER BY t.is_global DESC, t.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      query += ` ORDER BY t.is_global DESC, t.criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       params.push(limit, offset);
 
       const result = await pool.query(query, params);
@@ -219,16 +219,13 @@ const toolsRoutes = async (fastify) => {
           body_template_json,
           parametros_schema_json,
           timeout_ms,
-          is_active,
+          ativo,
           is_global
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
         RETURNING *
       `;
 
-      const result = await tenantQuery(
-        pool,
-        empresa_id,
-        query,
+      const result = await pool.query(query,
         [
           empresa_id,
           toolData.nome,
@@ -240,7 +237,7 @@ const toolsRoutes = async (fastify) => {
           toolData.body_template_json || {},
           toolData.parametros_schema_json,
           toolData.timeout_ms || 5000,
-          toolData.is_active !== false
+          toolData.ativo !== false
         ]
       );
 
@@ -306,7 +303,7 @@ const toolsRoutes = async (fastify) => {
               'total_calls', COUNT(*),
               'success_calls', COUNT(*) FILTER (WHERE sucesso = true),
               'avg_duration_ms', COALESCE(AVG(tempo_processamento_ms), 0),
-              'last_used', MAX(created_at)
+              'last_used', MAX(criado_em)
             )
             FROM tool_executions te
             WHERE te.tool_id = t.id
@@ -437,12 +434,12 @@ const toolsRoutes = async (fastify) => {
       values.push(empresa_id, id);
       const query = `
         UPDATE tools
-        SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP
+        SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
         WHERE empresa_id = $${index} AND id = $${index + 1}
         RETURNING *
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, values);
+      const result = await pool.query(query, values);
 
       createLogger.info('Tool updated', {
         empresa_id,
@@ -497,7 +494,7 @@ const toolsRoutes = async (fastify) => {
         WHERE id = $1 AND empresa_id = $2 AND is_global = false
       `;
 
-      const checkResult = await tenantQuery(client, empresa_id, checkQuery, [id, empresa_id]);
+      const checkResult = await client.query(checkQuery, [id, empresa_id]);
 
       if (checkResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -511,18 +508,12 @@ const toolsRoutes = async (fastify) => {
       }
 
       // Remove tool from all agents
-      await tenantQuery(
-        client,
-        empresa_id,
-        'DELETE FROM agent_tools WHERE empresa_id = $1 AND tool_id = $2',
+      await client.query('DELETE FROM agent_tools WHERE empresa_id = $1 AND tool_id = $2',
         [empresa_id, id]
       );
 
       // Delete tool
-      await tenantQuery(
-        client,
-        empresa_id,
-        'DELETE FROM tools WHERE empresa_id = $1 AND id = $2',
+      await client.query('DELETE FROM tools WHERE empresa_id = $1 AND id = $2',
         [empresa_id, id]
       );
 
@@ -587,7 +578,7 @@ const toolsRoutes = async (fastify) => {
         FROM tools
         WHERE id = $1
           AND (is_global = true OR empresa_id = $2)
-          AND is_active = true
+          AND ativo = true
       `;
 
       const result = await pool.query(query, [id, empresa_id]);

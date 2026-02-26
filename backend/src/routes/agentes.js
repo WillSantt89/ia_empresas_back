@@ -1,5 +1,5 @@
 import { logger } from '../config/logger.js';
-import { pool, tenantQuery } from '../config/database.js';
+import { pool } from '../config/database.js';
 import { checkPermission } from '../middleware/permission.js';
 import { DEFAULT_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
 
@@ -25,7 +25,7 @@ const agentesRoutes = async (fastify) => {
       temperatura: { type: 'number', minimum: 0, maximum: 2, default: DEFAULT_LIMITS.TEMPERATURE },
       max_tokens: { type: 'integer', minimum: 100, maximum: 8192, default: DEFAULT_LIMITS.MAX_TOKENS },
       config_json: { type: 'object' },
-      is_active: { type: 'boolean' }
+      ativo: { type: 'boolean' }
     }
   };
 
@@ -42,13 +42,13 @@ const agentesRoutes = async (fastify) => {
           page: { type: 'integer', minimum: 1, default: 1 },
           limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           search: { type: 'string' },
-          is_active: { type: 'boolean' }
+          ativo: { type: 'boolean' }
         }
       }
     }
   }, async (request, reply) => {
     const { empresa_id } = request.user;
-    const { page, limit, search, is_active } = request.query;
+    const { page, limit, search, ativo } = request.query;
     const offset = (page - 1) * limit;
 
     try {
@@ -60,9 +60,9 @@ const agentesRoutes = async (fastify) => {
           a.modelo,
           a.temperatura,
           a.max_tokens,
-          a.is_active,
-          a.created_at,
-          a.updated_at,
+          a.ativo,
+          a.criado_em,
+          a.atualizado_em,
           (
             SELECT COUNT(*)
             FROM agent_tools at
@@ -71,7 +71,7 @@ const agentesRoutes = async (fastify) => {
           (
             SELECT COUNT(*)
             FROM api_keys ak
-            WHERE ak.agente_id = a.id AND ak.empresa_id = $1 AND ak.is_active = true
+            WHERE ak.agente_id = a.id AND ak.empresa_id = $1 AND ak.ativo = true
           ) as active_keys,
           (
             SELECT json_build_object(
@@ -86,7 +86,7 @@ const agentesRoutes = async (fastify) => {
             FROM conversacao_analytics ca
             WHERE ca.agente_id = a.id
               AND ca.empresa_id = $1
-              AND ca.created_at >= CURRENT_DATE - INTERVAL '30 days'
+              AND ca.criado_em >= CURRENT_DATE - INTERVAL '30 days'
           ) as stats
         FROM agentes a
         WHERE a.empresa_id = $1
@@ -102,9 +102,9 @@ const agentesRoutes = async (fastify) => {
         paramIndex++;
       }
 
-      if (is_active !== undefined) {
-        query += ` AND a.is_active = $${paramIndex}`;
-        params.push(is_active);
+      if (ativo !== undefined) {
+        query += ` AND a.ativo = $${paramIndex}`;
+        params.push(ativo);
         paramIndex++;
       }
 
@@ -114,14 +114,14 @@ const agentesRoutes = async (fastify) => {
         'SELECT COUNT(*) as total FROM agentes a'
       );
 
-      const countResult = await tenantQuery(pool, empresa_id, countQuery, params);
+      const countResult = await pool.query(countQuery, params);
       const total = parseInt(countResult.rows[0].total) || 0;
 
       // Add pagination
-      query += ` ORDER BY a.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      query += ` ORDER BY a.criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       params.push(limit, offset);
 
-      const result = await tenantQuery(pool, empresa_id, query, params);
+      const result = await pool.query(query, params);
 
       return {
         success: true,
@@ -175,12 +175,12 @@ const agentesRoutes = async (fastify) => {
       const limitQuery = `
         SELECT
           el.max_agentes,
-          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND is_active = true) as current_agents
+          (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as current_agents
         FROM empresa_limits el
         WHERE el.empresa_id = $1
       `;
 
-      const limitResult = await tenantQuery(pool, empresa_id, limitQuery, [empresa_id]);
+      const limitResult = await pool.query(limitQuery, [empresa_id]);
 
       if (limitResult.rows.length > 0) {
         const { max_agentes, current_agents } = limitResult.rows[0];
@@ -206,15 +206,12 @@ const agentesRoutes = async (fastify) => {
           temperatura,
           max_tokens,
           config_json,
-          is_active
+          ativo
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
       `;
 
-      const result = await tenantQuery(
-        pool,
-        empresa_id,
-        query,
+      const result = await pool.query(query,
         [
           empresa_id,
           agentData.nome,
@@ -224,7 +221,7 @@ const agentesRoutes = async (fastify) => {
           agentData.temperatura || DEFAULT_LIMITS.TEMPERATURE,
           agentData.max_tokens || DEFAULT_LIMITS.MAX_TOKENS,
           agentData.config_json || {},
-          agentData.is_active !== false
+          agentData.ativo !== false
         ]
       );
 
@@ -244,10 +241,7 @@ const agentesRoutes = async (fastify) => {
       `.trim();
 
       // Update with formatted prompt
-      await tenantQuery(
-        pool,
-        empresa_id,
-        'UPDATE agentes SET prompt_ativo = $2 WHERE id = $1',
+      await pool.query('UPDATE agentes SET prompt_ativo = $2 WHERE id = $1',
         [agent.id, defaultPrompt]
       );
 
@@ -313,9 +307,9 @@ const agentesRoutes = async (fastify) => {
             SELECT json_agg(json_build_object(
               'id', ak.id,
               'nome', ak.nome,
-              'created_at', ak.created_at,
+              'criado_em', ak.criado_em,
               'last_used_at', ak.last_used_at,
-              'is_active', ak.is_active
+              'ativo', ak.ativo
             ))
             FROM api_keys ak
             WHERE ak.agente_id = a.id AND ak.empresa_id = $1
@@ -331,7 +325,7 @@ const agentesRoutes = async (fastify) => {
                 WHEN COUNT(*) = 0 THEN 0
                 ELSE (COUNT(*) FILTER (WHERE sucesso = true))::float / COUNT(*) * 100
               END,
-              'last_used', MAX(created_at)
+              'last_used', MAX(criado_em)
             )
             FROM conversacao_analytics ca
             WHERE ca.agente_id = a.id AND ca.empresa_id = $1
@@ -340,7 +334,7 @@ const agentesRoutes = async (fastify) => {
         WHERE a.empresa_id = $1 AND a.id = $2
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id, id]);
+      const result = await pool.query(query, [empresa_id, id]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -415,12 +409,12 @@ const agentesRoutes = async (fastify) => {
       values.push(empresa_id, id);
       const query = `
         UPDATE agentes
-        SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP
+        SET ${fields.join(', ')}, atualizado_em = CURRENT_TIMESTAMP
         WHERE empresa_id = $${index} AND id = $${index + 1}
         RETURNING *
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, values);
+      const result = await pool.query(query, values);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
@@ -481,15 +475,12 @@ const agentesRoutes = async (fastify) => {
       // Deactivate agent
       const agentQuery = `
         UPDATE agentes
-        SET is_active = false, updated_at = CURRENT_TIMESTAMP
+        SET ativo = false, atualizado_em = CURRENT_TIMESTAMP
         WHERE empresa_id = $1 AND id = $2
         RETURNING id, nome
       `;
 
-      const agentResult = await tenantQuery(
-        client,
-        empresa_id,
-        agentQuery,
+      const agentResult = await client.query(agentQuery,
         [empresa_id, id]
       );
 
@@ -505,11 +496,8 @@ const agentesRoutes = async (fastify) => {
       }
 
       // Revoke all API keys for this agent
-      await tenantQuery(
-        client,
-        empresa_id,
-        `UPDATE api_keys
-         SET is_active = false, revoked_at = CURRENT_TIMESTAMP
+      await client.query(`UPDATE api_keys
+         SET ativo = false, revoked_at = CURRENT_TIMESTAMP
          WHERE empresa_id = $1 AND agente_id = $2`,
         [empresa_id, id]
       );
@@ -577,10 +565,7 @@ const agentesRoutes = async (fastify) => {
       await client.query('BEGIN');
 
       // Verify agent exists
-      const agentCheck = await tenantQuery(
-        client,
-        empresa_id,
-        'SELECT id FROM agentes WHERE empresa_id = $1 AND id = $2',
+      const agentCheck = await client.query('SELECT id FROM agentes WHERE empresa_id = $1 AND id = $2',
         [empresa_id, id]
       );
 
@@ -596,10 +581,7 @@ const agentesRoutes = async (fastify) => {
       }
 
       // Remove existing tools
-      await tenantQuery(
-        client,
-        empresa_id,
-        'DELETE FROM agent_tools WHERE empresa_id = $1 AND agente_id = $2',
+      await client.query('DELETE FROM agent_tools WHERE empresa_id = $1 AND agente_id = $2',
         [empresa_id, id]
       );
 
@@ -619,7 +601,7 @@ const agentesRoutes = async (fastify) => {
           VALUES ${placeholders.join(', ')}
         `;
 
-        await tenantQuery(client, empresa_id, insertQuery, values);
+        await client.query(insertQuery, values);
       }
 
       await client.query('COMMIT');
@@ -637,7 +619,7 @@ const agentesRoutes = async (fastify) => {
         ORDER BY at.prioridade
       `;
 
-      const toolsResult = await tenantQuery(pool, empresa_id, toolsQuery, [empresa_id, id]);
+      const toolsResult = await pool.query(toolsQuery, [empresa_id, id]);
 
       createLogger.info('Agent tools updated', {
         empresa_id,
@@ -704,12 +686,12 @@ const agentesRoutes = async (fastify) => {
           ak.gemini_key_encrypted
         FROM agentes a
         LEFT JOIN api_keys ak ON ak.agente_id = a.id
-          AND ak.empresa_id = $1 AND ak.is_active = true
-        WHERE a.empresa_id = $1 AND a.id = $2 AND a.is_active = true
+          AND ak.empresa_id = $1 AND ak.ativo = true
+        WHERE a.empresa_id = $1 AND a.id = $2 AND a.ativo = true
         LIMIT 1
       `;
 
-      const result = await tenantQuery(pool, empresa_id, query, [empresa_id, id]);
+      const result = await pool.query(query, [empresa_id, id]);
 
       if (result.rows.length === 0) {
         return reply.code(404).send({
