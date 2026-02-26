@@ -1,7 +1,7 @@
 import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
 import { checkPermission } from '../middleware/permission.js';
-import { DEFAULT_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
+import { ALL_MODELS, AI_PROVIDERS, PROVIDER_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
 
 /**
  * Agentes Routes
@@ -17,9 +17,10 @@ const agentesRoutes = async (fastify) => {
     properties: {
       nome: { type: 'string', minLength: 2, maxLength: 255 },
       descricao: { type: 'string', maxLength: 1000 },
+      provider: { type: 'string', enum: Object.values(AI_PROVIDERS), default: 'google' },
       modelo: {
         type: 'string',
-        enum: Object.values(DEFAULT_MODELS)
+        enum: ALL_MODELS
       },
       prompt_ativo: { type: 'string', minLength: 10, maxLength: 4000 },
       temperatura: { type: 'number', minimum: 0, maximum: 2, default: DEFAULT_LIMITS.TEMPERATURE },
@@ -201,13 +202,14 @@ const agentesRoutes = async (fastify) => {
           empresa_id,
           nome,
           descricao,
+          provider,
           modelo,
           prompt_ativo,
           temperatura,
           max_tokens,
           config_json,
           ativo
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *
       `;
 
@@ -216,6 +218,7 @@ const agentesRoutes = async (fastify) => {
           empresa_id,
           agentData.nome,
           agentData.descricao || null,
+          agentData.provider || 'google',
           agentData.modelo,
           agentData.prompt_ativo,
           agentData.temperatura || DEFAULT_LIMITS.TEMPERATURE,
@@ -738,6 +741,26 @@ const agentesRoutes = async (fastify) => {
       });
       throw error;
     }
+  });
+
+  /**
+   * GET /api/agentes/providers
+   * List available AI providers and their models
+   */
+  fastify.get('/providers', {
+    preHandler: fastify.authenticate
+  }, async (request, reply) => {
+    return {
+      success: true,
+      data: {
+        providers: Object.entries(PROVIDER_MODELS).map(([key, models]) => ({
+          id: key,
+          nome: key === 'google' ? 'Google AI' : key === 'claude' ? 'Anthropic Claude' : key === 'grok' ? 'xAI Grok' : key,
+          disponivel: key === 'google',
+          modelos: models,
+        })),
+      }
+    };
   });
 };
 

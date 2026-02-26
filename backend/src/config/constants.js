@@ -126,7 +126,33 @@ export const BILLING_TYPES = {
   PRECO_FIXO: 'preco_fixo'
 };
 
-// Default Models
+// AI Providers
+export const AI_PROVIDERS = {
+  GOOGLE: 'google',
+  CLAUDE: 'claude',
+  GROK: 'grok',
+};
+
+// Models per provider
+export const PROVIDER_MODELS = {
+  google: [
+    'gemini-2.5-pro',
+    'gemini-2.5-flash',
+    'gemini-2.0-pro-001',
+    'gemini-2.0-flash-001',
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-pro',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-8b',
+  ],
+  // claude: [],  // futuro
+  // grok: [],    // futuro
+};
+
+// All allowed model values (flat list for validation)
+export const ALL_MODELS = Object.values(PROVIDER_MODELS).flat();
+
+// Default Models (backward compat)
 export const DEFAULT_MODELS = {
   GEMINI_FLASH: 'gemini-2.0-flash-001',
   GEMINI_PRO: 'gemini-2.0-pro-001'
