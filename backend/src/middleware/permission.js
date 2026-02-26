@@ -84,6 +84,14 @@ const PERMISSION_MATRIX = {
   configuracoes: {
     read: [USER_ROLES.MASTER, USER_ROLES.ADMIN, USER_ROLES.OPERADOR, USER_ROLES.VIEWER],
     write: [USER_ROLES.MASTER, USER_ROLES.ADMIN]
+  },
+  notificacoes: {
+    read: [USER_ROLES.MASTER, USER_ROLES.ADMIN, USER_ROLES.OPERADOR, USER_ROLES.VIEWER],
+    write: [USER_ROLES.MASTER, USER_ROLES.ADMIN]
+  },
+  faturas: {
+    read: [USER_ROLES.MASTER, USER_ROLES.ADMIN],
+    write: [USER_ROLES.MASTER]
   }
 };
 
@@ -95,12 +103,15 @@ const PERMISSION_MATRIX = {
  * @returns {boolean} True if user has permission
  */
 export function hasPermission(userRole, resource, action) {
-  if (!PERMISSION_MATRIX[resource] || !PERMISSION_MATRIX[resource][action]) {
+  // Normalize resource name: convert underscores to hyphens for consistent lookup
+  const normalizedResource = resource.replace(/_/g, '-');
+
+  if (!PERMISSION_MATRIX[normalizedResource] || !PERMISSION_MATRIX[normalizedResource][action]) {
     // If permission not defined, deny by default
     return false;
   }
 
-  const allowedRoles = PERMISSION_MATRIX[resource][action];
+  const allowedRoles = PERMISSION_MATRIX[normalizedResource][action];
   return allowedRoles.includes(userRole);
 }
 
