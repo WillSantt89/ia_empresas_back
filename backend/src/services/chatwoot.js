@@ -605,6 +605,50 @@ export function validateWebhookSignature(payload, signature, secret) {
  * @param {Object} payload - Webhook payload
  * @returns {Object} Parsed event data
  */
+/**
+ * Unassign agent from conversation (return to unassigned pool)
+ * Used by timeout-checker when human agent doesn't respond in time
+ * @param {Object} chatwootConfig - Chatwoot connection config
+ * @param {string} chatwootConfig.chatwoot_url - Chatwoot base URL
+ * @param {string} chatwootConfig.chatwoot_api_token - API access token
+ * @param {string} chatwootConfig.chatwoot_account_id - Account ID
+ * @param {number} conversationId - Conversation ID
+ * @returns {Promise<Object>} Updated conversation
+ */
+export async function unassignAgent(chatwootConfig, conversationId) {
+  const { chatwoot_url, chatwoot_api_token, chatwoot_account_id } = chatwootConfig;
+
+  try {
+    const url = buildApiUrl(
+      chatwoot_url,
+      chatwoot_account_id,
+      `conversations/${conversationId}/assignments`
+    );
+
+    const result = await makeRequest({
+      url,
+      method: 'POST',
+      apiKey: chatwoot_api_token,
+      body: { assignee_id: null }
+    });
+
+    createLogger.info('Agent unassigned from conversation', {
+      account_id: chatwoot_account_id,
+      conversation_id: conversationId
+    });
+
+    return result;
+
+  } catch (error) {
+    createLogger.error('Failed to unassign agent', {
+      account_id: chatwoot_account_id,
+      conversation_id: conversationId,
+      error: error.message
+    });
+    throw error;
+  }
+}
+
 export function parseWebhookEvent(payload) {
   const {
     event,

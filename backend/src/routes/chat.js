@@ -88,9 +88,9 @@ const chatRoutes = async (fastify) => {
     const startTime = Date.now();
     const { message, conversation_id, context } = request.body;
     const apiKey = request.headers['x-api-key'];
+    let keyData;
 
     try {
-      let keyData;
 
       // Check if this is an internal webhook call
       if (apiKey === 'internal-webhook-call' &&
@@ -174,6 +174,67 @@ const chatRoutes = async (fastify) => {
         conversation_id,
         message_length: message.length
       });
+
+      // ========== DAILY LIMIT CHECK ==========
+      const limitCheck = await pool.query(`
+        INSERT INTO uso_diario_agente (empresa_id, agente_id, data, total_atendimentos, limite_diario)
+        SELECT $1, $2, CURRENT_DATE, 0, COALESCE(
+          (SELECT max_mensagens_mes / 30 FROM empresa_limits WHERE empresa_id = $1),
+          500
+        )
+        ON CONFLICT (empresa_id, agente_id, data) DO NOTHING
+        RETURNING *
+      `, [empresa_id, agente_id]);
+
+      // Check if limit reached
+      const usageResult = await pool.query(`
+        SELECT total_atendimentos, limite_diario, limite_atingido
+        FROM uso_diario_agente
+        WHERE empresa_id = $1 AND agente_id = $2 AND data = CURRENT_DATE
+      `, [empresa_id, agente_id]);
+
+      if (usageResult.rows.length > 0) {
+        const usage = usageResult.rows[0];
+        if (usage.limite_atingido || usage.total_atendimentos >= usage.limite_diario) {
+          createLogger.warn('Daily limit reached', {
+            empresa_id, agente_id,
+            current: usage.total_atendimentos,
+            limit: usage.limite_diario
+          });
+
+          // Get custom limit message from agent
+          const limitMsgResult = await pool.query(
+            'SELECT mensagem_limite_atingido FROM agentes WHERE id = $1',
+            [agente_id]
+          );
+          const limitMessage = limitMsgResult.rows[0]?.mensagem_limite_atingido
+            || 'Desculpe, nosso limite de atendimentos foi atingido. Tente novamente amanhã.';
+
+          // Send limit message to Chatwoot if configured
+          if (context?.account_id && process.env.CHATWOOT_API_KEY) {
+            sendToChatwoot({
+              baseUrl: process.env.CHATWOOT_BASE_URL,
+              accountId: context.account_id,
+              apiKey: process.env.CHATWOOT_API_KEY,
+              conversationId: conversation_id,
+              content: limitMessage,
+              messageType: 'outgoing'
+            }).catch(() => {});
+          }
+
+          return {
+            success: true,
+            data: {
+              response: limitMessage,
+              tokens_used: { input: 0, output: 0, total: 0 },
+              tools_called: [],
+              processing_time_ms: Date.now() - startTime,
+              limit_reached: true
+            }
+          };
+        }
+      }
+      // ========== END DAILY LIMIT CHECK ==========
 
       // Get agent's tools
       const toolsQuery = `
@@ -276,6 +337,97 @@ const chatRoutes = async (fastify) => {
           });
         });
       }
+
+      // ========== INCREMENT DAILY USAGE ==========
+      pool.query(`
+        UPDATE uso_diario_agente
+        SET total_atendimentos = total_atendimentos + 1,
+            limite_atingido = CASE
+              WHEN total_atendimentos + 1 >= limite_diario THEN true
+              ELSE false
+            END,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE empresa_id = $1 AND agente_id = $2 AND data = CURRENT_DATE
+      `, [empresa_id, agente_id]).catch(err => {
+        createLogger.error('Failed to increment daily usage', { error: err.message });
+      });
+      // ========== END INCREMENT DAILY USAGE ==========
+
+      // ========== TRANSFER CHECK ==========
+      let transferExecuted = false;
+      try {
+        // Load transfer rules for this agent
+        const transferRules = await pool.query(`
+          SELECT at2.*, a_dest.nome as agente_destino_nome
+          FROM agente_transferencias at2
+          JOIN agentes a_dest ON a_dest.id = at2.agente_destino_id AND a_dest.ativo = true
+          WHERE at2.agente_origem_id = $1 AND at2.ativo = true
+          ORDER BY at2.criado_em ASC
+        `, [agente_id]);
+
+        if (transferRules.rows.length > 0) {
+          for (const rule of transferRules.rows) {
+            let shouldTransfer = false;
+
+            if (rule.trigger_tipo === 'keyword') {
+              // Check if response or user message contains keyword
+              const textToCheck = (message + ' ' + result.text).toLowerCase();
+              shouldTransfer = textToCheck.includes(String(rule.trigger_valor).toLowerCase());
+            } else if (rule.trigger_tipo === 'tool_result') {
+              // Check if a specific tool was called with matching result
+              shouldTransfer = result.toolsCalled.some(tc =>
+                tc.name === rule.trigger_valor ||
+                (tc.result && JSON.stringify(tc.result).includes(String(rule.trigger_valor)))
+              );
+            } else if (rule.trigger_tipo === 'menu_opcao') {
+              // Check if user message matches menu option
+              shouldTransfer = message.trim().toLowerCase() === String(rule.trigger_valor).toLowerCase();
+            }
+
+            if (shouldTransfer) {
+              createLogger.info('Transfer triggered', {
+                empresa_id,
+                from_agent: agente_id,
+                to_agent: rule.agente_destino_id,
+                trigger: rule.trigger_tipo,
+                trigger_valor: rule.trigger_valor,
+                conversation_id
+              });
+
+              // Update conversation to point to new agent
+              await pool.query(`
+                UPDATE conversas
+                SET agente_id = $1, atualizado_em = CURRENT_TIMESTAMP
+                WHERE empresa_id = $2
+                  AND (conversation_id_chatwoot = $3 OR id::text = $3::text)
+              `, [rule.agente_destino_id, empresa_id, conversation_id]);
+
+              // Log transfer in controle_historico
+              pool.query(`
+                INSERT INTO controle_historico (
+                  empresa_id, conversa_id, acao, motivo
+                ) SELECT $1, c.id, 'transferencia_agente', $3
+                FROM conversas c
+                WHERE c.empresa_id = $1
+                  AND (c.conversation_id_chatwoot = $2 OR c.id::text = $2::text)
+                LIMIT 1
+              `, [empresa_id, conversation_id,
+                  rule.trigger_tipo + ':' + rule.trigger_valor
+              ]).catch(err => {
+                createLogger.error('Failed to log transfer history', { error: err.message });
+              });
+
+              transferExecuted = true;
+              break; // Only execute first matching rule
+            }
+          }
+        }
+      } catch (transferError) {
+        createLogger.error('Transfer check failed (non-blocking)', {
+          error: transferError.message, empresa_id, agente_id
+        });
+      }
+      // ========== END TRANSFER CHECK ==========
 
       const processingTime = Date.now() - startTime;
 
