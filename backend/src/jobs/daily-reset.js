@@ -1,6 +1,6 @@
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
-import apiKeyManager from '../services/api-key-manager.js';
+import * as apiKeyManager from '../services/api-key-manager.js';
 
 let timeoutId = null;
 

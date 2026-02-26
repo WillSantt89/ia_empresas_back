@@ -1,6 +1,6 @@
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
-import chatwootService from '../services/chatwoot.js';
+import * as chatwootService from '../services/chatwoot.js';
 
 let intervalId = null;
 
