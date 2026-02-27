@@ -45,7 +45,7 @@ export async function processMessage(options) {
     // Initialize Gemini API
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // Configure the model
+    // Configure the model with v1beta API (required for Gemini 3 models)
     const generativeModel = genAI.getGenerativeModel({
       model,
       systemInstruction: systemPrompt,
@@ -57,7 +57,7 @@ export async function processMessage(options) {
         maxOutputTokens: maxTokens,
         candidateCount: 1,
       },
-    });
+    }, { apiVersion: 'v1beta' });
 
     // Build conversation history
     const contents = [
@@ -395,7 +395,7 @@ export async function processMessageWithTools(options, toolExecutor) {
     // Initialize Gemini API
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // Configure the model
+    // Configure the model with v1beta API (required for Gemini 3 models)
     const generativeModel = genAI.getGenerativeModel({
       model,
       systemInstruction: systemPrompt,
@@ -407,16 +407,7 @@ export async function processMessageWithTools(options, toolExecutor) {
         maxOutputTokens: maxTokens,
         candidateCount: 1,
       },
-    });
-
-    // Inject system prompt as first messages (ensures compatibility with SDK < 0.7
-    // where systemInstruction param is ignored)
-    if (systemPrompt) {
-      currentHistory.unshift(
-        { role: 'user', parts: [{ text: systemPrompt }] },
-        { role: 'model', parts: [{ text: 'Entendido. Vou seguir essas instrucoes em todas as minhas respostas.' }] }
-      );
-    }
+    }, { apiVersion: 'v1beta' });
 
     // Add user message to history
     currentHistory.push({
