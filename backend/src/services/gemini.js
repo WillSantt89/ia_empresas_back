@@ -545,15 +545,16 @@ export async function processMessageWithTools(options, toolExecutor) {
     });
 
     // Return error with partial results
-    throw {
-      ...error,
-      partialResult: {
-        toolsCalled: executedTools,
-        tokensInput: totalTokensInput,
-        tokensOutput: totalTokensOutput,
-        iteracoes,
-        duration
-      }
+    const enrichedError = new Error(error.message || 'Gemini API error');
+    enrichedError.code = error.code;
+    enrichedError.status = error.status;
+    enrichedError.partialResult = {
+      toolsCalled: executedTools,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+      iteracoes,
+      duration
     };
+    throw enrichedError;
   }
 }
