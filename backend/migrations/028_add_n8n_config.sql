@@ -7,3 +7,6 @@ ALTER TABLE empresas ADD COLUMN IF NOT EXISTS n8n_response_url TEXT;
 
 -- Index for fast token lookup (only non-null tokens)
 CREATE INDEX IF NOT EXISTS idx_empresas_webhook_token ON empresas(webhook_token) WHERE webhook_token IS NOT NULL;
+
+-- Index for n8n to lookup empresa by WhatsApp number
+CREATE INDEX IF NOT EXISTS idx_whatsapp_numbers_numero_formatado ON whatsapp_numbers(numero_formatado) WHERE ativo = true;
