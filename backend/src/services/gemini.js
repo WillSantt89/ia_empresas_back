@@ -503,30 +503,45 @@ export async function processMessageWithTools(options, toolExecutor) {
         continue;
       }
 
-      // No function calls, get the final text response
+      // No function calls, extract text response
+      // Use direct extraction to handle Gemini 3 thinking/thought parts
       let finalText = '';
-      try {
-        finalText = response.text();
-      } catch (textErr) {
-        // response.text() can throw if response has no text parts
-        // Try extracting text from candidates directly
-        const candidate = response.candidates?.[0];
-        if (candidate?.content?.parts) {
+      const candidate = response.candidates?.[0];
+      if (candidate?.content?.parts) {
+        for (const part of candidate.content.parts) {
+          // Skip thinking/thought parts — only include actual response text
+          if (part.thought) continue;
+          if (part.text) finalText += part.text;
+        }
+        // If no non-thought text found, include thought text as fallback
+        if (!finalText) {
           for (const part of candidate.content.parts) {
             if (part.text) finalText += part.text;
           }
         }
       }
 
+      // Fallback to SDK text() method
       if (!finalText) {
-        // Log what we got for debugging
-        const candidate = response.candidates?.[0];
-        createLogger.warn('No text in response', {
+        try {
+          finalText = response.text();
+        } catch (textErr) {
+          // SDK text() throws on safety blocks etc — ignore
+        }
+      }
+
+      if (!finalText) {
+        const debugInfo = {
           finishReason: candidate?.finishReason,
           partsCount: candidate?.content?.parts?.length,
-          parts: candidate?.content?.parts?.map(p => Object.keys(p))
-        });
-        throw new Error('No text response from model');
+          partKeys: candidate?.content?.parts?.map(p => Object.keys(p)),
+          hasContent: !!candidate?.content,
+          candidatesCount: response.candidates?.length
+        };
+        createLogger.warn('No text in response', debugInfo);
+        const err = new Error('No text response from model');
+        err.debugInfo = debugInfo;
+        throw err;
       }
 
       // Add final response to history

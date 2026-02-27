@@ -806,7 +806,8 @@ const agentesRoutes = async (fastify) => {
         success: false,
         error: {
           code: 'TEST_FAILED',
-          message: userMessage
+          message: userMessage,
+          debug: error.debugInfo || undefined
         }
       });
     }
