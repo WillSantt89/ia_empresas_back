@@ -162,8 +162,8 @@ export const ALL_MODELS = Object.values(PROVIDER_MODELS).flat();
 
 // Default Models (backward compat)
 export const DEFAULT_MODELS = {
-  GEMINI_FLASH: 'gemini-2.0-flash-001',
-  GEMINI_PRO: 'gemini-2.0-pro-001'
+  GEMINI_FLASH: 'gemini-2.5-flash',
+  GEMINI_PRO: 'gemini-2.5-pro'
 };
 
 // Default Limits
