@@ -2,6 +2,11 @@ import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
 import { checkPermission } from '../middleware/permission.js';
 import { ALL_MODELS, AI_PROVIDERS, PROVIDER_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
+import { processMessageWithTools } from '../services/gemini.js';
+import { executeTool, buildToolDeclarations, transformResultForLLM } from '../services/tool-runner.js';
+import { getHistory, addToHistory, formatHistoryForGemini, clearHistory } from '../services/memory.js';
+import { decrypt } from '../config/encryption.js';
+import { getActiveKeysForAgent, recordKeySuccess, recordKeyError } from '../services/api-key-manager.js';
 
 /**
  * Agentes Routes
@@ -652,8 +657,8 @@ const agentesRoutes = async (fastify) => {
   });
 
   /**
-   * GET /api/agentes/:id/test
-   * Test agent with sample message
+   * POST /api/agentes/:id/test
+   * Test agent with real Gemini API call
    */
   fastify.post('/:id/test', {
     preHandler: [fastify.authenticate],
@@ -667,80 +672,154 @@ const agentesRoutes = async (fastify) => {
       body: {
         type: 'object',
         properties: {
-          message: { type: 'string', minLength: 1, maxLength: 500 }
+          message: { type: 'string', minLength: 1, maxLength: 2000 }
         },
         required: ['message']
       }
     }
   }, async (request, reply) => {
-    const { empresa_id } = request.user;
+    const { empresa_id, id: userId } = request.user;
     const { id } = request.params;
     const { message } = request.body;
 
     try {
-      // Get agent with API key
-      const query = `
-        SELECT
-          a.nome,
-          a.modelo,
-          a.prompt_ativo,
-          a.temperatura,
-          a.max_tokens,
-          ak.api_key_encrypted as gemini_key_encrypted
+      // 1. Get agent config
+      const agentQuery = `
+        SELECT a.nome, a.modelo, a.prompt_ativo, a.temperatura, a.max_tokens
         FROM agentes a
-        LEFT JOIN api_keys ak ON ak.agente_id = a.id
-          AND ak.empresa_id = $1 AND ak.status = 'ativa'
         WHERE a.empresa_id = $1 AND a.id = $2 AND a.ativo = true
-        LIMIT 1
       `;
+      const agentResult = await pool.query(agentQuery, [empresa_id, id]);
 
-      const result = await pool.query(query, [empresa_id, id]);
-
-      if (result.rows.length === 0) {
+      if (agentResult.rows.length === 0) {
         return reply.code(404).send({
           success: false,
-          error: {
-            code: 'AGENT_NOT_FOUND',
-            message: 'Active agent not found'
-          }
+          error: { code: 'AGENT_NOT_FOUND', message: 'Agente ativo nao encontrado' }
         });
       }
 
-      const agent = result.rows[0];
+      const agent = agentResult.rows[0];
 
-      if (!agent.gemini_key_encrypted) {
+      // 2. Get active API keys with failover support
+      const availableKeys = await getActiveKeysForAgent(empresa_id, id);
+
+      if (!availableKeys || availableKeys.length === 0) {
         return reply.code(400).send({
           success: false,
           error: {
             code: 'NO_API_KEY',
-            message: 'Agent has no active API key configured'
+            message: 'Nenhuma API key ativa configurada para este agente. Va em API Keys e adicione uma chave Gemini.'
           }
         });
       }
 
-      // Use simple test without full integration
+      // 3. Load agent tools
+      const toolsQuery = `
+        SELECT t.id, t.nome, t.descricao_para_llm, t.url, t.metodo,
+               t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms
+        FROM tools t
+        INNER JOIN agente_tools at2 ON t.id = at2.tool_id
+        WHERE at2.agente_id = $1 AND t.ativo = true
+        ORDER BY at2.ordem_prioridade ASC
+      `;
+      const toolsResult = await pool.query(toolsQuery, [id]);
+      const tools = toolsResult.rows;
+
+      // 4. Test conversation history (isolated from real conversations)
+      const testConversationId = `test:${id}:${userId}`;
+      const history = await getHistory(empresa_id, testConversationId);
+      await addToHistory(empresa_id, testConversationId, 'user', message);
+
+      // 5. Build tool declarations and executor
+      const toolDeclarations = tools.length > 0 ? buildToolDeclarations(tools) : [];
+
+      const toolExecutor = async (tool, args) => {
+        const toolConfig = tools.find(t => t.nome === tool.nome);
+        if (!toolConfig) throw new Error(`Tool ${tool.nome} nao encontrada`);
+        const result = await executeTool(toolConfig, args);
+        return transformResultForLLM(result, 2000);
+      };
+
+      // 6. Call Gemini with failover
+      let result;
+      for (let keyIndex = 0; keyIndex < availableKeys.length; keyIndex++) {
+        const currentKey = availableKeys[keyIndex];
+        try {
+          result = await processMessageWithTools(
+            {
+              apiKey: currentKey.gemini_api_key,
+              model: agent.modelo,
+              systemPrompt: agent.prompt_ativo,
+              tools: toolDeclarations,
+              history: formatHistoryForGemini(history),
+              message,
+              temperature: parseFloat(agent.temperatura) || DEFAULT_LIMITS.TEMPERATURE,
+              maxTokens: agent.max_tokens || DEFAULT_LIMITS.MAX_TOKENS
+            },
+            toolExecutor
+          );
+          if (currentKey.id) recordKeySuccess(currentKey.id).catch(() => {});
+          break;
+        } catch (error) {
+          if (currentKey.id) recordKeyError(currentKey.id, error.message).catch(() => {});
+          if (keyIndex >= availableKeys.length - 1) throw error;
+          createLogger.warn('Test: API key failed, trying next', {
+            key_index: keyIndex, error: error.message
+          });
+        }
+      }
+
+      // 7. Save response to test history
+      await addToHistory(empresa_id, testConversationId, 'model', result.text);
+
       return {
         success: true,
         data: {
-          agent: agent.nome,
-          model: agent.modelo,
-          test_message: message,
-          response: `Este é um teste do agente "${agent.nome}". Em produção, esta mensagem seria processada pela API Gemini com o modelo ${agent.modelo}.`,
-          config: {
-            temperatura: agent.temperatura,
-            max_tokens: agent.max_tokens
+          response: result.text,
+          tools_called: result.toolsCalled.map(tc => ({
+            name: tc.name,
+            args: tc.args
+          })),
+          tokens_used: {
+            input: result.tokensInput,
+            output: result.tokensOutput
           }
         }
       };
 
     } catch (error) {
       createLogger.error('Failed to test agent', {
-        empresa_id,
-        agent_id: id,
-        error: error.message
+        empresa_id, agent_id: id, error: error.message
       });
       throw error;
     }
+  });
+
+  /**
+   * DELETE /api/agentes/:id/test
+   * Clear test conversation history
+   */
+  fastify.delete('/:id/test', {
+    preHandler: [fastify.authenticate],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id, id: userId } = request.user;
+    const { id } = request.params;
+    const testConversationId = `test:${id}:${userId}`;
+
+    await clearHistory(empresa_id, testConversationId);
+
+    return {
+      success: true,
+      data: { message: 'Historico de teste limpo' }
+    };
   });
 
   /**
