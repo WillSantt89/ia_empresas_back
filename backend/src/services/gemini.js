@@ -105,49 +105,37 @@ export async function processMessage(options) {
             functions: functionCalls.map(fc => fc.name)
           });
 
-          // Add model's function call to history
+          // Add model's function call to history (preserve thoughtSignature for Gemini 3)
           currentContents.push({
             role: 'model',
-            parts: functionCalls.map(fc => ({
-              functionCall: fc
-            }))
+            parts: functionCalls.map(fc => {
+              const part = { functionCall: { name: fc.name, args: fc.args } };
+              if (fc.thoughtSignature) part.thoughtSignature = fc.thoughtSignature;
+              return part;
+            })
           });
 
           // Process each function call
           const functionResponses = [];
 
           for (const functionCall of functionCalls) {
-            // Return to caller for execution
-            const toolCall = {
-              type: 'tool_call',
-              toolName: functionCall.name,
-              toolArgs: functionCall.args
-            };
-
-            // In the actual implementation, this would be yielded to the caller
-            // For now, we'll collect it
             toolsCalled.push({
               name: functionCall.name,
               args: functionCall.args,
-              result: null // Will be filled by the caller
+              result: null
             });
 
-            // Simulate function response (in real implementation, this comes from the caller)
-            const functionResponse = {
-              name: functionCall.name,
-              response: {
-                error: 'Function execution not implemented in this version'
-              }
-            };
-
             functionResponses.push({
-              functionResponse
+              functionResponse: {
+                name: functionCall.name,
+                response: { error: 'Function execution not implemented in this version' }
+              }
             });
           }
 
           // Add function responses to history
           currentContents.push({
-            role: 'function',
+            role: 'user',
             parts: functionResponses
           });
 
@@ -269,7 +257,9 @@ function extractFunctionCalls(response) {
           if (part.functionCall) {
             functionCalls.push({
               name: part.functionCall.name,
-              args: part.functionCall.args || {}
+              args: part.functionCall.args || {},
+              // Preserve thoughtSignature for Gemini 3 compatibility
+              thoughtSignature: part.thoughtSignature || undefined
             });
           }
         }
@@ -414,7 +404,7 @@ export async function processMessageWithTools(options, toolExecutor) {
       model,
       systemInstruction: systemPrompt,
       tools: tools.length > 0 ? [{
-        functionDeclarations: buildToolDeclarations(tools)
+        functionDeclarations: tools
       }] : undefined,
       generationConfig: {
         temperature,
@@ -456,11 +446,18 @@ export async function processMessageWithTools(options, toolExecutor) {
 
       if (functionCalls.length > 0) {
         // Add model's response with function calls to history
+        // Preserve thoughtSignature for Gemini 3 (required for function calling)
         currentHistory.push({
           role: 'model',
-          parts: functionCalls.map(fc => ({
-            functionCall: fc
-          }))
+          parts: functionCalls.map(fc => {
+            const part = {
+              functionCall: { name: fc.name, args: fc.args }
+            };
+            if (fc.thoughtSignature) {
+              part.thoughtSignature = fc.thoughtSignature;
+            }
+            return part;
+          })
         });
 
         // Execute function calls
@@ -509,9 +506,9 @@ export async function processMessageWithTools(options, toolExecutor) {
           }
         }
 
-        // Add function responses to history
+        // Add function responses to history (use 'user' role for Gemini 3 compatibility)
         currentHistory.push({
-          role: 'function',
+          role: 'user',
           parts: functionResponses
         });
 
