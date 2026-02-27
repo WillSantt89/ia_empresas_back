@@ -94,7 +94,7 @@ export default async function promptsRoutes(fastify, opts) {
         type: 'object',
         required: ['conteudo'],
         properties: {
-          conteudo: { type: 'string', minLength: 10 },
+          conteudo: { type: 'string', minLength: 10, maxLength: 35000 },
           ativar_imediatamente: { type: 'boolean', default: false }
         }
       }
@@ -154,6 +154,12 @@ export default async function promptsRoutes(fastify, opts) {
         await client.query(
           'UPDATE prompts SET ativo = false WHERE agente_id = $1 AND id != $2',
           [agenteId, newPrompt.id]
+        );
+
+        // Atualizar prompt_ativo do agente
+        await client.query(
+          'UPDATE agentes SET prompt_ativo = $2, atualizado_em = NOW() WHERE id = $1',
+          [agenteId, conteudo]
         );
 
         logger.info(`Prompt v${nextVersion} activated for agent ${agenteId}`);
@@ -242,10 +248,10 @@ export default async function promptsRoutes(fastify, opts) {
         [promptId]
       );
 
-      // Atualizar timestamp do agente
+      // Atualizar prompt_ativo do agente com o conteúdo do prompt ativado
       await client.query(
-        'UPDATE agentes SET atualizado_em = NOW() WHERE id = $1',
-        [agenteId]
+        'UPDATE agentes SET prompt_ativo = $2, atualizado_em = NOW() WHERE id = $1',
+        [agenteId, prompt.conteudo]
       );
 
       await client.query('COMMIT');
