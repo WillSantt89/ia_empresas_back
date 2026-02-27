@@ -1,6 +1,7 @@
 import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
 import { hash } from '../utils/encryption.js';
+import { randomUUID } from 'crypto';
 
 /**
  * Empresas Routes
@@ -278,6 +279,73 @@ const empresasRoutes = async (fastify) => {
       };
     } catch (error) {
       createLogger.error('Failed to get empresa', { id, error: error.message });
+      throw error;
+    }
+  });
+
+  /**
+   * POST /api/empresas/:id/webhook-token
+   * Generate or regenerate webhook token for a company (master only)
+   */
+  fastify.post('/:id/webhook-token', {
+    preHandler: fastify.authenticate,
+    schema: {
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { role } = request.user;
+    const { id } = request.params;
+
+    if (role !== 'master') {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'FORBIDDEN', message: 'Acesso restrito ao master' }
+      });
+    }
+
+    try {
+      // Verify empresa exists
+      const empresaResult = await pool.query(
+        'SELECT id, nome FROM empresas WHERE id = $1',
+        [id]
+      );
+
+      if (empresaResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'Empresa não encontrada' }
+        });
+      }
+
+      // Generate new token (64 chars)
+      const newToken = (randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')).substring(0, 64);
+
+      await pool.query(
+        'UPDATE empresas SET webhook_token = $1, atualizado_em = NOW() WHERE id = $2',
+        [newToken, id]
+      );
+
+      createLogger.info('Webhook token generated', {
+        empresa_id: id,
+        empresa_nome: empresaResult.rows[0].nome,
+        generated_by: request.user.id
+      });
+
+      return {
+        success: true,
+        data: {
+          webhook_token: newToken,
+          webhook_url: `${process.env.BACKEND_URL || 'https://wschat-ia-empresas-back.fldxjw.easypanel.host'}/api/webhooks/n8n`
+        }
+      };
+    } catch (error) {
+      createLogger.error('Failed to generate webhook token', { id, error: error.message });
       throw error;
     }
   });
