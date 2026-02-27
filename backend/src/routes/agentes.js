@@ -64,6 +64,7 @@ const agentesRoutes = async (fastify) => {
           a.nome,
           a.descricao,
           a.modelo,
+          a.prompt_ativo,
           a.temperatura,
           a.max_tokens,
           a.ativo,
