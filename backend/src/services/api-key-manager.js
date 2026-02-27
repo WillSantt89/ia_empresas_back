@@ -45,7 +45,7 @@ export async function createApiKey(options) {
         status,
         prioridade,
         criado_por
-      ) VALUES ($1, $2, 'gemini', $3, $4, 'ativo', 1, $5)
+      ) VALUES ($1, $2, 'gemini', $3, $4, 'ativa', 1, $5)
       RETURNING
         id,
         nome_exibicao,
@@ -72,7 +72,7 @@ export async function createApiKey(options) {
       id: created.id,
       nome: created.nome_exibicao,
       created_at: created.criado_em,
-      is_active: created.status === 'ativo',
+      is_active: created.status === 'ativa',
       message: 'API key created successfully.'
     };
 
@@ -120,7 +120,7 @@ export async function validateApiKey(apiKey) {
       FROM api_keys ak
       LEFT JOIN agentes a ON ak.agente_id = a.id
       INNER JOIN empresas e ON ak.empresa_id = e.id
-      WHERE ak.status = 'ativo'
+      WHERE ak.status = 'ativa'
         AND (a.ativo = true OR ak.agente_id IS NULL)
     `;
 
@@ -245,7 +245,7 @@ export async function listApiKeys(empresaId, agenteId = null) {
       created_at: key.criado_em,
       created_by: key.created_by_nome,
       last_used_at: key.ultimo_uso,
-      is_active: key.status === 'ativo',
+      is_active: key.status === 'ativa',
       tentativas_erro: key.tentativas_erro || 0,
       ultimo_erro: key.ultimo_erro,
       ultimo_erro_msg: key.ultimo_erro_msg,
@@ -272,7 +272,7 @@ export async function revokeApiKey(empresaId, keyId, revokedBy) {
       SET
         status = 'revogado',
         atualizado_em = CURRENT_TIMESTAMP
-      WHERE empresa_id = $1 AND id = $2 AND status = 'ativo'
+      WHERE empresa_id = $1 AND id = $2 AND status = 'ativa'
     `;
 
     const result = await pool.query(query, [empresaId, keyId]);
@@ -312,7 +312,7 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
     const currentQuery = `
       SELECT agente_id, nome_exibicao as nome
       FROM api_keys
-      WHERE empresa_id = $1 AND id = $2 AND status = 'ativo'
+      WHERE empresa_id = $1 AND id = $2 AND status = 'ativa'
     `;
 
     const currentResult = await client.query(currentQuery, [empresaId, oldKeyId]);
@@ -426,7 +426,7 @@ export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
     const query = `
       UPDATE api_keys
       SET api_key_encrypted = $3, atualizado_em = CURRENT_TIMESTAMP
-      WHERE empresa_id = $1 AND id = $2 AND status = 'ativo'
+      WHERE empresa_id = $1 AND id = $2 AND status = 'ativa'
     `;
 
     const result = await pool.query(query, [empresaId, keyId, encryptedKey]);
@@ -469,7 +469,7 @@ export async function getActiveKeysForAgent(empresaId, agenteId) {
       FROM api_keys
       WHERE empresa_id = $1
         AND agente_id = $2
-        AND status = 'ativo'
+        AND status = 'ativa'
         AND (retry_apos IS NULL OR retry_apos < CURRENT_TIMESTAMP)
       ORDER BY prioridade ASC, tentativas_erro ASC, criado_em ASC
     `;
@@ -562,7 +562,7 @@ export async function cleanupExpiredKeys() {
       UPDATE api_keys
       SET status = 'inativo'
       WHERE tentativas_erro >= 10
-        AND status = 'ativo'
+        AND status = 'ativa'
       RETURNING id
     `;
 
@@ -592,8 +592,8 @@ export async function getApiKeyStats(empresaId) {
   try {
     const query = `
       SELECT
-        COUNT(*) FILTER (WHERE status = 'ativo') as active_count,
-        COUNT(*) FILTER (WHERE status != 'ativo') as revoked_count,
+        COUNT(*) FILTER (WHERE status = 'ativa') as active_count,
+        COUNT(*) FILTER (WHERE status != 'ativa') as revoked_count,
         COUNT(*) FILTER (WHERE ultimo_uso > CURRENT_TIMESTAMP - INTERVAL '24 hours') as used_today,
         COUNT(*) FILTER (WHERE tentativas_erro > 0) as error_count,
         MAX(criado_em) as last_created_at,

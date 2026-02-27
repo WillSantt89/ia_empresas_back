@@ -598,7 +598,7 @@ const empresasRoutes = async (fastify) => {
           (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1) as total_agentes,
           (SELECT COUNT(*) FROM agentes WHERE empresa_id = $1 AND ativo = true) as agentes_ativos,
           (SELECT COUNT(*) FROM tools WHERE empresa_id = $1 OR is_global = true) as total_tools,
-          (SELECT COUNT(*) FROM api_keys WHERE empresa_id = $1 AND status = 'ativo') as api_keys_ativas,
+          (SELECT COUNT(*) FROM api_keys WHERE empresa_id = $1 AND status = 'ativa') as api_keys_ativas,
           (SELECT COUNT(DISTINCT conversation_id) FROM conversacao_analytics
            WHERE empresa_id = $1 AND criado_em >= (SELECT start_date FROM date_range)
              AND criado_em <= (SELECT end_date FROM date_range)) as conversas_periodo,

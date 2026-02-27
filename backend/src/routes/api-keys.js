@@ -128,7 +128,7 @@ const apiKeysRoutes = async (fastify) => {
           nome: { type: 'string', minLength: 2, maxLength: 100 },
           prioridade: { type: 'integer', minimum: 1, maximum: 100 },
           gemini_api_key: { type: 'string', minLength: 20 },
-          status: { type: 'string', enum: ['ativo', 'inativo'] }
+          status: { type: 'string', enum: ['ativa', 'standby', 'desativada'] }
         }
       }
     }

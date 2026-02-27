@@ -72,7 +72,7 @@ const agentesRoutes = async (fastify) => {
           (
             SELECT COUNT(*)
             FROM api_keys ak
-            WHERE ak.agente_id = a.id AND ak.empresa_id = $1 AND ak.status = 'ativo'
+            WHERE ak.agente_id = a.id AND ak.empresa_id = $1 AND ak.status = 'ativa'
           ) as active_keys,
           (
             SELECT json_build_object(
@@ -689,7 +689,7 @@ const agentesRoutes = async (fastify) => {
           ak.api_key_encrypted as gemini_key_encrypted
         FROM agentes a
         LEFT JOIN api_keys ak ON ak.agente_id = a.id
-          AND ak.empresa_id = $1 AND ak.status = 'ativo'
+          AND ak.empresa_id = $1 AND ak.status = 'ativa'
         WHERE a.empresa_id = $1 AND a.id = $2 AND a.ativo = true
         LIMIT 1
       `;
