@@ -1,5 +1,6 @@
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
+import { randomUUID } from 'crypto';
 
 export default async function configuracoesRoutes(fastify, opts) {
   // Obter configurações da empresa
@@ -104,6 +105,14 @@ export default async function configuracoesRoutes(fastify, opts) {
             admin_email: empresa.chatwoot_admin_email,
             configurado: !!(empresa.chatwoot_url && empresa.chatwoot_api_token)
           },
+          n8n: {
+            webhook_token: empresa.webhook_token || null,
+            n8n_response_url: empresa.n8n_response_url || null,
+            webhook_url: empresa.webhook_token
+              ? `${process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3000}`}/api/webhooks/n8n`
+              : null,
+            configurado: !!empresa.webhook_token
+          },
           controle_humano: controleResult.rows[0] || {
             timeout_inatividade_minutos: 30,
             mensagem_retorno_ia: 'Voltei! Desculpe a espera. Como posso ajudar? 😊',
@@ -176,6 +185,13 @@ export default async function configuracoesRoutes(fastify, opts) {
               notificar_admin_ao_devolver: { type: 'boolean' },
               ativo: { type: 'boolean' }
             }
+          },
+          n8n: {
+            type: 'object',
+            properties: {
+              gerar_token: { type: 'boolean' },
+              n8n_response_url: { type: 'string' }
+            }
           }
         }
       }
@@ -187,7 +203,7 @@ export default async function configuracoesRoutes(fastify, opts) {
       await client.query('BEGIN');
 
       const { empresaId } = request;
-      const { empresa, chatwoot, controle_humano } = request.body;
+      const { empresa, chatwoot, controle_humano, n8n } = request.body;
 
       // Atualizar dados da empresa se fornecido
       if (empresa) {
@@ -321,6 +337,37 @@ export default async function configuracoesRoutes(fastify, opts) {
             controle_humano.notificar_admin_ao_devolver !== false,
             controle_humano.ativo !== false
           ]);
+        }
+      }
+
+      // Atualizar configuração n8n se fornecido
+      if (n8n) {
+        const n8nFields = [];
+        const n8nValues = [];
+        let paramCount = 1;
+
+        if (n8n.gerar_token) {
+          // Generate a new webhook token (UUID v4 without dashes)
+          const newToken = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '').substring(0, 32);
+          n8nFields.push(`webhook_token = $${paramCount}`);
+          n8nValues.push(newToken.substring(0, 64));
+          paramCount++;
+        }
+
+        if ('n8n_response_url' in n8n) {
+          n8nFields.push(`n8n_response_url = $${paramCount}`);
+          n8nValues.push(n8n.n8n_response_url || null);
+          paramCount++;
+        }
+
+        if (n8nFields.length > 0) {
+          n8nFields.push('atualizado_em = NOW()');
+          n8nValues.push(empresaId);
+
+          await client.query(
+            `UPDATE empresas SET ${n8nFields.join(', ')} WHERE id = $${paramCount}`,
+            n8nValues
+          );
         }
       }
 

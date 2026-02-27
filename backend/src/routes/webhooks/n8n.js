@@ -1,0 +1,550 @@
+import { logger } from '../../config/logger.js';
+import { pool } from '../../config/database.js';
+import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
+import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../../services/memory.js';
+import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
+import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { sendMessage as sendToChatwoot } from '../../services/chatwoot.js';
+
+const createLogger = logger.child({ module: 'n8n-webhook' });
+
+const n8nWebhookRoutes = async (fastify) => {
+  /**
+   * POST /api/webhooks/n8n
+   * Gateway endpoint for n8n → AI processing → synchronous response
+   *
+   * Authentication: x-webhook-token header validated against empresas.webhook_token
+   */
+  fastify.post('/', {
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', minLength: 1, maxLength: 4000 },
+          phone: { type: 'string', minLength: 1, maxLength: 30 },
+          name: { type: 'string', maxLength: 255 },
+          agent_id: { type: 'string', format: 'uuid' },
+          metadata: { type: 'object' }
+        },
+        required: ['message', 'phone']
+      }
+    }
+  }, async (request, reply) => {
+    const startTime = Date.now();
+    const { message, phone, name, agent_id: requestAgentId, metadata } = request.body;
+    const webhookToken = request.headers['x-webhook-token'];
+
+    // --- 1. Authenticate via webhook_token ---
+    if (!webhookToken) {
+      return reply.code(401).send({
+        success: false,
+        error: {
+          code: 'MISSING_TOKEN',
+          message: 'Header x-webhook-token is required'
+        }
+      });
+    }
+
+    let empresa;
+    try {
+      const empresaResult = await pool.query(
+        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND is_active = true LIMIT 1',
+        [webhookToken]
+      );
+
+      if (empresaResult.rows.length === 0) {
+        return reply.code(401).send({
+          success: false,
+          error: {
+            code: 'INVALID_TOKEN',
+            message: 'Invalid or inactive webhook token'
+          }
+        });
+      }
+
+      empresa = empresaResult.rows[0];
+    } catch (err) {
+      createLogger.error('Token lookup failed', { error: err.message });
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: 'Failed to validate token' }
+      });
+    }
+
+    const empresa_id = empresa.id;
+
+    createLogger.info('n8n webhook received', {
+      empresa_id,
+      phone,
+      name,
+      message_length: message.length
+    });
+
+    try {
+      // --- 2. Resolve agent ---
+      let agentQuery;
+      let agentParams;
+
+      if (requestAgentId) {
+        agentQuery = `
+          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo
+          FROM agentes
+          WHERE id = $1 AND empresa_id = $2 AND ativo = true
+          LIMIT 1
+        `;
+        agentParams = [requestAgentId, empresa_id];
+      } else {
+        agentQuery = `
+          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo
+          FROM agentes
+          WHERE empresa_id = $1 AND ativo = true
+          ORDER BY criado_em ASC
+          LIMIT 1
+        `;
+        agentParams = [empresa_id];
+      }
+
+      const agentResult = await pool.query(agentQuery, agentParams);
+
+      if (agentResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: {
+            code: 'AGENT_NOT_FOUND',
+            message: requestAgentId
+              ? 'Specified agent not found or inactive'
+              : 'No active agent found for this company'
+          }
+        });
+      }
+
+      const agent = agentResult.rows[0];
+      const { agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent;
+
+      // --- 3. Get API keys with failover ---
+      const availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
+
+      if (availableKeys.length === 0) {
+        return reply.code(400).send({
+          success: false,
+          error: {
+            code: 'NO_API_KEYS',
+            message: 'No active API keys configured for this agent'
+          }
+        });
+      }
+
+      // --- 4. Generate consistent conversation_id ---
+      const conversationKey = `whatsapp:${phone}`;
+
+      // --- 5. Find or create conversa record ---
+      let conversa_id;
+
+      const conversaResult = await pool.query(`
+        SELECT id FROM conversas
+        WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
+        ORDER BY criado_em DESC
+        LIMIT 1
+      `, [empresa_id, phone]);
+
+      if (conversaResult.rows.length > 0) {
+        conversa_id = conversaResult.rows[0].id;
+      } else {
+        const insertConversa = await pool.query(`
+          INSERT INTO conversas (empresa_id, contato_whatsapp, agente_id, agente_inicial_id, status, dados_json)
+          VALUES ($1, $2, $3, $3, 'ativo', $4)
+          RETURNING id
+        `, [empresa_id, phone, agente_id, JSON.stringify({ name: name || null, source: 'n8n' })]);
+
+        conversa_id = insertConversa.rows[0].id;
+      }
+
+      // --- Daily limit check ---
+      await pool.query(`
+        INSERT INTO uso_diario_agente (empresa_id, agente_id, data, total_atendimentos, limite_diario)
+        SELECT $1, $2, CURRENT_DATE, 0, COALESCE(
+          (SELECT max_mensagens_mes / 30 FROM empresa_limits WHERE empresa_id = $1),
+          500
+        )
+        ON CONFLICT (empresa_id, agente_id, data) DO NOTHING
+      `, [empresa_id, agente_id]);
+
+      const usageResult = await pool.query(`
+        SELECT total_atendimentos, limite_diario, limite_atingido
+        FROM uso_diario_agente
+        WHERE empresa_id = $1 AND agente_id = $2 AND data = CURRENT_DATE
+      `, [empresa_id, agente_id]);
+
+      if (usageResult.rows.length > 0) {
+        const usage = usageResult.rows[0];
+        if (usage.limite_atingido || usage.total_atendimentos >= usage.limite_diario) {
+          const limitMsgResult = await pool.query(
+            'SELECT mensagem_limite_atingido FROM agentes WHERE id = $1',
+            [agente_id]
+          );
+          const limitMessage = limitMsgResult.rows[0]?.mensagem_limite_atingido
+            || 'Desculpe, nosso limite de atendimentos foi atingido. Tente novamente amanhã.';
+
+          return {
+            success: true,
+            data: {
+              response: limitMessage,
+              conversation_id: conversa_id,
+              agent_name: agente_nome,
+              tools_called: [],
+              tokens_used: { input: 0, output: 0 },
+              processing_time_ms: Date.now() - startTime,
+              limit_reached: true
+            }
+          };
+        }
+      }
+
+      // --- 6. Get agent tools ---
+      const toolsResult = await pool.query(`
+        SELECT
+          t.id, t.nome, t.descricao_para_llm, t.url, t.metodo,
+          t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms
+        FROM tools t
+        INNER JOIN agente_tools at2 ON t.id = at2.tool_id
+        WHERE at2.agente_id = $1 AND t.ativo = true
+        ORDER BY at2.ordem_prioridade ASC
+      `, [agente_id]);
+
+      const tools = toolsResult.rows;
+
+      // --- 7. Get Redis history ---
+      const history = await getHistory(empresa_id, conversationKey);
+
+      // --- 8. Add user message to Redis ---
+      await addToHistory(empresa_id, conversationKey, 'user', message);
+
+      // --- 9. Log incoming message to mensagens_log ---
+      pool.query(`
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, criado_em)
+        VALUES ($1, $2, 'entrada', $3, NOW())
+      `, [conversa_id, empresa_id, message]).catch(err => {
+        createLogger.error('Failed to log incoming message', { error: err.message });
+      });
+
+      // --- 10. Process with Gemini (failover) ---
+      const toolDeclarations = buildToolDeclarations(tools);
+
+      const toolExecutor = async (tool, args) => {
+        const toolConfig = tools.find(t => t.nome.toLowerCase() === tool.nome.toLowerCase());
+        if (!toolConfig) {
+          throw new Error(`Tool ${tool.nome} not found`);
+        }
+        const result = await executeTool(toolConfig, args);
+        return transformResultForLLM(result, 2000);
+      };
+
+      let result = null;
+      let usedKeyId = availableKeys[0]?.id;
+
+      for (let keyIndex = 0; keyIndex < availableKeys.length; keyIndex++) {
+        const currentKey = availableKeys[keyIndex];
+        usedKeyId = currentKey.id;
+
+        try {
+          result = await processMessageWithTools(
+            {
+              apiKey: currentKey.gemini_api_key,
+              model: modelo,
+              systemPrompt: prompt_ativo,
+              tools: toolDeclarations,
+              history: formatHistoryForGemini(history),
+              message,
+              temperature: temperatura,
+              maxTokens: max_tokens
+            },
+            toolExecutor
+          );
+
+          if (currentKey.id) {
+            recordKeySuccess(currentKey.id).catch(() => {});
+          }
+
+          if (keyIndex > 0) {
+            createLogger.info('Failover successful', {
+              empresa_id, agente_id,
+              failed_keys: keyIndex,
+              successful_key_index: keyIndex
+            });
+          }
+
+          break;
+        } catch (error) {
+          const isRetryable = error.code === 'RATE_LIMITED' || error.code === 'INVALID_KEY' || error.code === 'API_ERROR';
+
+          if (currentKey.id) {
+            recordKeyError(currentKey.id, error.message || error.code || 'Unknown error').catch(() => {});
+          }
+
+          createLogger.warn('API key failed, attempting failover', {
+            empresa_id, agente_id,
+            key_index: keyIndex,
+            total_keys: availableKeys.length,
+            error_code: error.code,
+            will_retry: isRetryable && keyIndex < availableKeys.length - 1
+          });
+
+          if (!isRetryable || keyIndex >= availableKeys.length - 1) {
+            throw error;
+          }
+        }
+      }
+
+      if (!result) {
+        throw new Error('All API keys failed');
+      }
+
+      // --- 11. Save response to Redis ---
+      await addToHistory(empresa_id, conversationKey, 'model', result.text);
+
+      for (const toolCall of result.toolsCalled) {
+        await addToolCallToHistory(
+          empresa_id,
+          conversationKey,
+          { name: toolCall.name, args: toolCall.args },
+          toolCall.result
+        );
+      }
+
+      const processingTime = Date.now() - startTime;
+
+      // --- 12. Log response to mensagens_log ---
+      pool.query(`
+        INSERT INTO mensagens_log (
+          conversa_id, empresa_id, direcao, conteudo,
+          tokens_input, tokens_output, tools_invocadas_json,
+          modelo_usado, api_key_usada_id, latencia_ms, criado_em
+        ) VALUES ($1, $2, 'saida', $3, $4, $5, $6, $7, $8, $9, NOW())
+      `, [
+        conversa_id, empresa_id, result.text,
+        result.tokensInput, result.tokensOutput,
+        result.toolsCalled.length > 0 ? JSON.stringify(result.toolsCalled.map(tc => tc.name)) : null,
+        modelo, usedKeyId, processingTime
+      ]).catch(err => {
+        createLogger.error('Failed to log outgoing message', { error: err.message });
+      });
+
+      // --- 13. Increment daily usage ---
+      pool.query(`
+        UPDATE uso_diario_agente
+        SET total_atendimentos = total_atendimentos + 1,
+            limite_atingido = CASE
+              WHEN total_atendimentos + 1 >= limite_diario THEN true
+              ELSE false
+            END,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE empresa_id = $1 AND agente_id = $2 AND data = CURRENT_DATE
+      `, [empresa_id, agente_id]).catch(err => {
+        createLogger.error('Failed to increment daily usage', { error: err.message });
+      });
+
+      // --- 14. Log analytics ---
+      pool.query(`
+        INSERT INTO conversacao_analytics (
+          empresa_id, agente_id, conversation_id,
+          tokens_input, tokens_output, iteracoes,
+          tools_chamadas, tempo_processamento_ms, modelo, sucesso
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [
+        empresa_id, agente_id, conversationKey,
+        result.tokensInput, result.tokensOutput,
+        result.iteracoes, result.toolsCalled.length,
+        processingTime, modelo, true
+      ]).catch(err => {
+        createLogger.error('Failed to log analytics', { error: err.message });
+      });
+
+      // --- 15. Mirror to Chatwoot (async, fire-and-forget) ---
+      try {
+        const chatwootConfig = await pool.query(`
+          SELECT ce.chatwoot_account_id, e.chatwoot_url, e.chatwoot_api_token
+          FROM chatwoot_empresas ce
+          JOIN empresas e ON ce.empresa_id = e.id
+          WHERE ce.empresa_id = $1 AND ce.is_active = true
+          LIMIT 1
+        `, [empresa_id]);
+
+        if (chatwootConfig.rows.length > 0) {
+          const cw = chatwootConfig.rows[0];
+          if (cw.chatwoot_url && cw.chatwoot_api_token) {
+            // Find or note: Chatwoot mirroring for n8n-origin messages
+            // needs a Chatwoot conversation_id. This would require creating
+            // a conversation in Chatwoot first. For now, log intent.
+            createLogger.info('Chatwoot mirror available but skipped (no Chatwoot conversation_id for n8n flow)', {
+              empresa_id, phone
+            });
+          }
+        }
+      } catch (cwErr) {
+        createLogger.warn('Chatwoot mirror check failed (non-blocking)', { error: cwErr.message });
+      }
+
+      // --- 16. Transfer check ---
+      try {
+        const transferRules = await pool.query(`
+          SELECT at2.*, a_dest.nome as agente_destino_nome
+          FROM agente_transferencias at2
+          JOIN agentes a_dest ON a_dest.id = at2.agente_destino_id AND a_dest.ativo = true
+          WHERE at2.agente_origem_id = $1 AND at2.ativo = true
+          ORDER BY at2.criado_em ASC
+        `, [agente_id]);
+
+        if (transferRules.rows.length > 0) {
+          for (const rule of transferRules.rows) {
+            let shouldTransfer = false;
+
+            if (rule.trigger_tipo === 'keyword') {
+              const textToCheck = (message + ' ' + result.text).toLowerCase();
+              shouldTransfer = textToCheck.includes(String(rule.trigger_valor).toLowerCase());
+            } else if (rule.trigger_tipo === 'tool_result') {
+              shouldTransfer = result.toolsCalled.some(tc =>
+                tc.name === rule.trigger_valor ||
+                (tc.result && JSON.stringify(tc.result).includes(String(rule.trigger_valor)))
+              );
+            } else if (rule.trigger_tipo === 'menu_opcao') {
+              shouldTransfer = message.trim().toLowerCase() === String(rule.trigger_valor).toLowerCase();
+            }
+
+            if (shouldTransfer) {
+              createLogger.info('Transfer triggered (n8n)', {
+                empresa_id,
+                from_agent: agente_id,
+                to_agent: rule.agente_destino_id,
+                trigger: rule.trigger_tipo,
+                phone
+              });
+
+              await pool.query(`
+                UPDATE conversas
+                SET agente_id = $1, atualizado_em = CURRENT_TIMESTAMP
+                WHERE id = $2
+              `, [rule.agente_destino_id, conversa_id]);
+
+              pool.query(`
+                INSERT INTO controle_historico (empresa_id, conversa_id, acao, motivo)
+                VALUES ($1, $2, 'transferencia_agente', $3)
+              `, [empresa_id, conversa_id, rule.trigger_tipo + ':' + rule.trigger_valor])
+                .catch(err => createLogger.error('Failed to log transfer history', { error: err.message }));
+
+              break;
+            }
+          }
+        }
+      } catch (transferError) {
+        createLogger.error('Transfer check failed (non-blocking)', {
+          error: transferError.message, empresa_id, agente_id
+        });
+      }
+
+      // --- Return synchronous response to n8n ---
+      createLogger.info('n8n webhook processed', {
+        empresa_id, agente_id, phone,
+        processing_time_ms: processingTime,
+        tokens_total: result.tokensInput + result.tokensOutput,
+        tools_called: result.toolsCalled.length
+      });
+
+      return {
+        success: true,
+        data: {
+          response: result.text,
+          conversation_id: conversa_id,
+          agent_name: agente_nome,
+          tools_called: result.toolsCalled.map(tc => tc.name),
+          tokens_used: {
+            input: result.tokensInput,
+            output: result.tokensOutput
+          },
+          processing_time_ms: processingTime
+        }
+      };
+
+    } catch (error) {
+      const processingTime = Date.now() - startTime;
+
+      createLogger.error('n8n webhook processing failed', {
+        empresa_id,
+        phone,
+        error: error.message,
+        code: error.code,
+        processing_time_ms: processingTime
+      });
+
+      // Log failed analytics
+      pool.query(`
+        INSERT INTO conversacao_analytics (
+          empresa_id, conversation_id,
+          tokens_input, tokens_output, iteracoes,
+          tools_chamadas, tempo_processamento_ms, modelo, sucesso, erro
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [
+        empresa_id, `whatsapp:${phone}`,
+        error.partialResult?.tokensInput || 0,
+        error.partialResult?.tokensOutput || 0,
+        error.partialResult?.iteracoes || 0,
+        error.partialResult?.toolsCalled?.length || 0,
+        processingTime, null, false, error.message
+      ]).catch(() => {});
+
+      if (error.code === 'RATE_LIMITED') {
+        return reply.code(429).send({
+          success: false,
+          error: {
+            code: 'RATE_LIMITED',
+            message: 'AI API rate limit exceeded. Please try again later.'
+          }
+        });
+      }
+
+      if (error.code === 'INVALID_KEY') {
+        return reply.code(500).send({
+          success: false,
+          error: {
+            code: 'INVALID_GEMINI_KEY',
+            message: 'Invalid Gemini API key configured for this agent'
+          }
+        });
+      }
+
+      if (error.code === 'TIMEOUT') {
+        return reply.code(504).send({
+          success: false,
+          error: {
+            code: 'TIMEOUT',
+            message: 'Request timeout. Please try again with a shorter message.'
+          }
+        });
+      }
+
+      return reply.code(500).send({
+        success: false,
+        error: {
+          code: 'PROCESSING_ERROR',
+          message: 'Failed to process message. Please try again.'
+        }
+      });
+    }
+  });
+
+  /**
+   * GET /api/webhooks/n8n/health
+   * Health check for n8n webhook endpoint
+   */
+  fastify.get('/health', async () => {
+    return {
+      success: true,
+      data: {
+        status: 'healthy',
+        webhook: 'n8n',
+        timestamp: new Date().toISOString()
+      }
+    };
+  });
+};
+
+export default n8nWebhookRoutes;

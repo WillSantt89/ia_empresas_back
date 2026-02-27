@@ -298,8 +298,44 @@ const chatRoutes = async (fastify) => {
         });
       }
 
+      // ========== RESOLVE CONVERSA_ID FOR MENSAGENS_LOG ==========
+      // Find or create internal conversa record based on Chatwoot conversation_id
+      let conversa_id_interno = null;
+      try {
+        const conversaLookup = await pool.query(`
+          SELECT id FROM conversas
+          WHERE empresa_id = $1 AND conversation_id_chatwoot = $2 AND status = 'ativo'
+          ORDER BY criado_em DESC LIMIT 1
+        `, [empresa_id, conversation_id]);
+
+        if (conversaLookup.rows.length > 0) {
+          conversa_id_interno = conversaLookup.rows[0].id;
+        } else {
+          // Create a new conversa record linked to this Chatwoot conversation
+          const insertConversa = await pool.query(`
+            INSERT INTO conversas (empresa_id, conversation_id_chatwoot, agente_id, agente_inicial_id, status, dados_json)
+            VALUES ($1, $2, $3, $3, 'ativo', $4)
+            RETURNING id
+          `, [empresa_id, conversation_id, agente_id, JSON.stringify({ source: 'chatwoot' })]);
+          conversa_id_interno = insertConversa.rows[0].id;
+        }
+      } catch (conversaErr) {
+        createLogger.warn('Failed to resolve conversa_id for mensagens_log', { error: conversaErr.message });
+      }
+      // ========== END RESOLVE CONVERSA_ID ==========
+
       // Add user message to history
       await addToHistory(empresa_id, conversation_id, 'user', message);
+
+      // Log incoming message to mensagens_log (async, non-blocking)
+      if (conversa_id_interno) {
+        pool.query(`
+          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, criado_em)
+          VALUES ($1, $2, 'entrada', $3, NOW())
+        `, [conversa_id_interno, empresa_id, message]).catch(err => {
+          createLogger.warn('Failed to log incoming message to mensagens_log', { error: err.message });
+        });
+      }
 
       // Build tool declarations for Gemini
       const toolDeclarations = buildToolDeclarations(tools);
@@ -396,6 +432,25 @@ const chatRoutes = async (fastify) => {
           { name: toolCall.name, args: toolCall.args },
           toolCall.result
         );
+      }
+
+      // Log outgoing message to mensagens_log (async, non-blocking)
+      if (conversa_id_interno) {
+        const chatProcessingTime = Date.now() - startTime;
+        pool.query(`
+          INSERT INTO mensagens_log (
+            conversa_id, empresa_id, direcao, conteudo,
+            tokens_input, tokens_output, tools_invocadas_json,
+            modelo_usado, api_key_usada_id, latencia_ms, criado_em
+          ) VALUES ($1, $2, 'saida', $3, $4, $5, $6, $7, $8, $9, NOW())
+        `, [
+          conversa_id_interno, empresa_id, result.text,
+          result.tokensInput, result.tokensOutput,
+          result.toolsCalled.length > 0 ? JSON.stringify(result.toolsCalled.map(tc => tc.name)) : null,
+          modelo, usedKeyId, chatProcessingTime
+        ]).catch(err => {
+          createLogger.warn('Failed to log outgoing message to mensagens_log', { error: err.message });
+        });
       }
 
       // Send response to Chatwoot if context provided
