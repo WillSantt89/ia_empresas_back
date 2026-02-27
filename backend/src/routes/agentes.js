@@ -788,15 +788,24 @@ const agentesRoutes = async (fastify) => {
       };
 
     } catch (error) {
-      const errMsg = error?.message || (typeof error === 'object' ? JSON.stringify(error) : String(error));
+      const errMsg = error?.message || 'Erro ao processar mensagem';
       createLogger.error('Failed to test agent', {
-        empresa_id, agent_id: id, error: errMsg, stack: error?.stack
+        empresa_id, agent_id: id, error: errMsg
       });
+
+      // Mensagem amigável para o usuário
+      let userMessage = errMsg;
+      if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('API key not valid')) {
+        userMessage = 'API key do Gemini invalida. Atualize a chave em API Keys.';
+      } else if (errMsg.includes('model') && errMsg.includes('not found')) {
+        userMessage = `Modelo ${agent.modelo} nao disponivel. Altere o modelo do agente.`;
+      }
+
       return reply.code(500).send({
         success: false,
         error: {
           code: 'TEST_FAILED',
-          message: errMsg
+          message: userMessage
         }
       });
     }
