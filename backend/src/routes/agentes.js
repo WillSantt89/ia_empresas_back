@@ -27,7 +27,7 @@ const agentesRoutes = async (fastify) => {
         type: 'string',
         enum: ALL_MODELS
       },
-      prompt_ativo: { type: 'string', minLength: 10, maxLength: 10000 },
+      prompt_ativo: { type: 'string', minLength: 10, maxLength: 35000 },
       temperatura: { type: 'number', minimum: 0, maximum: 2, default: DEFAULT_LIMITS.TEMPERATURE },
       max_tokens: { type: 'integer', minimum: 100, maximum: 8192, default: DEFAULT_LIMITS.MAX_TOKENS },
       config_json: { type: 'object' },
