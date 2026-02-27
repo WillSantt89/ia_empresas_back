@@ -504,9 +504,28 @@ export async function processMessageWithTools(options, toolExecutor) {
       }
 
       // No function calls, get the final text response
-      const finalText = response.text();
+      let finalText = '';
+      try {
+        finalText = response.text();
+      } catch (textErr) {
+        // response.text() can throw if response has no text parts
+        // Try extracting text from candidates directly
+        const candidate = response.candidates?.[0];
+        if (candidate?.content?.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) finalText += part.text;
+          }
+        }
+      }
 
       if (!finalText) {
+        // Log what we got for debugging
+        const candidate = response.candidates?.[0];
+        createLogger.warn('No text in response', {
+          finishReason: candidate?.finishReason,
+          partsCount: candidate?.content?.parts?.length,
+          parts: candidate?.content?.parts?.map(p => Object.keys(p))
+        });
         throw new Error('No text response from model');
       }
 
