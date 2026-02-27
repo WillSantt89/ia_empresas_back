@@ -789,9 +789,16 @@ const agentesRoutes = async (fastify) => {
 
     } catch (error) {
       createLogger.error('Failed to test agent', {
-        empresa_id, agent_id: id, error: error.message
+        empresa_id, agent_id: id, error: error.message, stack: error.stack
       });
-      throw error;
+      return reply.code(500).send({
+        success: false,
+        error: {
+          code: 'TEST_FAILED',
+          message: error.message || 'Erro ao testar agente',
+          detail: String(error)
+        }
+      });
     }
   });
 
