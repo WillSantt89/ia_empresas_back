@@ -109,7 +109,7 @@ export default async function configuracoesRoutes(fastify, opts) {
             webhook_token: empresa.webhook_token || null,
             n8n_response_url: empresa.n8n_response_url || null,
             webhook_url: empresa.webhook_token
-              ? `${process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3000}`}/api/webhooks/n8n`
+              ? `${process.env.BACKEND_URL || 'https://wschat-ia-empresas-back.fldxjw.easypanel.host'}/api/webhooks/n8n`
               : null,
             configurado: !!empresa.webhook_token
           },
