@@ -409,6 +409,15 @@ export async function processMessageWithTools(options, toolExecutor) {
       },
     });
 
+    // Inject system prompt as first messages (ensures compatibility with SDK < 0.7
+    // where systemInstruction param is ignored)
+    if (systemPrompt) {
+      currentHistory.unshift(
+        { role: 'user', parts: [{ text: systemPrompt }] },
+        { role: 'model', parts: [{ text: 'Entendido. Vou seguir essas instrucoes em todas as minhas respostas.' }] }
+      );
+    }
+
     // Add user message to history
     currentHistory.push({
       role: 'user',
