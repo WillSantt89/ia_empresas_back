@@ -327,10 +327,24 @@ export function buildContents(history, currentMessage) {
  */
 export function buildToolDeclarations(tools) {
   return tools.map(tool => ({
-    name: tool.nome,
+    name: sanitizeFunctionName(tool.nome),
     description: tool.descricao_para_llm,
     parameters: tool.parametros_schema_json
   }));
+}
+
+/**
+ * Sanitize function name for Gemini API compatibility
+ * Gemini 3 requires lowercase alphanumeric, underscores, dots, colons, dashes
+ * Must start with letter or underscore, max 64 chars
+ */
+function sanitizeFunctionName(name) {
+  if (!name) return 'unnamed_tool';
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9_.:/-]/g, '_')
+    .replace(/^[^a-z_]/, '_$&')
+    .slice(0, 64);
 }
 
 /**
@@ -454,8 +468,10 @@ export async function processMessageWithTools(options, toolExecutor) {
 
         for (const functionCall of functionCalls) {
           try {
-            // Find the tool
-            const tool = tools.find(t => t.nome === functionCall.name);
+            // Find the tool (compare case-insensitive, support both nome and name fields)
+            const tool = tools.find(t =>
+              (t.nome || t.name || '').toLowerCase() === functionCall.name.toLowerCase()
+            );
             if (!tool) {
               throw new Error(`Tool not found: ${functionCall.name}`);
             }

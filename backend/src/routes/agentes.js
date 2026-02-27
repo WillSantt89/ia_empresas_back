@@ -735,7 +735,7 @@ const agentesRoutes = async (fastify) => {
       const toolDeclarations = tools.length > 0 ? buildToolDeclarations(tools) : [];
 
       const toolExecutor = async (tool, args) => {
-        const toolConfig = tools.find(t => t.nome === tool.nome);
+        const toolConfig = tools.find(t => t.nome.toLowerCase() === tool.nome.toLowerCase());
         if (!toolConfig) throw new Error(`Tool ${tool.nome} nao encontrada`);
         const result = await executeTool(toolConfig, args);
         return transformResultForLLM(result, 2000);

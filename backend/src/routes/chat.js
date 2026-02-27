@@ -306,7 +306,7 @@ const chatRoutes = async (fastify) => {
 
       // Tool executor function
       const toolExecutor = async (tool, args) => {
-        const toolConfig = tools.find(t => t.nome === tool.nome);
+        const toolConfig = tools.find(t => t.nome.toLowerCase() === tool.nome.toLowerCase());
         if (!toolConfig) {
           throw new Error(`Tool ${tool.nome} not found`);
         }
