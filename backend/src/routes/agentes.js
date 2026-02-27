@@ -798,7 +798,7 @@ const agentesRoutes = async (fastify) => {
       if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('API key not valid')) {
         userMessage = 'API key do Gemini invalida. Atualize a chave em API Keys.';
       } else if (errMsg.includes('model') && errMsg.includes('not found')) {
-        userMessage = `Modelo ${agent.modelo} nao disponivel. Altere o modelo do agente.`;
+        userMessage = 'Modelo nao disponivel. Altere o modelo do agente.';
       }
 
       return reply.code(500).send({
