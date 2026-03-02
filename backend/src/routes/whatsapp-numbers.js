@@ -233,6 +233,10 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
           wn.id, wn.empresa_id, wn.inbox_id, wn.nome_exibicao,
           wn.phone_number_id, wn.waba_id, wn.numero_formatado,
           wn.ativo, wn.criado_em,
+          wn.verified_name, wn.display_phone_number, wn.quality_rating,
+          wn.name_status, wn.messaging_limit_tier, wn.platform_type,
+          wn.account_mode, wn.verificacao_status, wn.verificacao_erro,
+          wn.ultima_verificacao,
           i.nome as inbox_nome,
           i.inbox_id_chatwoot,
           a.nome as agente_nome,
@@ -477,7 +481,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
     }
   });
 
-  // Testar conexão do número
+  // Testar/verificar conexão do número via Meta Graph API
   fastify.post('/:id/testar', {
     preHandler: [
       fastify.authenticate,
@@ -521,29 +525,125 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
       const number = numberResult.rows[0];
       const token = await fastify.decrypt(number.token_graph_api);
 
-      // TODO: Implementar teste real com a API do WhatsApp
-      // Por enquanto, retornar sucesso simulado
-      logger.info(`WhatsApp number test requested: ${id}`);
+      logger.info(`WhatsApp number verification requested: ${id} (phone_number_id: ${number.phone_number_id})`);
+
+      // Chamar Meta Graph API
+      const metaFields = 'verified_name,display_phone_number,quality_rating,name_status,messaging_limit_tier,platform_type,account_mode';
+      const metaUrl = `https://graph.facebook.com/v21.0/${number.phone_number_id}?fields=${metaFields}`;
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      let metaResponse;
+      try {
+        metaResponse = await fetch(metaUrl, {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${token}` },
+          signal: controller.signal
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const metaData = await metaResponse.json();
+
+      if (!metaResponse.ok) {
+        // Meta retornou erro — salvar no banco
+        const erroMsg = metaData?.error?.message || `Erro HTTP ${metaResponse.status}`;
+        logger.warn(`Meta API error for ${number.phone_number_id}: ${erroMsg}`);
+
+        await pool.query(`
+          UPDATE whatsapp_numbers
+          SET verificacao_status = 'erro',
+              verificacao_erro = $1,
+              ultima_verificacao = NOW()
+          WHERE id = $2
+        `, [erroMsg, id]);
+
+        return {
+          success: false,
+          data: {
+            status: 'erro',
+            verificacao_status: 'erro',
+            verificacao_erro: erroMsg,
+            ultima_verificacao: new Date().toISOString(),
+            message: erroMsg
+          }
+        };
+      }
+
+      // Sucesso — salvar dados da Meta no banco
+      await pool.query(`
+        UPDATE whatsapp_numbers
+        SET verified_name = $1,
+            display_phone_number = $2,
+            quality_rating = $3,
+            name_status = $4,
+            messaging_limit_tier = $5,
+            platform_type = $6,
+            account_mode = $7,
+            verificacao_status = 'conectado',
+            verificacao_erro = NULL,
+            ultima_verificacao = NOW()
+        WHERE id = $8
+      `, [
+        metaData.verified_name || null,
+        metaData.display_phone_number || null,
+        metaData.quality_rating || null,
+        metaData.name_status || null,
+        metaData.messaging_limit_tier || null,
+        metaData.platform_type || null,
+        metaData.account_mode || null,
+        id
+      ]);
+
+      logger.info(`WhatsApp number verified successfully: ${id} - ${metaData.verified_name || number.phone_number_id}`);
 
       return {
         success: true,
         data: {
-          status: 'ok',
-          number_status: 'connected',
-          quality_rating: 'GREEN',
-          message: 'Número conectado e funcionando corretamente'
+          status: 'conectado',
+          verified_name: metaData.verified_name,
+          display_phone_number: metaData.display_phone_number,
+          quality_rating: metaData.quality_rating,
+          name_status: metaData.name_status,
+          messaging_limit_tier: metaData.messaging_limit_tier,
+          platform_type: metaData.platform_type,
+          account_mode: metaData.account_mode,
+          verificacao_status: 'conectado',
+          ultima_verificacao: new Date().toISOString(),
+          message: 'Número verificado com sucesso na Meta'
         }
       };
     } catch (error) {
-      logger.error('Error testing WhatsApp number:', error);
+      logger.error('Error verifying WhatsApp number:', error);
+
+      // Salvar erro no banco
+      const erroMsg = error.name === 'AbortError'
+        ? 'Timeout: Meta API não respondeu em 10 segundos'
+        : (error.message || 'Erro desconhecido ao verificar conexão');
+
+      try {
+        const { id } = request.params;
+        await pool.query(`
+          UPDATE whatsapp_numbers
+          SET verificacao_status = 'erro',
+              verificacao_erro = $1,
+              ultima_verificacao = NOW()
+          WHERE id = $2
+        `, [erroMsg, id]);
+      } catch (dbError) {
+        logger.error('Error saving verification failure:', dbError);
+      }
 
       return {
         success: false,
         data: {
-          status: 'error',
-          number_status: 'disconnected',
-          quality_rating: 'RED',
-          message: error.message || 'Erro ao testar conexão'
+          status: 'erro',
+          verificacao_status: 'erro',
+          verificacao_erro: erroMsg,
+          ultima_verificacao: new Date().toISOString(),
+          message: erroMsg
         }
       };
     }
