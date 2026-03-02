@@ -152,7 +152,7 @@ export default async function assinaturasRoutes(fastify, opts) {
               required: ['item_cobravel_id', 'quantidade'],
               properties: {
                 item_cobravel_id: { type: 'string', format: 'uuid' },
-                faixa_id: { type: 'string', format: 'uuid' },
+                faixa_id: { type: 'string', format: 'uuid', nullable: true },
                 quantidade: { type: 'integer', minimum: 1 }
               }
             }
