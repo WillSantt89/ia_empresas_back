@@ -77,12 +77,14 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
 
       return {
         success: true,
-        data: result.rows,
-        meta: {
-          total: result.rows.length,
-          limite_contratado: limite.limite_contratado,
-          preco_por_numero: parseFloat(limite.preco_por_numero || 0),
-          numeros_disponiveis: Math.max(0, limite.limite_contratado - result.rows.length)
+        data: {
+          data: result.rows,
+          meta: {
+            total: result.rows.length,
+            limite_contratado: limite.limite_contratado,
+            preco_por_numero: parseFloat(limite.preco_por_numero || 0),
+            numeros_disponiveis: Math.max(0, limite.limite_contratado - result.rows.length)
+          }
         }
       };
     } catch (error) {
