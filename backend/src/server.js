@@ -14,6 +14,7 @@ import { tenantMiddleware } from './middleware/tenant.js';
 import { requirePermission } from './middleware/permission.js';
 import { checkLimit } from './middleware/limit.js';
 import { globalRateLimit, setupRouteRateLimits } from './middleware/rate-limit.js';
+import { encrypt, decrypt } from './config/encryption.js';
 
 // Import routes
 import healthRoutes from './routes/health.js';
@@ -93,6 +94,8 @@ async function registerPlugins() {
   fastify.decorate('requirePermission', requirePermission);
   fastify.decorate('checkLimit', checkLimit);
   fastify.decorate('addTenantFilter', tenantMiddleware);
+  fastify.decorate('encrypt', encrypt);
+  fastify.decorate('decrypt', decrypt);
 
   // Setup route-specific rate limits
   setupRouteRateLimits(fastify);
