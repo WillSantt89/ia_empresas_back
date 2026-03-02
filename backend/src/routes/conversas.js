@@ -1,5 +1,7 @@
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
+import { getConversationMessages } from '../services/chatwoot.js';
+import { syncChatwootHistory } from '../services/memory.js';
 
 export default async function conversasRoutes(fastify, opts) {
   // Listar conversas
@@ -485,6 +487,27 @@ export default async function conversasRoutes(fastify, opts) {
       }
 
       await client.query('COMMIT');
+
+      // Sync Chatwoot messages to Redis before IA resumes (non-blocking)
+      if (conversa.chatwoot_url && conversa.chatwoot_api_token && conversa.chatwoot_account_id && conversa.conversation_id_chatwoot && conversa.humano_assumiu_em) {
+        try {
+          const chatwootMessages = await getConversationMessages({
+            baseUrl: conversa.chatwoot_url,
+            accountId: conversa.chatwoot_account_id,
+            apiKey: conversa.chatwoot_api_token,
+            conversationId: conversa.conversation_id_chatwoot,
+            after: conversa.humano_assumiu_em
+          });
+
+          const conversationKey = conversa.contato_whatsapp ? `whatsapp:${conversa.contato_whatsapp}` : null;
+          if (conversationKey && chatwootMessages.length > 0) {
+            const synced = await syncChatwootHistory(conversa.empresa_id, conversationKey, chatwootMessages);
+            logger.info(`Synced ${synced} Chatwoot messages for conversation ${id}`);
+          }
+        } catch (syncError) {
+          logger.error(`Failed to sync Chatwoot messages for conversation ${id} (non-blocking):`, syncError);
+        }
+      }
 
       logger.info(`Conversa ${id} returned to IA`);
 

@@ -426,6 +426,96 @@ export async function archiveConversation(empresaId, conversationId) {
 }
 
 /**
+ * Sync Chatwoot messages into Redis conversation history
+ * Only imports outgoing messages (message_type === 1) — human agent responses
+ * Incoming messages (message_type === 0) are already in Redis (saved by webhook)
+ * @param {string} empresaId - Company ID
+ * @param {string} conversationKey - Redis conversation key (e.g. "whatsapp:+5511...")
+ * @param {Array} chatwootMessages - Messages from Chatwoot API
+ * @returns {Promise<number>} Number of messages synced
+ */
+export async function syncChatwootHistory(empresaId, conversationKey, chatwootMessages) {
+  try {
+    if (!chatwootMessages || chatwootMessages.length === 0) {
+      createLogger.debug('No Chatwoot messages to sync', { empresa_id: empresaId, conversation_key: conversationKey });
+      return 0;
+    }
+
+    // Filter only outgoing messages (human agent responses) with content
+    const outgoingMessages = chatwootMessages.filter(
+      msg => msg.message_type === 1 && msg.content && msg.content.trim()
+    );
+
+    if (outgoingMessages.length === 0) {
+      createLogger.debug('No outgoing messages to sync', { empresa_id: empresaId, conversation_key: conversationKey });
+      return 0;
+    }
+
+    // Sort by created_at ASC (oldest first)
+    outgoingMessages.sort((a, b) => a.created_at - b.created_at);
+
+    // Convert to Gemini format
+    const geminiMessages = outgoingMessages.map(msg => ({
+      role: 'model',
+      parts: [{ text: msg.content }],
+      timestamp: new Date(msg.created_at * 1000).toISOString(),
+      source: 'chatwoot_sync'
+    }));
+
+    // Get existing history
+    const key = buildConversationKey(empresaId, conversationKey);
+    let history = await getHistory(empresaId, conversationKey);
+
+    // Merge: add Chatwoot messages that aren't already in history
+    // Use timestamp comparison to avoid duplicates
+    const existingTimestamps = new Set(history.map(msg => msg.timestamp));
+
+    let synced = 0;
+    for (const msg of geminiMessages) {
+      if (!existingTimestamps.has(msg.timestamp)) {
+        history.push(msg);
+        synced++;
+      }
+    }
+
+    if (synced === 0) {
+      createLogger.debug('All messages already in history', { empresa_id: empresaId, conversation_key: conversationKey });
+      return 0;
+    }
+
+    // Re-sort by timestamp to maintain chronological order
+    history.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    // Trim if exceeds limit
+    if (history.length > DEFAULT_LIMITS.CONVERSATION_HISTORY_SIZE) {
+      const systemMessages = history.filter(msg => msg.role === 'system' || msg.isSystemMessage);
+      const recentMessages = history.slice(-(DEFAULT_LIMITS.CONVERSATION_HISTORY_SIZE - systemMessages.length));
+      history = [...systemMessages, ...recentMessages];
+    }
+
+    // Save to Redis
+    await setWithExpiry(key, history, DEFAULT_LIMITS.SESSION_TTL_SECONDS);
+
+    createLogger.info('Chatwoot history synced to Redis', {
+      empresa_id: empresaId,
+      conversation_key: conversationKey,
+      messages_synced: synced,
+      total_history_size: history.length
+    });
+
+    return synced;
+
+  } catch (error) {
+    createLogger.error('Failed to sync Chatwoot history', {
+      empresa_id: empresaId,
+      conversation_key: conversationKey,
+      error: error.message
+    });
+    throw error;
+  }
+}
+
+/**
  * Build initial system message for conversation
  * @param {Object} agent - Agent configuration
  * @returns {Object} System message

@@ -141,7 +141,7 @@ const n8nWebhookRoutes = async (fastify) => {
       let conversa_id;
 
       const conversaResult = await pool.query(`
-        SELECT id FROM conversas
+        SELECT id, controlado_por, humano_nome FROM conversas
         WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
         ORDER BY criado_em DESC
         LIMIT 1
@@ -149,6 +149,48 @@ const n8nWebhookRoutes = async (fastify) => {
 
       if (conversaResult.rows.length > 0) {
         conversa_id = conversaResult.rows[0].id;
+
+        // --- Check human control ---
+        if (conversaResult.rows[0].controlado_por === 'humano') {
+          createLogger.info('Message received during human control, skipping AI', {
+            empresa_id, phone, conversa_id,
+            humano_nome: conversaResult.rows[0].humano_nome
+          });
+
+          // Save client message to Redis (preserves context for when IA resumes)
+          addToHistory(empresa_id, conversationKey, 'user', message).catch(err => {
+            createLogger.error('Failed to save message during human control', { error: err.message });
+          });
+
+          // Log to mensagens_log for audit
+          pool.query(`
+            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, criado_em)
+            VALUES ($1, $2, 'entrada', $3, NOW())
+          `, [conversa_id, empresa_id, message]).catch(err => {
+            createLogger.error('Failed to log message during human control', { error: err.message });
+          });
+
+          // Update humano_ultima_msg_em to prevent premature timeout
+          pool.query(`
+            UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW()
+            WHERE id = $1
+          `, [conversa_id]).catch(err => {
+            createLogger.error('Failed to update humano_ultima_msg_em', { error: err.message });
+          });
+
+          return {
+            success: true,
+            data: {
+              response: null,
+              human_controlled: true,
+              conversation_id: conversa_id,
+              agent_name: null,
+              tools_called: [],
+              tokens_used: { input: 0, output: 0 },
+              processing_time_ms: Date.now() - startTime
+            }
+          };
+        }
       } else {
         const insertConversa = await pool.query(`
           INSERT INTO conversas (empresa_id, contato_whatsapp, agente_id, agente_inicial_id, status, dados_json)
@@ -527,6 +569,174 @@ const n8nWebhookRoutes = async (fastify) => {
           code: 'PROCESSING_ERROR',
           message: 'Failed to process message. Please try again.'
         }
+      });
+    }
+  });
+
+  /**
+   * POST /api/webhooks/n8n/controle-humano
+   * Endpoint for n8n to notify when a human operator assumes/releases a conversation in Chatwoot
+   *
+   * Authentication: x-webhook-token header validated against empresas.webhook_token
+   */
+  fastify.post('/controle-humano', {
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          phone: { type: 'string', minLength: 1, maxLength: 30 },
+          acao: { type: 'string', enum: ['assumir', 'devolver'] },
+          operador_nome: { type: 'string', maxLength: 255 }
+        },
+        required: ['phone', 'acao']
+      }
+    }
+  }, async (request, reply) => {
+    const { phone, acao, operador_nome } = request.body;
+    const webhookToken = request.headers['x-webhook-token'];
+
+    // --- Auth via webhook_token ---
+    if (!webhookToken) {
+      return reply.code(401).send({
+        success: false,
+        error: { code: 'MISSING_TOKEN', message: 'Header x-webhook-token is required' }
+      });
+    }
+
+    let empresa;
+    try {
+      const empresaResult = await pool.query(
+        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND is_active = true LIMIT 1',
+        [webhookToken]
+      );
+
+      if (empresaResult.rows.length === 0) {
+        return reply.code(401).send({
+          success: false,
+          error: { code: 'INVALID_TOKEN', message: 'Invalid or inactive webhook token' }
+        });
+      }
+
+      empresa = empresaResult.rows[0];
+    } catch (err) {
+      createLogger.error('Token lookup failed (controle-humano)', { error: err.message });
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: 'Failed to validate token' }
+      });
+    }
+
+    const empresa_id = empresa.id;
+
+    createLogger.info('Controle humano request', { empresa_id, phone, acao, operador_nome });
+
+    if (acao === 'devolver') {
+      return reply.code(501).send({
+        success: false,
+        error: {
+          code: 'NOT_IMPLEMENTED',
+          message: 'Ação devolver via n8n ainda não implementada. Use o endpoint /api/conversas/:id/devolver.'
+        }
+      });
+    }
+
+    // --- acao === 'assumir' ---
+    try {
+      // Find active conversation for this phone
+      const conversaResult = await pool.query(`
+        SELECT id, controlado_por FROM conversas
+        WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
+        ORDER BY criado_em DESC
+        LIMIT 1
+      `, [empresa_id, phone]);
+
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: {
+            code: 'CONVERSA_NOT_FOUND',
+            message: 'Nenhuma conversa ativa encontrada para este telefone'
+          }
+        });
+      }
+
+      const conversa = conversaResult.rows[0];
+
+      if (conversa.controlado_por === 'humano') {
+        return reply.code(400).send({
+          success: false,
+          error: {
+            code: 'ALREADY_HUMAN_CONTROLLED',
+            message: 'Conversa já está sendo controlada por humano'
+          }
+        });
+      }
+
+      // Update conversation to human control
+      await pool.query(`
+        UPDATE conversas
+        SET
+          controlado_por = 'humano',
+          humano_nome = $1,
+          humano_assumiu_em = NOW(),
+          humano_ultima_msg_em = NOW(),
+          atualizado_em = NOW()
+        WHERE id = $2
+      `, [operador_nome || 'Operador Chatwoot', conversa.id]);
+
+      // Log in controle_historico
+      await pool.query(`
+        INSERT INTO controle_historico (
+          id, conversa_id, empresa_id, acao,
+          de_controlador, para_controlador,
+          humano_nome, motivo, criado_em
+        )
+        VALUES (
+          gen_random_uuid(), $1, $2, 'humano_assumiu',
+          'ia', 'humano',
+          $3, 'Operador assumiu via Chatwoot (n8n webhook)', NOW()
+        )
+      `, [conversa.id, empresa_id, operador_nome || 'Operador Chatwoot']);
+
+      // Create notification
+      pool.query(`
+        INSERT INTO notificacoes (
+          id, empresa_id, tipo, titulo, mensagem,
+          severidade, lida, criado_em
+        )
+        VALUES (
+          gen_random_uuid(), $1, 'conversa_assumida',
+          'Operador assumiu conversa',
+          $2,
+          'info', false, NOW()
+        )
+      `, [
+        empresa_id,
+        `${operador_nome || 'Operador'} assumiu a conversa com ${phone} via Chatwoot`
+      ]).catch(err => {
+        createLogger.error('Failed to create notification', { error: err.message });
+      });
+
+      createLogger.info('Human control activated via n8n', {
+        empresa_id, conversa_id: conversa.id, phone, operador_nome
+      });
+
+      return {
+        success: true,
+        data: {
+          conversa_id: conversa.id,
+          controlado_por: 'humano',
+          operador_nome: operador_nome || 'Operador Chatwoot'
+        }
+      };
+
+    } catch (error) {
+      createLogger.error('Failed to process controle-humano', {
+        empresa_id, phone, acao, error: error.message
+      });
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'PROCESSING_ERROR', message: 'Falha ao processar controle humano' }
       });
     }
   });

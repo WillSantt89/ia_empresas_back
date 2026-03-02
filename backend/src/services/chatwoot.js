@@ -576,6 +576,87 @@ export async function searchConversations(options) {
 }
 
 /**
+ * Get conversation messages with pagination and timestamp filter
+ * Used to sync human agent messages back to Redis when IA resumes control
+ * @param {Object} options - Request options
+ * @param {string} options.baseUrl - Chatwoot base URL
+ * @param {string} options.accountId - Account ID
+ * @param {string} options.apiKey - API access token
+ * @param {number} options.conversationId - Conversation ID
+ * @param {string} options.after - ISO timestamp to filter messages after this date
+ * @param {number} options.maxMessages - Max messages to fetch (default 200)
+ * @returns {Promise<Array>} Array of messages sorted by created_at ASC
+ */
+export async function getConversationMessages(options) {
+  const {
+    baseUrl,
+    accountId,
+    apiKey,
+    conversationId,
+    after = null,
+    maxMessages = 200
+  } = options;
+
+  try {
+    const allMessages = [];
+    let beforeCursor = null;
+    const afterTimestamp = after ? new Date(after).getTime() / 1000 : null;
+
+    // Paginate fetching messages (Chatwoot uses 'before' cursor — ID of oldest message)
+    while (allMessages.length < maxMessages) {
+      let path = `conversations/${conversationId}/messages`;
+      if (beforeCursor) {
+        path += `?before=${beforeCursor}`;
+      }
+
+      const url = buildApiUrl(baseUrl, accountId, path);
+
+      const response = await makeRequest({ url, apiKey });
+      const messages = response.payload || [];
+
+      if (messages.length === 0) break;
+
+      for (const msg of messages) {
+        // Filter by timestamp if provided
+        if (afterTimestamp && msg.created_at < afterTimestamp) {
+          // Messages are in DESC order, so once we hit one before our threshold, stop
+          return allMessages.sort((a, b) => a.created_at - b.created_at);
+        }
+        allMessages.push(msg);
+      }
+
+      if (allMessages.length >= maxMessages) break;
+
+      // Set cursor to oldest message ID for next page
+      beforeCursor = messages[messages.length - 1]?.id;
+
+      // Safety: if we got fewer messages than a typical page, we've reached the end
+      if (messages.length < 20) break;
+    }
+
+    // Sort ASC (oldest first)
+    allMessages.sort((a, b) => a.created_at - b.created_at);
+
+    createLogger.info('Conversation messages fetched for sync', {
+      account_id: accountId,
+      conversation_id: conversationId,
+      total_fetched: allMessages.length,
+      after_filter: after || 'none'
+    });
+
+    return allMessages.slice(0, maxMessages);
+
+  } catch (error) {
+    createLogger.error('Failed to get conversation messages for sync', {
+      account_id: accountId,
+      conversation_id: conversationId,
+      error: error.message
+    });
+    throw error;
+  }
+}
+
+/**
  * Validate Chatwoot webhook signature
  * @param {string} payload - Request body as string
  * @param {string} signature - Signature from header
