@@ -169,23 +169,69 @@ export default async function assinaturasRoutes(fastify, opts) {
       const { empresaId } = request.params;
       const { plano_id, status, itens } = request.body;
 
-      // Verificar se assinatura existe
+      // Verificar se assinatura existe — se não, criar (upsert)
       const assinaturaResult = await client.query(
         'SELECT * FROM assinaturas WHERE empresa_id = $1',
         [empresaId]
       );
 
-      if (assinaturaResult.rows.length === 0) {
-        return reply.code(404).send({
-          success: false,
-          error: {
-            code: 'ASSINATURA_NOT_FOUND',
-            message: 'Assinatura não encontrada'
-          }
-        });
-      }
+      let assinatura;
 
-      const assinatura = assinaturaResult.rows[0];
+      if (assinaturaResult.rows.length === 0) {
+        // Upsert: criar assinatura se não existe
+        if (!plano_id) {
+          await client.query('ROLLBACK');
+          return reply.code(400).send({
+            success: false,
+            error: {
+              code: 'PLANO_REQUIRED',
+              message: 'plano_id é obrigatório para criar assinatura'
+            }
+          });
+        }
+
+        // Verificar se plano existe
+        const planoExists = await client.query(
+          'SELECT * FROM planos WHERE id = $1 AND ativo = true',
+          [plano_id]
+        );
+
+        if (planoExists.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return reply.code(400).send({
+            success: false,
+            error: {
+              code: 'PLANO_NOT_FOUND',
+              message: 'Plano não encontrado ou inativo'
+            }
+          });
+        }
+
+        const newResult = await client.query(
+          `INSERT INTO assinaturas (empresa_id, plano_id, status, data_inicio)
+           VALUES ($1, $2, 'ativa', CURRENT_DATE) RETURNING *`,
+          [empresaId, plano_id]
+        );
+        assinatura = newResult.rows[0];
+
+        // Atualizar plano_id na empresa
+        await client.query(
+          'UPDATE empresas SET plano_id = $1, atualizado_em = NOW() WHERE id = $2',
+          [plano_id, empresaId]
+        );
+
+        // Registrar histórico
+        await client.query(`
+          INSERT INTO assinatura_historico (
+            id, assinatura_id, empresa_id, acao,
+            executado_por, criado_em
+          ) VALUES (
+            gen_random_uuid(), $1, $2, 'criou_assinatura', $3, NOW()
+          )
+        `, [assinatura.id, empresaId, request.user.id]);
+      } else {
+        assinatura = assinaturaResult.rows[0];
+      }
       const userId = request.user.id;
 
       // Atualizar plano se fornecido
@@ -293,8 +339,7 @@ export default async function assinaturasRoutes(fastify, opts) {
                   faixa_id = $1,
                   quantidade = $2,
                   preco_unitario = $3,
-                  limite_diario = $4,
-                  preco_total = $2 * $3
+                  limite_diario = $4
                 WHERE id = $5
               `, [itemNovo.faixa_id, itemNovo.quantidade, precoUnitario, limiteDialio, itemExistente.id]);
 

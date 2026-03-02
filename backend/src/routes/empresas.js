@@ -440,6 +440,77 @@ const empresasRoutes = async (fastify) => {
         VALUES ($1, $2, $3, $4, $5)
       `, [empresa.id, maxAgentes, maxUsuarios, maxMensagens, maxTokens]);
 
+      // Auto-criar assinatura com plano Starter e itens padrão
+      let assinaturaInfo = null;
+      const planoResult = await client.query(
+        "SELECT id FROM planos WHERE nome = 'Starter' AND ativo = true LIMIT 1"
+      );
+
+      if (planoResult.rows.length > 0) {
+        const planoId = planoResult.rows[0].id;
+
+        // Criar assinatura
+        const assinaturaResult = await client.query(
+          `INSERT INTO assinaturas (empresa_id, plano_id, status, data_inicio)
+           VALUES ($1, $2, 'ativa', CURRENT_DATE) RETURNING id`,
+          [empresa.id, planoId]
+        );
+        const assinaturaId = assinaturaResult.rows[0].id;
+
+        // Atualizar plano_id na empresa
+        await client.query(
+          'UPDATE empresas SET plano_id = $1 WHERE id = $2',
+          [planoId, empresa.id]
+        );
+
+        // Buscar itens cobráveis ativos com faixa mais barata (para por_faixa) ou preco_fixo
+        const itensResult = await client.query(`
+          SELECT
+            ic.id as item_cobravel_id,
+            ic.tipo_cobranca,
+            ic.preco_fixo,
+            (
+              SELECT json_build_object('id', fi.id, 'preco_mensal', fi.preco_mensal, 'limite_diario', fi.limite_diario)
+              FROM faixas_item fi
+              WHERE fi.item_cobravel_id = ic.id AND fi.ativo = true
+              ORDER BY fi.preco_mensal ASC
+              LIMIT 1
+            ) as faixa_mais_barata
+          FROM itens_cobraveis ic
+          WHERE ic.ativo = true
+        `);
+
+        for (const item of itensResult.rows) {
+          let faixaId = null;
+          let precoUnitario = 0;
+          let limiteDialio = null;
+
+          if (item.tipo_cobranca === 'preco_fixo') {
+            precoUnitario = item.preco_fixo || 0;
+          } else if (item.faixa_mais_barata) {
+            const faixa = item.faixa_mais_barata;
+            faixaId = faixa.id;
+            precoUnitario = faixa.preco_mensal || 0;
+            limiteDialio = faixa.limite_diario;
+          } else {
+            // Sem faixa disponível, pular item
+            continue;
+          }
+
+          await client.query(`
+            INSERT INTO assinatura_itens (
+              id, assinatura_id, empresa_id, item_cobravel_id,
+              faixa_id, quantidade, preco_unitario, limite_diario,
+              ativo, adicionado_em
+            ) VALUES (
+              gen_random_uuid(), $1, $2, $3, $4, 1, $5, $6, true, NOW()
+            )
+          `, [assinaturaId, empresa.id, item.item_cobravel_id, faixaId, precoUnitario, limiteDialio]);
+        }
+
+        assinaturaInfo = { id: assinaturaId, plano_id: planoId, itens_criados: itensResult.rows.length };
+      }
+
       await client.query('COMMIT');
 
       createLogger.info('Company created by master', {
@@ -466,6 +537,7 @@ const empresasRoutes = async (fastify) => {
             role: createdUser.role
           },
           limits: { max_agentes: maxAgentes, max_usuarios: maxUsuarios, max_mensagens_mes: maxMensagens, max_tokens_mes: maxTokens },
+          assinatura: assinaturaInfo,
           message: `Empresa criada com sucesso. Usuário ${createdUser.email} com acesso ${createdUser.role}.`
         }
       };
