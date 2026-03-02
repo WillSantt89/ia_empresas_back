@@ -356,7 +356,7 @@ export default async function assinaturasRoutes(fastify, opts) {
                   gen_random_uuid(), $1, $2,
                   $3, $4,
                   $5, $6, $7,
-                  $8, $9, $10, NOW()
+                  $8, $9, NOW()
                 )
               `, [
                 assinatura.id, empresaId,
