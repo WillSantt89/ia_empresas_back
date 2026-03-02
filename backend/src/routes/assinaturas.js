@@ -220,13 +220,13 @@ export default async function assinaturasRoutes(fastify, opts) {
           [plano_id, empresaId]
         );
 
-        // Registrar histórico
+        // Registrar histórico (usar 'mudou_plano' — CHECK constraint não tem 'criou_assinatura')
         await client.query(`
           INSERT INTO assinatura_historico (
             id, assinatura_id, empresa_id, acao,
             executado_por, criado_em
           ) VALUES (
-            gen_random_uuid(), $1, $2, 'criou_assinatura', $3, NOW()
+            gen_random_uuid(), $1, $2, 'mudou_plano', $3, NOW()
           )
         `, [assinatura.id, empresaId, request.user.id]);
       } else {
