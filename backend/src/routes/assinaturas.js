@@ -323,6 +323,9 @@ export default async function assinaturasRoutes(fastify, opts) {
             limiteDialio = faixa.rows[0].limite_diario;
           }
 
+          // Normalizar faixa_id: undefined → null (node-postgres não aceita undefined)
+          const faixaId = itemNovo.faixa_id || null;
+
           // Verificar se já existe
           const itemExistente = itensAtuais.rows.find(
             i => i.item_cobravel_id === itemNovo.item_cobravel_id
@@ -331,7 +334,7 @@ export default async function assinaturasRoutes(fastify, opts) {
           if (itemExistente) {
             // Atualizar existente
             if (itemExistente.quantidade !== itemNovo.quantidade ||
-                itemExistente.faixa_id !== itemNovo.faixa_id) {
+                (itemExistente.faixa_id || null) !== faixaId) {
 
               await client.query(`
                 UPDATE assinatura_itens
@@ -341,7 +344,7 @@ export default async function assinaturasRoutes(fastify, opts) {
                   preco_unitario = $3,
                   limite_diario = $4
                 WHERE id = $5
-              `, [itemNovo.faixa_id, itemNovo.quantidade, precoUnitario, limiteDialio, itemExistente.id]);
+              `, [faixaId, itemNovo.quantidade, precoUnitario, limiteDialio, itemExistente.id]);
 
               // Registrar histórico
               await client.query(`
@@ -357,7 +360,7 @@ export default async function assinaturasRoutes(fastify, opts) {
                 )
               `, [
                 assinatura.id, empresaId,
-                itemExistente.faixa_id !== itemNovo.faixa_id ? 'mudou_faixa' : 'alterou_quantidade',
+                (itemExistente.faixa_id || null) !== faixaId ? 'mudou_faixa' : 'alterou_quantidade',
                 itemNovo.item_cobravel_id,
                 itemExistente.quantidade, itemNovo.quantidade,
                 itemExistente.preco_unitario, precoUnitario,
@@ -376,7 +379,7 @@ export default async function assinaturasRoutes(fastify, opts) {
               )
             `, [
               assinatura.id, empresaId, itemNovo.item_cobravel_id,
-              itemNovo.faixa_id, itemNovo.quantidade, precoUnitario, limiteDialio
+              faixaId, itemNovo.quantidade, precoUnitario, limiteDialio
             ]);
 
             // Registrar histórico
