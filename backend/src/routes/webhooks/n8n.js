@@ -4,7 +4,6 @@ import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../s
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
-import { sendMessage as sendToChatwoot } from '../../services/chatwoot.js';
 
 const createLogger = logger.child({ module: 'n8n-webhook' });
 
@@ -401,32 +400,7 @@ const n8nWebhookRoutes = async (fastify) => {
         createLogger.error('Failed to log analytics', { error: err.message });
       });
 
-      // --- 15. Mirror to Chatwoot (async, fire-and-forget) ---
-      try {
-        const chatwootConfig = await pool.query(`
-          SELECT ce.chatwoot_account_id, e.chatwoot_url, e.chatwoot_api_token
-          FROM chatwoot_empresas ce
-          JOIN empresas e ON ce.empresa_id = e.id
-          WHERE ce.empresa_id = $1 AND ce.is_active = true
-          LIMIT 1
-        `, [empresa_id]);
-
-        if (chatwootConfig.rows.length > 0) {
-          const cw = chatwootConfig.rows[0];
-          if (cw.chatwoot_url && cw.chatwoot_api_token) {
-            // Find or note: Chatwoot mirroring for n8n-origin messages
-            // needs a Chatwoot conversation_id. This would require creating
-            // a conversation in Chatwoot first. For now, log intent.
-            createLogger.info('Chatwoot mirror available but skipped (no Chatwoot conversation_id for n8n flow)', {
-              empresa_id, phone
-            });
-          }
-        }
-      } catch (cwErr) {
-        createLogger.warn('Chatwoot mirror check failed (non-blocking)', { error: cwErr.message });
-      }
-
-      // --- 16. Transfer check ---
+      // --- 15. Transfer check ---
       try {
         const transferRules = await pool.query(`
           SELECT at2.*, a_dest.nome as agente_destino_nome
