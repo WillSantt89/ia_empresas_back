@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleAICacheManager } from '@google/generative-ai/server';
 import { logger } from '../config/logger.js';
 import { config } from '../config/env.js';
 import { DEFAULT_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
@@ -373,6 +374,49 @@ export function validateResponse(response) {
 }
 
 /**
+ * Create a context cache in Gemini API for an agent's system prompt + tools
+ * @param {Object} params - Cache configuration
+ * @param {string} params.apiKey - Decrypted API key
+ * @param {string} params.model - Model name
+ * @param {string} params.systemPrompt - System prompt to cache
+ * @param {Array} params.tools - Tool declarations to cache
+ * @param {number} params.ttlSeconds - Cache TTL in seconds (default 24h)
+ * @returns {Promise<Object>} Created cache { name, expireTime, ... }
+ */
+export async function createContextCache({ apiKey, model, systemPrompt, tools, ttlSeconds = 86400 }) {
+  const cacheManager = new GoogleAICacheManager(apiKey);
+  const cachedContent = await cacheManager.create({
+    model: `models/${model}`,
+    displayName: `agent-cache-${Date.now()}`,
+    systemInstruction: { role: 'user', parts: [{ text: systemPrompt }] },
+    tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
+    contents: [],
+    ttlSeconds
+  });
+
+  createLogger.info('Context cache created', {
+    cacheName: cachedContent.name,
+    model,
+    ttlSeconds,
+    expireTime: cachedContent.expireTime
+  });
+
+  return cachedContent;
+}
+
+/**
+ * Delete a context cache from Gemini API
+ * @param {string} apiKey - Decrypted API key
+ * @param {string} cacheName - Cache name (e.g., 'cachedContents/abc123')
+ */
+export async function deleteContextCache(apiKey, cacheName) {
+  const cacheManager = new GoogleAICacheManager(apiKey);
+  await cacheManager.delete(cacheName);
+
+  createLogger.info('Context cache deleted', { cacheName });
+}
+
+/**
  * Process message with function calling support
  * This is the main entry point that handles the complete flow
  */
@@ -386,6 +430,7 @@ export async function processMessageWithTools(options, toolExecutor) {
     message,
     temperature = DEFAULT_LIMITS.TEMPERATURE,
     maxTokens = DEFAULT_LIMITS.MAX_TOKENS,
+    cachedContentName,
   } = options;
 
   const startTime = Date.now();
@@ -399,19 +444,36 @@ export async function processMessageWithTools(options, toolExecutor) {
     // Initialize Gemini API
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // Configure the model with v1beta API (required for Gemini 3 models)
-    const generativeModel = genAI.getGenerativeModel({
-      model,
-      systemInstruction: systemPrompt,
-      tools: tools.length > 0 ? [{
-        functionDeclarations: tools
-      }] : undefined,
-      generationConfig: {
-        temperature,
-        maxOutputTokens: maxTokens,
-        candidateCount: 1,
-      },
-    }, { apiVersion: 'v1beta' });
+    let generativeModel;
+
+    if (cachedContentName) {
+      // CACHE mode: create model from cached content
+      const cacheManager = new GoogleAICacheManager(apiKey);
+      const cachedContent = await cacheManager.get(cachedContentName);
+      generativeModel = genAI.getGenerativeModelFromCachedContent(cachedContent, {
+        generationConfig: {
+          temperature,
+          maxOutputTokens: maxTokens,
+          candidateCount: 1,
+        },
+      });
+
+      createLogger.debug('Using cached content', { cacheName: cachedContentName, model });
+    } else {
+      // NORMAL mode: standard flow (no changes)
+      generativeModel = genAI.getGenerativeModel({
+        model,
+        systemInstruction: systemPrompt,
+        tools: tools.length > 0 ? [{
+          functionDeclarations: tools
+        }] : undefined,
+        generationConfig: {
+          temperature,
+          maxOutputTokens: maxTokens,
+          candidateCount: 1,
+        },
+      }, { apiVersion: 'v1beta' });
+    }
 
     // Add user message to history
     currentHistory.push({

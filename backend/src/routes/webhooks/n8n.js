@@ -87,7 +87,8 @@ const n8nWebhookRoutes = async (fastify) => {
 
       if (requestAgentId) {
         agentQuery = `
-          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo
+          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+                 cache_enabled, gemini_cache_id, cache_expires_at
           FROM agentes
           WHERE id = $1 AND empresa_id = $2 AND ativo = true
           LIMIT 1
@@ -95,7 +96,8 @@ const n8nWebhookRoutes = async (fastify) => {
         agentParams = [requestAgentId, empresa_id];
       } else {
         agentQuery = `
-          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo
+          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+                 cache_enabled, gemini_cache_id, cache_expires_at
           FROM agentes
           WHERE empresa_id = $1 AND ativo = true
           ORDER BY criado_em ASC
@@ -281,6 +283,17 @@ const n8nWebhookRoutes = async (fastify) => {
         return transformResultForLLM(result, 2000);
       };
 
+      // Check if agent has active, non-expired cache
+      let cachedContentName = null;
+      if (agent.cache_enabled && agent.gemini_cache_id && agent.cache_expires_at) {
+        if (new Date(agent.cache_expires_at) > new Date()) {
+          cachedContentName = agent.gemini_cache_id;
+          createLogger.debug('Using context cache for agent', { agente_id, cacheName: cachedContentName });
+        } else {
+          createLogger.warn('Agent cache expired, using normal flow', { agente_id, expired_at: agent.cache_expires_at });
+        }
+      }
+
       let result = null;
       let usedKeyId = availableKeys[0]?.id;
 
@@ -298,7 +311,8 @@ const n8nWebhookRoutes = async (fastify) => {
               history: formatHistoryForGemini(history),
               message,
               temperature: temperatura,
-              maxTokens: max_tokens
+              maxTokens: max_tokens,
+              cachedContentName
             },
             toolExecutor
           );

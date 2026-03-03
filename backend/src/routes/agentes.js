@@ -2,7 +2,7 @@ import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
 import { checkPermission } from '../middleware/permission.js';
 import { ALL_MODELS, AI_PROVIDERS, PROVIDER_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
-import { processMessageWithTools } from '../services/gemini.js';
+import { processMessageWithTools, createContextCache, deleteContextCache } from '../services/gemini.js';
 import { executeTool, buildToolDeclarations, transformResultForLLM } from '../services/tool-runner.js';
 import { getHistory, addToHistory, formatHistoryForGemini, clearHistory } from '../services/memory.js';
 import { decrypt } from '../config/encryption.js';
@@ -68,6 +68,9 @@ const agentesRoutes = async (fastify) => {
           a.temperatura,
           a.max_tokens,
           a.ativo,
+          a.cache_enabled,
+          a.gemini_cache_id,
+          a.cache_expires_at,
           a.criado_em,
           a.atualizado_em,
           (
@@ -393,6 +396,38 @@ const agentesRoutes = async (fastify) => {
     const updates = request.body;
 
     try {
+      // Check if prompt changed and cache is active — invalidate cache
+      let cacheInvalidated = false;
+      if (updates.prompt_ativo) {
+        const cacheCheck = await pool.query(
+          'SELECT cache_enabled, gemini_cache_id, cache_api_key_id FROM agentes WHERE empresa_id = $1 AND id = $2',
+          [empresa_id, id]
+        );
+
+        if (cacheCheck.rows.length > 0 && cacheCheck.rows[0].cache_enabled && cacheCheck.rows[0].gemini_cache_id) {
+          const agent = cacheCheck.rows[0];
+          try {
+            const keyResult = await pool.query(
+              'SELECT gemini_api_key FROM api_keys WHERE id = $1 AND empresa_id = $2',
+              [agent.cache_api_key_id, empresa_id]
+            );
+            if (keyResult.rows.length > 0) {
+              const decryptedKey = decrypt(keyResult.rows[0].gemini_api_key);
+              await deleteContextCache(decryptedKey, agent.gemini_cache_id);
+            }
+          } catch (cacheErr) {
+            createLogger.warn('Failed to delete old cache on prompt update', { error: cacheErr.message });
+          }
+
+          // Clear cache fields in the update
+          updates.cache_enabled = false;
+          updates.gemini_cache_id = null;
+          updates.cache_expires_at = null;
+          updates.cache_api_key_id = null;
+          cacheInvalidated = true;
+        }
+      }
+
       const fields = [];
       const values = [];
       let index = 1;
@@ -438,13 +473,15 @@ const agentesRoutes = async (fastify) => {
       createLogger.info('Agent updated', {
         empresa_id,
         agent_id: id,
-        updated_fields: Object.keys(updates)
+        updated_fields: Object.keys(updates),
+        cache_invalidated: cacheInvalidated
       });
 
       return {
         success: true,
         data: {
-          agent: result.rows[0]
+          agent: result.rows[0],
+          cache_invalidated: cacheInvalidated || undefined
         }
       };
 
@@ -573,8 +610,9 @@ const agentesRoutes = async (fastify) => {
     try {
       await client.query('BEGIN');
 
-      // Verify agent exists
-      const agentCheck = await client.query('SELECT id FROM agentes WHERE empresa_id = $1 AND id = $2',
+      // Verify agent exists and check cache
+      const agentCheck = await client.query(
+        'SELECT id, cache_enabled, gemini_cache_id, cache_api_key_id FROM agentes WHERE empresa_id = $1 AND id = $2',
         [empresa_id, id]
       );
 
@@ -587,6 +625,31 @@ const agentesRoutes = async (fastify) => {
             message: 'Agent not found'
           }
         });
+      }
+
+      // Invalidate cache if tools changed and cache is active
+      const agentRow = agentCheck.rows[0];
+      if (agentRow.cache_enabled && agentRow.gemini_cache_id) {
+        try {
+          const keyResult = await pool.query(
+            'SELECT gemini_api_key FROM api_keys WHERE id = $1 AND empresa_id = $2',
+            [agentRow.cache_api_key_id, empresa_id]
+          );
+          if (keyResult.rows.length > 0) {
+            const decryptedKey = decrypt(keyResult.rows[0].gemini_api_key);
+            await deleteContextCache(decryptedKey, agentRow.gemini_cache_id);
+          }
+        } catch (cacheErr) {
+          createLogger.warn('Failed to delete cache on tools update', { error: cacheErr.message });
+        }
+
+        await client.query(`
+          UPDATE agentes
+          SET cache_enabled = false, gemini_cache_id = NULL, cache_expires_at = NULL, cache_api_key_id = NULL, atualizado_em = CURRENT_TIMESTAMP
+          WHERE id = $1
+        `, [id]);
+
+        createLogger.info('Cache invalidated due to tools update', { agent_id: id });
       }
 
       // Remove existing tools
@@ -838,6 +901,219 @@ const agentesRoutes = async (fastify) => {
       success: true,
       data: { message: 'Historico de teste limpo' }
     };
+  });
+
+  /**
+   * POST /api/agentes/:id/cache
+   * Create context cache for agent
+   */
+  fastify.post('/:id/cache', {
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id } = request.user;
+    const { id } = request.params;
+
+    try {
+      // 1. Get agent with prompt and model
+      const agentResult = await pool.query(`
+        SELECT a.id, a.nome, a.modelo, a.prompt_ativo, a.cache_enabled, a.gemini_cache_id
+        FROM agentes a
+        WHERE a.empresa_id = $1 AND a.id = $2 AND a.ativo = true
+      `, [empresa_id, id]);
+
+      if (agentResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'AGENT_NOT_FOUND', message: 'Agente ativo nao encontrado' }
+        });
+      }
+
+      const agent = agentResult.rows[0];
+
+      // Minimum prompt size for caching (Gemini requires minimum token count)
+      if (!agent.prompt_ativo || agent.prompt_ativo.length < 4096) {
+        return reply.code(400).send({
+          success: false,
+          error: {
+            code: 'PROMPT_TOO_SHORT',
+            message: 'O prompt deve ter no minimo ~4096 caracteres (~1024 tokens) para utilizar cache de contexto.'
+          }
+        });
+      }
+
+      // 2. Get highest priority API key
+      const availableKeys = await getActiveKeysForAgent(empresa_id, id);
+
+      if (!availableKeys || availableKeys.length === 0) {
+        return reply.code(400).send({
+          success: false,
+          error: {
+            code: 'NO_API_KEY',
+            message: 'Nenhuma API key ativa configurada para este agente.'
+          }
+        });
+      }
+
+      const primaryKey = availableKeys[0];
+
+      // 3. Get agent tools
+      const toolsResult = await pool.query(`
+        SELECT t.id, t.nome, t.descricao_para_llm, t.parametros_schema_json
+        FROM tools t
+        INNER JOIN agente_tools at2 ON t.id = at2.tool_id
+        WHERE at2.agente_id = $1 AND t.ativo = true
+        ORDER BY at2.ordem_prioridade ASC
+      `, [id]);
+
+      const toolDeclarations = toolsResult.rows.length > 0 ? buildToolDeclarations(toolsResult.rows) : [];
+
+      // 4. Delete old cache if exists
+      if (agent.gemini_cache_id) {
+        try {
+          await deleteContextCache(primaryKey.gemini_api_key, agent.gemini_cache_id);
+        } catch (err) {
+          createLogger.warn('Failed to delete old cache before recreating', { error: err.message });
+        }
+      }
+
+      // 5. Create cache
+      const cachedContent = await createContextCache({
+        apiKey: primaryKey.gemini_api_key,
+        model: agent.modelo,
+        systemPrompt: agent.prompt_ativo,
+        tools: toolDeclarations,
+        ttlSeconds: 86400 // 24 hours
+      });
+
+      // 6. Save cache data to agent
+      await pool.query(`
+        UPDATE agentes
+        SET cache_enabled = true,
+            gemini_cache_id = $1,
+            cache_expires_at = $2,
+            cache_api_key_id = $3,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE id = $4
+      `, [cachedContent.name, cachedContent.expireTime, primaryKey.id, id]);
+
+      createLogger.info('Context cache created for agent', {
+        empresa_id,
+        agent_id: id,
+        cache_name: cachedContent.name,
+        expires_at: cachedContent.expireTime
+      });
+
+      return {
+        success: true,
+        data: {
+          cache_name: cachedContent.name,
+          expires_at: cachedContent.expireTime,
+          model: agent.modelo,
+          tools_cached: toolDeclarations.length
+        }
+      };
+
+    } catch (error) {
+      createLogger.error('Failed to create context cache', {
+        empresa_id,
+        agent_id: id,
+        error: error.message
+      });
+
+      return reply.code(500).send({
+        success: false,
+        error: {
+          code: 'CACHE_CREATION_FAILED',
+          message: error.message || 'Falha ao criar cache de contexto'
+        }
+      });
+    }
+  });
+
+  /**
+   * DELETE /api/agentes/:id/cache
+   * Delete context cache for agent
+   */
+  fastify.delete('/:id/cache', {
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id } = request.user;
+    const { id } = request.params;
+
+    try {
+      // Get agent cache info
+      const agentResult = await pool.query(
+        'SELECT gemini_cache_id, cache_api_key_id FROM agentes WHERE empresa_id = $1 AND id = $2',
+        [empresa_id, id]
+      );
+
+      if (agentResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'AGENT_NOT_FOUND', message: 'Agente nao encontrado' }
+        });
+      }
+
+      const agent = agentResult.rows[0];
+
+      // Delete cache from Google if exists
+      if (agent.gemini_cache_id && agent.cache_api_key_id) {
+        try {
+          const keyResult = await pool.query(
+            'SELECT gemini_api_key FROM api_keys WHERE id = $1 AND empresa_id = $2',
+            [agent.cache_api_key_id, empresa_id]
+          );
+          if (keyResult.rows.length > 0) {
+            const decryptedKey = decrypt(keyResult.rows[0].gemini_api_key);
+            await deleteContextCache(decryptedKey, agent.gemini_cache_id);
+          }
+        } catch (err) {
+          createLogger.warn('Failed to delete cache from Google (may already be expired)', { error: err.message });
+        }
+      }
+
+      // Clear cache fields
+      await pool.query(`
+        UPDATE agentes
+        SET cache_enabled = false,
+            gemini_cache_id = NULL,
+            cache_expires_at = NULL,
+            cache_api_key_id = NULL,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE empresa_id = $1 AND id = $2
+      `, [empresa_id, id]);
+
+      createLogger.info('Context cache deleted for agent', { empresa_id, agent_id: id });
+
+      return {
+        success: true,
+        data: { message: 'Cache removido com sucesso' }
+      };
+
+    } catch (error) {
+      createLogger.error('Failed to delete context cache', {
+        empresa_id,
+        agent_id: id,
+        error: error.message
+      });
+      throw error;
+    }
   });
 
   /**
