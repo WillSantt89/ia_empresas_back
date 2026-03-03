@@ -411,7 +411,7 @@ const empresasRoutes = async (fastify) => {
       const userRole = empresaTipo === 'parceiro' ? 'master' : 'admin';
 
       // Create company
-      const defaultN8nResponseUrl = 'https://santanacred-n8n-webhook.fldxjw.easypanel.host/webhook/api_responde_mensagem_whatsapp';
+      const defaultN8nResponseUrl = 'http://santanacred_n8n-webhook:5678/webhook/api_responde_mensagem_whatsapp';
       const empresaResult = await client.query(`
         INSERT INTO empresas (nome, slug, email, telefone, documento, endereco, tipo, ativo, n8n_response_url)
         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)

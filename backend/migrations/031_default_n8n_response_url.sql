@@ -2,7 +2,7 @@
 
 -- UP
 ALTER TABLE empresas
-  ALTER COLUMN n8n_response_url SET DEFAULT 'https://santanacred-n8n-webhook.fldxjw.easypanel.host/webhook/api_responde_mensagem_whatsapp';
+  ALTER COLUMN n8n_response_url SET DEFAULT 'http://santanacred_n8n-webhook:5678/webhook/api_responde_mensagem_whatsapp';
 
 -- DOWN
 ALTER TABLE empresas
