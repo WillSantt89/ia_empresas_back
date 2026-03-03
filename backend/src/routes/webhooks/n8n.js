@@ -1,9 +1,10 @@
 import { logger } from '../../config/logger.js';
 import { pool } from '../../config/database.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
-import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../../services/memory.js';
+import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, syncChatwootHistory } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { sendMessage as chatwootSendMessage, getConversationMessages, unassignAgent } from '../../services/chatwoot.js';
 
 const createLogger = logger.child({ module: 'n8n-webhook' });
 
@@ -733,13 +734,144 @@ const n8nWebhookRoutes = async (fastify) => {
     createLogger.info('Controle humano request', { empresa_id, phone, acao, operador_nome });
 
     if (acao === 'devolver') {
-      return reply.code(501).send({
-        success: false,
-        error: {
-          code: 'NOT_IMPLEMENTED',
-          message: 'Ação devolver via n8n ainda não implementada. Use o endpoint /api/conversas/:id/devolver.'
+      try {
+        // Find active conversation for this phone (with config and chatwoot data)
+        const conversaResult = await pool.query(`
+          SELECT c.*, cch.mensagem_retorno_ia, cch.notificar_admin_ao_devolver,
+                 e.chatwoot_url, e.chatwoot_api_token, e.chatwoot_account_id
+          FROM conversas c
+          JOIN empresas e ON e.id = c.empresa_id
+          LEFT JOIN config_controle_humano cch ON cch.empresa_id = c.empresa_id
+          WHERE c.empresa_id = $1 AND c.contato_whatsapp = $2 AND c.status = 'ativo'
+          ORDER BY c.criado_em DESC
+          LIMIT 1
+        `, [empresa_id, phone]);
+
+        if (conversaResult.rows.length === 0) {
+          return reply.code(404).send({
+            success: false,
+            error: {
+              code: 'CONVERSA_NOT_FOUND',
+              message: 'Nenhuma conversa ativa encontrada para este telefone'
+            }
+          });
         }
-      });
+
+        const conversa = conversaResult.rows[0];
+
+        if (conversa.controlado_por === 'ia') {
+          return reply.code(400).send({
+            success: false,
+            error: {
+              code: 'ALREADY_AI_CONTROLLED',
+              message: 'Conversa já está sendo controlada pela IA'
+            }
+          });
+        }
+
+        // Update conversation back to AI control
+        await pool.query(`
+          UPDATE conversas
+          SET
+            controlado_por = 'ia',
+            humano_devolveu_em = NOW(),
+            atualizado_em = NOW()
+          WHERE id = $1
+        `, [conversa.id]);
+
+        // Log in controle_historico
+        await pool.query(`
+          INSERT INTO controle_historico (
+            id, conversa_id, empresa_id, acao,
+            de_controlador, para_controlador,
+            humano_nome, motivo, criado_em
+          )
+          VALUES (
+            gen_random_uuid(), $1, $2, 'humano_devolveu',
+            'humano', 'ia',
+            $3, 'Operador devolveu via Chatwoot (n8n webhook)', NOW()
+          )
+        `, [conversa.id, empresa_id, operador_nome || 'Operador Chatwoot']);
+
+        // Create notification if configured
+        if (conversa.notificar_admin_ao_devolver !== false) {
+          pool.query(`
+            INSERT INTO notificacoes (
+              id, empresa_id, tipo, titulo, mensagem,
+              severidade, lida, criado_em
+            )
+            VALUES (
+              gen_random_uuid(), $1, 'conversa_devolvida',
+              'Conversa devolvida para IA',
+              $2,
+              'info', false, NOW()
+            )
+          `, [
+            empresa_id,
+            `${operador_nome || 'Operador'} devolveu a conversa com ${phone} para a IA via Chatwoot`
+          ]).catch(err => {
+            createLogger.error('Failed to create notification', { error: err.message });
+          });
+        }
+
+        // Non-blocking: send return message via Chatwoot
+        if (conversa.mensagem_retorno_ia && conversa.chatwoot_url && conversa.chatwoot_api_token && conversa.chatwoot_account_id && conversa.conversation_id_chatwoot) {
+          chatwootSendMessage({
+            baseUrl: conversa.chatwoot_url,
+            accountId: conversa.chatwoot_account_id,
+            apiKey: conversa.chatwoot_api_token,
+            conversationId: conversa.conversation_id_chatwoot,
+            content: conversa.mensagem_retorno_ia,
+          }).catch(err => {
+            createLogger.error('Failed to send return message to Chatwoot', { error: err.message });
+          });
+        }
+
+        // Non-blocking: sync Chatwoot messages to Redis (so AI has context of human conversation)
+        if (conversa.chatwoot_url && conversa.chatwoot_api_token && conversa.chatwoot_account_id && conversa.conversation_id_chatwoot && conversa.humano_assumiu_em) {
+          (async () => {
+            try {
+              const chatwootMessages = await getConversationMessages({
+                baseUrl: conversa.chatwoot_url,
+                accountId: conversa.chatwoot_account_id,
+                apiKey: conversa.chatwoot_api_token,
+                conversationId: conversa.conversation_id_chatwoot,
+                after: conversa.humano_assumiu_em
+              });
+
+              const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+              if (chatwootMessages.length > 0) {
+                const synced = await syncChatwootHistory(empresa_id, conversationKey, chatwootMessages);
+                createLogger.info('Synced Chatwoot messages to Redis', { conversa_id: conversa.id, synced });
+              }
+            } catch (err) {
+              createLogger.error('Failed to sync Chatwoot history', { error: err.message, conversa_id: conversa.id });
+            }
+          })();
+        }
+
+        createLogger.info('Human control deactivated via n8n', {
+          empresa_id, conversa_id: conversa.id, phone, operador_nome
+        });
+
+        return {
+          success: true,
+          data: {
+            conversa_id: conversa.id,
+            controlado_por: 'ia',
+            operador_nome: operador_nome || 'Operador Chatwoot'
+          }
+        };
+
+      } catch (error) {
+        createLogger.error('Failed to process devolver', {
+          empresa_id, phone, error: error.message
+        });
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'PROCESSING_ERROR', message: 'Falha ao processar devolução' }
+        });
+      }
     }
 
     // --- acao === 'assumir' ---
