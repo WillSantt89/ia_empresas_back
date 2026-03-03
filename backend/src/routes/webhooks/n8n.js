@@ -47,7 +47,7 @@ const n8nWebhookRoutes = async (fastify) => {
     let empresa;
     try {
       const empresaResult = await pool.query(
-        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND is_active = true LIMIT 1',
+        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
         [webhookToken]
       );
 
@@ -580,7 +580,7 @@ const n8nWebhookRoutes = async (fastify) => {
     let empresa;
     try {
       const empresaResult = await pool.query(
-        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND is_active = true LIMIT 1',
+        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
         [webhookToken]
       );
 
