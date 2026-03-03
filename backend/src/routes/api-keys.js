@@ -371,17 +371,19 @@ const apiKeysRoutes = async (fastify) => {
 
     try {
       // Test the Gemini API key
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genAI = new GoogleGenerativeAI(gemini_api_key);
-
-      // Try to initialize a model
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-001' });
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: gemini_api_key });
 
       // Simple test to validate the key
       try {
-        await model.generateContent('test');
+        await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: 'test',
+        });
       } catch (error) {
-        if (error.message?.includes('API key') || error.status === 400 || error.status === 401) {
+        const status = error.status || error.httpStatusCode;
+        if (status === 400 || status === 401 || status === 403 ||
+            error.message?.includes('API key') || error.message?.includes('PERMISSION_DENIED')) {
           return {
             success: true,
             data: {

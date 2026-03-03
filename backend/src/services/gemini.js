@@ -1,5 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { GoogleAICacheManager } from '@google/generative-ai/server';
+import { GoogleGenAI } from '@google/genai';
 import { logger } from '../config/logger.js';
 import { config } from '../config/env.js';
 import { DEFAULT_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
@@ -44,21 +43,17 @@ export async function processMessage(options) {
 
   try {
     // Initialize Gemini API
-    const genAI = new GoogleGenerativeAI(apiKey);
+    const ai = new GoogleGenAI({ apiKey });
 
-    // Configure the model with v1beta API (required for Gemini 3 models)
-    const generativeModel = genAI.getGenerativeModel({
-      model,
+    // Configure generation config (passed per-call in new SDK)
+    const toolsConfig = tools.length > 0 ? [{ functionDeclarations: tools }] : undefined;
+    const generateConfig = {
       systemInstruction: systemPrompt,
-      tools: tools.length > 0 ? [{
-        functionDeclarations: tools
-      }] : undefined,
-      generationConfig: {
-        temperature,
-        maxOutputTokens: maxTokens,
-        candidateCount: 1,
-      },
-    }, { apiVersion: 'v1beta' });
+      tools: toolsConfig,
+      temperature,
+      maxOutputTokens: maxTokens,
+      candidateCount: 1,
+    };
 
     // Build conversation history
     const contents = [
@@ -85,16 +80,16 @@ export async function processMessage(options) {
 
       try {
         // Generate content
-        const result = await generativeModel.generateContent({
+        const response = await ai.models.generateContent({
+          model,
           contents: currentContents,
+          config: generateConfig,
         });
 
-        const response = result.response;
-
         // Count tokens
-        if (result.response.usageMetadata) {
-          tokensInput += result.response.usageMetadata.promptTokenCount || 0;
-          tokensOutput += result.response.usageMetadata.candidatesTokenCount || 0;
+        if (response.usageMetadata) {
+          tokensInput += response.usageMetadata.promptTokenCount || 0;
+          tokensOutput += response.usageMetadata.candidatesTokenCount || 0;
         }
 
         // Check for function calls
@@ -145,7 +140,7 @@ export async function processMessage(options) {
         }
 
         // No function calls, get the text response
-        const text = response.text();
+        const text = response.text;
         if (text) {
           finalResponse = {
             type: 'text',
@@ -161,26 +156,28 @@ export async function processMessage(options) {
 
       } catch (error) {
         // Handle specific API errors
-        if (error.message?.includes('429') || error.status === 429) {
+        const status = error.status || error.httpStatusCode;
+        const msg = error.message || '';
+
+        if (status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
           const err = new Error('API rate limit exceeded');
           err.code = 'RATE_LIMITED';
           throw err;
         }
 
-        if (error.message?.includes('401') || error.message?.includes('403') ||
-            error.status === 401 || error.status === 403) {
+        if (status === 401 || status === 403 || msg.includes('PERMISSION_DENIED') || msg.includes('API key')) {
           const err = new Error('Invalid API key');
           err.code = 'INVALID_KEY';
           throw err;
         }
 
-        if (error.message?.includes('500') || error.status === 500) {
+        if (status === 500 || msg.includes('INTERNAL')) {
           const err = new Error('API server error');
           err.code = 'API_ERROR';
           throw err;
         }
 
-        if (error.message?.includes('timeout')) {
+        if (msg.includes('timeout') || msg.includes('DEADLINE_EXCEEDED')) {
           const err = new Error('API request timeout');
           err.code = 'TIMEOUT';
           throw err;
@@ -384,14 +381,16 @@ export function validateResponse(response) {
  * @returns {Promise<Object>} Created cache { name, expireTime, ... }
  */
 export async function createContextCache({ apiKey, model, systemPrompt, tools, ttlSeconds = 86400 }) {
-  const cacheManager = new GoogleAICacheManager(apiKey);
-  const cachedContent = await cacheManager.create({
-    model: `models/${model}`,
-    displayName: `agent-cache-${Date.now()}`,
-    systemInstruction: { role: 'user', parts: [{ text: systemPrompt }] },
-    tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
-    contents: [],
-    ttlSeconds
+  const ai = new GoogleGenAI({ apiKey });
+  const cachedContent = await ai.caches.create({
+    model: model,
+    config: {
+      displayName: `agent-cache-${Date.now()}`,
+      systemInstruction: systemPrompt,
+      tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
+      contents: [],
+      ttl: `${ttlSeconds}s`,
+    }
   });
 
   createLogger.info('Context cache created', {
@@ -410,8 +409,8 @@ export async function createContextCache({ apiKey, model, systemPrompt, tools, t
  * @param {string} cacheName - Cache name (e.g., 'cachedContents/abc123')
  */
 export async function deleteContextCache(apiKey, cacheName) {
-  const cacheManager = new GoogleAICacheManager(apiKey);
-  await cacheManager.delete(cacheName);
+  const ai = new GoogleGenAI({ apiKey });
+  await ai.caches.delete({ name: cacheName });
 
   createLogger.info('Context cache deleted', { cacheName });
 }
@@ -442,37 +441,30 @@ export async function processMessageWithTools(options, toolExecutor) {
 
   try {
     // Initialize Gemini API
-    const genAI = new GoogleGenerativeAI(apiKey);
+    const ai = new GoogleGenAI({ apiKey });
 
-    let generativeModel;
+    // Configure generation config (passed per-call in new SDK)
+    const toolsConfig = tools.length > 0 ? [{ functionDeclarations: tools }] : undefined;
+    let generateConfig;
 
     if (cachedContentName) {
-      // CACHE mode: create model from cached content
-      const cacheManager = new GoogleAICacheManager(apiKey);
-      const cachedContent = await cacheManager.get(cachedContentName);
-      generativeModel = genAI.getGenerativeModelFromCachedContent(cachedContent, {
-        generationConfig: {
-          temperature,
-          maxOutputTokens: maxTokens,
-          candidateCount: 1,
-        },
-      });
-
+      // CACHE mode: systemInstruction and tools are already in the cache
+      generateConfig = {
+        cachedContent: cachedContentName,
+        temperature,
+        maxOutputTokens: maxTokens,
+        candidateCount: 1,
+      };
       createLogger.debug('Using cached content', { cacheName: cachedContentName, model });
     } else {
-      // NORMAL mode: standard flow (no changes)
-      generativeModel = genAI.getGenerativeModel({
-        model,
+      // NORMAL mode
+      generateConfig = {
         systemInstruction: systemPrompt,
-        tools: tools.length > 0 ? [{
-          functionDeclarations: tools
-        }] : undefined,
-        generationConfig: {
-          temperature,
-          maxOutputTokens: maxTokens,
-          candidateCount: 1,
-        },
-      }, { apiVersion: 'v1beta' });
+        tools: toolsConfig,
+        temperature,
+        maxOutputTokens: maxTokens,
+        candidateCount: 1,
+      };
     }
 
     // Add user message to history
@@ -486,16 +478,16 @@ export async function processMessageWithTools(options, toolExecutor) {
       iteracoes++;
 
       // Generate content
-      const result = await generativeModel.generateContent({
+      const response = await ai.models.generateContent({
+        model,
         contents: currentHistory,
+        config: generateConfig,
       });
 
-      const response = result.response;
-
       // Count tokens
-      if (result.response.usageMetadata) {
-        totalTokensInput += result.response.usageMetadata.promptTokenCount || 0;
-        totalTokensOutput += result.response.usageMetadata.candidatesTokenCount || 0;
+      if (response.usageMetadata) {
+        totalTokensInput += response.usageMetadata.promptTokenCount || 0;
+        totalTokensOutput += response.usageMetadata.candidatesTokenCount || 0;
       }
 
       // Validate response
@@ -596,12 +588,12 @@ export async function processMessageWithTools(options, toolExecutor) {
         }
       }
 
-      // Fallback to SDK text() method
+      // Fallback to SDK text property
       if (!finalText) {
         try {
-          finalText = response.text();
+          finalText = response.text || '';
         } catch (textErr) {
-          // SDK text() throws on safety blocks etc — ignore
+          // Ignore errors accessing text
         }
       }
 
