@@ -477,7 +477,8 @@ const n8nWebhookRoutes = async (fastify) => {
           phone,
           message: result.text,
           phone_number_id,
-          token: whatsappToken
+          token: whatsappToken,
+          webhook_token: webhookToken
         };
 
         fetch(empresa.n8n_response_url, {
@@ -578,6 +579,84 @@ const n8nWebhookRoutes = async (fastify) => {
           code: 'PROCESSING_ERROR',
           message: 'Failed to process message. Please try again.'
         }
+      });
+    }
+  });
+
+  /**
+   * POST /api/webhooks/n8n/confirmar-envio
+   * Endpoint for n8n Flow 2 to confirm WhatsApp message was sent successfully
+   * Saves the whatsapp_message_id (wamid) in mensagens_log
+   *
+   * Authentication: webhook_token in body (sent by backend to Flow 2)
+   */
+  fastify.post('/confirmar-envio', {
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          phone: { type: 'string', minLength: 1, maxLength: 30 },
+          whatsapp_message_id: { type: 'string', minLength: 1, maxLength: 255 },
+          webhook_token: { type: 'string', minLength: 1 }
+        },
+        required: ['phone', 'whatsapp_message_id', 'webhook_token']
+      }
+    }
+  }, async (request, reply) => {
+    const { phone, whatsapp_message_id, webhook_token } = request.body;
+
+    // --- Auth via webhook_token ---
+    let empresa;
+    try {
+      const empresaResult = await pool.query(
+        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
+        [webhook_token]
+      );
+
+      if (empresaResult.rows.length === 0) {
+        return reply.code(401).send({
+          success: false,
+          error: { code: 'INVALID_TOKEN', message: 'Invalid or inactive webhook token' }
+        });
+      }
+
+      empresa = empresaResult.rows[0];
+    } catch (err) {
+      createLogger.error('Token lookup failed (confirmar-envio)', { error: err.message });
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: 'Failed to validate token' }
+      });
+    }
+
+    const empresa_id = empresa.id;
+
+    try {
+      // Find the most recent outgoing message for this phone/empresa
+      const result = await pool.query(`
+        UPDATE mensagens_log SET whatsapp_message_id = $1
+        WHERE id = (
+          SELECT ml.id FROM mensagens_log ml
+          JOIN conversas c ON c.id = ml.conversa_id
+          WHERE c.contato_whatsapp = $2 AND ml.empresa_id = $3 AND ml.direcao = 'saida'
+          ORDER BY ml.criado_em DESC LIMIT 1
+        )
+        RETURNING id
+      `, [whatsapp_message_id, phone, empresa_id]);
+
+      if (result.rows.length === 0) {
+        createLogger.warn('No outgoing message found to update wamid', { phone, empresa_id });
+        return { success: true, data: { updated: false, reason: 'no_message_found' } };
+      }
+
+      createLogger.info('WhatsApp message ID saved', { whatsapp_message_id, phone, empresa_id, mensagem_id: result.rows[0].id });
+      return { success: true, data: { updated: true, mensagem_id: result.rows[0].id } };
+
+    } catch (err) {
+      createLogger.error('Failed to save wamid', { error: err.message, phone, empresa_id });
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: 'Failed to save message confirmation' }
       });
     }
   });
