@@ -22,6 +22,7 @@ const n8nWebhookRoutes = async (fastify) => {
           message: { type: 'string', minLength: 1, maxLength: 4000 },
           phone: { type: 'string', minLength: 1, maxLength: 30 },
           name: { type: 'string', maxLength: 255 },
+          phone_number_id: { type: 'string', maxLength: 50 },
           agent_id: { type: 'string', format: 'uuid' },
           metadata: { type: 'object' }
         },
@@ -30,7 +31,7 @@ const n8nWebhookRoutes = async (fastify) => {
     }
   }, async (request, reply) => {
     const startTime = Date.now();
-    const { message, phone, name, agent_id: requestAgentId, metadata } = request.body;
+    const { message, phone, name, phone_number_id, agent_id: requestAgentId, metadata } = request.body;
     const webhookToken = request.headers['x-webhook-token'];
 
     // --- 1. Authenticate via webhook_token ---
@@ -47,7 +48,7 @@ const n8nWebhookRoutes = async (fastify) => {
     let empresa;
     try {
       const empresaResult = await pool.query(
-        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
+        'SELECT id, nome, n8n_response_url FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
         [webhookToken]
       );
 
@@ -454,6 +455,40 @@ const n8nWebhookRoutes = async (fastify) => {
       } catch (transferError) {
         createLogger.error('Transfer check failed (non-blocking)', {
           error: transferError.message, empresa_id, agente_id
+        });
+      }
+
+      // --- 16. Send response to n8n Flow 2 (async, non-blocking) ---
+      if (empresa.n8n_response_url && phone_number_id) {
+        let whatsappToken = null;
+        try {
+          const wnResult = await pool.query(
+            'SELECT token_graph_api FROM whatsapp_numbers WHERE phone_number_id = $1 AND empresa_id = $2 AND ativo = true LIMIT 1',
+            [phone_number_id, empresa_id]
+          );
+          if (wnResult.rows.length > 0 && wnResult.rows[0].token_graph_api) {
+            whatsappToken = await fastify.decrypt(wnResult.rows[0].token_graph_api);
+          }
+        } catch (err) {
+          createLogger.error('Failed to get WhatsApp token for Flow 2', { error: err.message, phone_number_id });
+        }
+
+        const flow2Payload = {
+          phone,
+          message: result.text,
+          phone_number_id,
+          token: whatsappToken
+        };
+
+        fetch(empresa.n8n_response_url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(flow2Payload),
+          signal: AbortSignal.timeout(10000)
+        }).then(res => {
+          createLogger.info('Flow 2 response sent', { status: res.status, phone, phone_number_id });
+        }).catch(err => {
+          createLogger.error('Failed to send to Flow 2', { error: err.message, url: empresa.n8n_response_url, phone });
         });
       }
 
