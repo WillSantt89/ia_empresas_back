@@ -1,7 +1,7 @@
 import { logger } from '../../config/logger.js';
 import { pool } from '../../config/database.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
-import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, syncChatwootHistory } from '../../services/memory.js';
+import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, syncChatwootHistory, archiveConversation } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { sendMessage as chatwootSendMessage, getConversationMessages, unassignAgent } from '../../services/chatwoot.js';
@@ -688,7 +688,7 @@ const n8nWebhookRoutes = async (fastify) => {
         type: 'object',
         properties: {
           phone: { type: 'string', minLength: 1, maxLength: 30 },
-          acao: { type: 'string', enum: ['assumir', 'devolver'] },
+          acao: { type: 'string', enum: ['assumir', 'devolver', 'encerrar'] },
           operador_nome: { type: 'string', maxLength: 255 }
         },
         required: ['phone', 'acao']
@@ -870,6 +870,110 @@ const n8nWebhookRoutes = async (fastify) => {
         return reply.code(500).send({
           success: false,
           error: { code: 'PROCESSING_ERROR', message: 'Falha ao processar devolução' }
+        });
+      }
+    }
+
+    // --- acao === 'encerrar' ---
+    if (acao === 'encerrar') {
+      try {
+        // Find active conversation for this phone
+        const conversaResult = await pool.query(`
+          SELECT c.id, c.contato_whatsapp, c.status, c.controlado_por,
+                 c.conversation_id_chatwoot
+          FROM conversas c
+          WHERE c.empresa_id = $1 AND c.contato_whatsapp = $2 AND c.status = 'ativo'
+          ORDER BY c.criado_em DESC
+          LIMIT 1
+        `, [empresa_id, phone]);
+
+        if (conversaResult.rows.length === 0) {
+          return reply.code(404).send({
+            success: false,
+            error: {
+              code: 'CONVERSA_NOT_FOUND',
+              message: 'Nenhuma conversa ativa encontrada para este telefone'
+            }
+          });
+        }
+
+        const conversa = conversaResult.rows[0];
+
+        // Update conversation status to finalizado
+        await pool.query(`
+          UPDATE conversas
+          SET
+            status = 'finalizado',
+            humano_devolveu_em = CASE WHEN controlado_por = 'humano' THEN NOW() ELSE humano_devolveu_em END,
+            atualizado_em = NOW()
+          WHERE id = $1
+        `, [conversa.id]);
+
+        // Finalize any active atendimentos
+        await pool.query(`
+          UPDATE atendimentos
+          SET status = 'finalizado', finalizado_em = NOW()
+          WHERE conversa_id = $1 AND status = 'ativo'
+        `, [conversa.id]);
+
+        // Log in controle_historico
+        await pool.query(`
+          INSERT INTO controle_historico (
+            id, conversa_id, empresa_id, acao,
+            de_controlador, para_controlador,
+            humano_nome, motivo, criado_em
+          )
+          VALUES (
+            gen_random_uuid(), $1, $2, 'humano_devolveu',
+            $3, 'ia',
+            $4, 'Atendimento encerrado via Chatwoot (n8n webhook)', NOW()
+          )
+        `, [conversa.id, empresa_id, conversa.controlado_por, operador_nome || 'Operador Chatwoot']);
+
+        // Archive conversation history in Redis (move to archive with 30-day TTL)
+        const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+        archiveConversation(empresa_id, conversationKey).catch(err => {
+          createLogger.error('Failed to archive conversation', { error: err.message, conversa_id: conversa.id });
+        });
+
+        // Create notification
+        pool.query(`
+          INSERT INTO notificacoes (
+            id, empresa_id, tipo, titulo, mensagem,
+            severidade, lida, criado_em
+          )
+          VALUES (
+            gen_random_uuid(), $1, 'conversa_encerrada',
+            'Atendimento encerrado',
+            $2,
+            'info', false, NOW()
+          )
+        `, [
+          empresa_id,
+          `Atendimento com ${phone} foi encerrado no Chatwoot${operador_nome ? ` por ${operador_nome}` : ''}`
+        ]).catch(err => {
+          createLogger.error('Failed to create notification', { error: err.message });
+        });
+
+        createLogger.info('Conversation closed via n8n', {
+          empresa_id, conversa_id: conversa.id, phone, operador_nome
+        });
+
+        return {
+          success: true,
+          data: {
+            conversa_id: conversa.id,
+            status: 'finalizado'
+          }
+        };
+
+      } catch (error) {
+        createLogger.error('Failed to process encerrar', {
+          empresa_id, phone, error: error.message
+        });
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'PROCESSING_ERROR', message: 'Falha ao encerrar conversa' }
         });
       }
     }
