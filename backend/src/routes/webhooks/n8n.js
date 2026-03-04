@@ -156,10 +156,10 @@ const n8nWebhookRoutes = async (fastify) => {
       if (conversaResult.rows.length > 0) {
         conversa_id = conversaResult.rows[0].id;
 
-        // --- Check human/fila control ---
+        // --- Check human control (only skip AI when an operator is actively handling) ---
         const controlador = conversaResult.rows[0].controlado_por;
-        if (controlador === 'humano' || controlador === 'fila') {
-          createLogger.info(`Message received during ${controlador} control, skipping AI`, {
+        if (controlador === 'humano') {
+          createLogger.info('Message received during human control, skipping AI', {
             empresa_id, phone, conversa_id,
             humano_nome: conversaResult.rows[0].humano_nome
           });
