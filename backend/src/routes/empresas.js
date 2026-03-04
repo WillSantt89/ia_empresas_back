@@ -512,6 +512,20 @@ const empresasRoutes = async (fastify) => {
         assinaturaInfo = { id: assinaturaId, plano_id: planoId, itens_criados: itensResult.rows.length };
       }
 
+      // Auto-criar fila de atendimento default + adicionar usuario como membro
+      const filaResult = await client.query(`
+        INSERT INTO filas_atendimento (empresa_id, nome, descricao, is_default, auto_assignment, cor, icone, ativo)
+        VALUES ($1, 'Atendimento Geral', 'Fila padrao para receber novas conversas', true, true, '#3B82F6', 'inbox', true)
+        RETURNING id
+      `, [empresa.id]);
+
+      if (filaResult.rows[0]) {
+        await client.query(`
+          INSERT INTO fila_membros (fila_id, usuario_id, papel)
+          VALUES ($1, $2, 'supervisor')
+        `, [filaResult.rows[0].id, createdUser.id]);
+      }
+
       await client.query('COMMIT');
 
       createLogger.info('Company created by master', {
