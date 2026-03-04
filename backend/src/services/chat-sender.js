@@ -46,6 +46,10 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
   const whatsappNumber = whatsappResult.rows[0];
   const token = decrypt(whatsappNumber.token_graph_api);
 
+  if (!token) {
+    throw new Error('Token WhatsApp invalido ou nao configurado');
+  }
+
   // 3. Salvar em mensagens_log
   const msgResult = await pool.query(
     `INSERT INTO mensagens_log

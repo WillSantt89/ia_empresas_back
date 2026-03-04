@@ -5,6 +5,9 @@ import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini,
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { sendMessage as chatwootSendMessage, getConversationMessages, unassignAgent } from '../../services/chatwoot.js';
+import { atribuirConversaAutomatica } from '../../services/fila-manager.js';
+import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats } from '../../services/websocket.js';
+import { calcularStatsFila } from '../../services/fila-manager.js';
 
 const createLogger = logger.child({ module: 'n8n-webhook' });
 
@@ -144,7 +147,7 @@ const n8nWebhookRoutes = async (fastify) => {
       let conversa_id;
 
       const conversaResult = await pool.query(`
-        SELECT id, controlado_por, humano_nome FROM conversas
+        SELECT id, controlado_por, humano_nome, fila_id FROM conversas
         WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
         ORDER BY criado_em DESC
         LIMIT 1
@@ -153,9 +156,10 @@ const n8nWebhookRoutes = async (fastify) => {
       if (conversaResult.rows.length > 0) {
         conversa_id = conversaResult.rows[0].id;
 
-        // --- Check human control ---
-        if (conversaResult.rows[0].controlado_por === 'humano') {
-          createLogger.info('Message received during human control, skipping AI', {
+        // --- Check human/fila control ---
+        const controlador = conversaResult.rows[0].controlado_por;
+        if (controlador === 'humano' || controlador === 'fila') {
+          createLogger.info(`Message received during ${controlador} control, skipping AI`, {
             empresa_id, phone, conversa_id,
             humano_nome: conversaResult.rows[0].humano_nome
           });
@@ -166,12 +170,24 @@ const n8nWebhookRoutes = async (fastify) => {
           });
 
           // Log to mensagens_log for audit
-          pool.query(`
-            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, criado_em)
-            VALUES ($1, $2, 'entrada', $3, NOW())
-          `, [conversa_id, empresa_id, message]).catch(err => {
-            createLogger.error('Failed to log message during human control', { error: err.message });
-          });
+          const logMsgResult = await pool.query(`
+            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
+            VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())
+            RETURNING id, criado_em
+          `, [conversa_id, empresa_id, message]);
+
+          // Emit WebSocket for real-time (Gap 4)
+          const fila_id = conversaResult.rows[0].fila_id;
+          if (logMsgResult.rows[0]) {
+            emitNovaMensagem(conversa_id, fila_id, {
+              id: logMsgResult.rows[0].id,
+              conversa_id: conversa_id,
+              conteudo: message,
+              direcao: 'entrada',
+              remetente_tipo: 'cliente',
+              criado_em: logMsgResult.rows[0].criado_em,
+            });
+          }
 
           // Update humano_ultima_msg_em to prevent premature timeout
           pool.query(`
@@ -195,13 +211,79 @@ const n8nWebhookRoutes = async (fastify) => {
           };
         }
       } else {
+        // Check if empresa has a default fila
+        const filaResult = await pool.query(
+          `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND is_default = true AND ativo = true LIMIT 1`,
+          [empresa_id]
+        );
+        const defaultFilaId = filaResult.rows[0]?.id || null;
+
         const insertConversa = await pool.query(`
-          INSERT INTO conversas (empresa_id, contato_whatsapp, agente_id, agente_inicial_id, status, dados_json)
-          VALUES ($1, $2, $3, $3, 'ativo', $4)
+          INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json)
+          VALUES ($1, $2, $3, $4, $4, 'ativo', $5, $6, $7)
           RETURNING id
-        `, [empresa_id, phone, agente_id, JSON.stringify({ name: name || null, source: 'n8n' })]);
+        `, [
+          empresa_id, phone, name || null, agente_id,
+          defaultFilaId ? 'fila' : 'ia',
+          defaultFilaId,
+          JSON.stringify({ name: name || null, source: 'n8n' })
+        ]);
 
         conversa_id = insertConversa.rows[0].id;
+
+        // If routed to fila, try auto-assignment and emit WebSocket
+        if (defaultFilaId) {
+          createLogger.info('New conversation routed to fila', { conversa_id, fila_id: defaultFilaId });
+
+          // Emit new conversation in fila
+          emitNovaConversaNaFila(defaultFilaId, {
+            id: conversa_id,
+            contato_whatsapp: phone,
+            contato_nome: name || null,
+            status: 'ativo',
+            controlado_por: 'fila',
+            fila_id: defaultFilaId,
+            criado_em: new Date().toISOString(),
+          });
+
+          // Try auto-assignment (round-robin)
+          const operador = await atribuirConversaAutomatica(conversa_id, defaultFilaId).catch(err => {
+            createLogger.error('Auto-assignment failed (non-blocking)', { error: err.message });
+            return null;
+          });
+
+          if (operador) {
+            createLogger.info('Conversation auto-assigned', { conversa_id, operador: operador.nome });
+            // Skip AI processing — operador will handle
+            addToHistory(empresa_id, conversationKey, 'user', message).catch(() => {});
+            await pool.query(
+              `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
+               VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())`,
+              [conversa_id, empresa_id, message]
+            );
+            return {
+              success: true,
+              data: {
+                response: null,
+                human_controlled: true,
+                conversation_id: conversa_id,
+                agent_name: null,
+                tools_called: [],
+                tokens_used: { input: 0, output: 0 },
+                processing_time_ms: Date.now() - startTime
+              }
+            };
+          }
+
+          // No operator available — update stats and let AI process below
+          calcularStatsFila(defaultFilaId).then(stats => {
+            emitFilaStats(defaultFilaId, stats);
+          }).catch(() => {});
+
+          // Fila has no auto-assignment or no operators → AI processes
+          // Update controlado_por back to 'ia' for this message only
+          // (conversation stays in fila for operators to pick up)
+        }
       }
 
       // --- Daily limit check ---
@@ -265,12 +347,25 @@ const n8nWebhookRoutes = async (fastify) => {
       await addToHistory(empresa_id, conversationKey, 'user', message);
 
       // --- 9. Log incoming message to mensagens_log ---
-      pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, criado_em)
-        VALUES ($1, $2, 'entrada', $3, NOW())
-      `, [conversa_id, empresa_id, message]).catch(err => {
-        createLogger.error('Failed to log incoming message', { error: err.message });
-      });
+      const incomingMsgResult = await pool.query(`
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
+        VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())
+        RETURNING id, criado_em
+      `, [conversa_id, empresa_id, message]);
+
+      // Emit WebSocket for incoming client message (real-time)
+      if (incomingMsgResult.rows[0]) {
+        const conversaForFila = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+        const currentFilaId = conversaForFila.rows[0]?.fila_id;
+        emitNovaMensagem(conversa_id, currentFilaId, {
+          id: incomingMsgResult.rows[0].id,
+          conversa_id: conversa_id,
+          conteudo: message,
+          direcao: 'entrada',
+          remetente_tipo: 'cliente',
+          criado_em: incomingMsgResult.rows[0].criado_em,
+        });
+      }
 
       // --- 10. Process with Gemini (failover) ---
       const toolDeclarations = buildToolDeclarations(tools);
@@ -371,20 +466,34 @@ const n8nWebhookRoutes = async (fastify) => {
       const processingTime = Date.now() - startTime;
 
       // --- 12. Log response to mensagens_log ---
-      pool.query(`
+      const outgoingMsgResult = await pool.query(`
         INSERT INTO mensagens_log (
-          conversa_id, empresa_id, direcao, conteudo,
+          conversa_id, empresa_id, direcao, conteudo, remetente_tipo,
           tokens_input, tokens_output, tools_invocadas_json,
           modelo_usado, api_key_usada_id, latencia_ms, criado_em
-        ) VALUES ($1, $2, 'saida', $3, $4, $5, $6, $7, $8, $9, NOW())
+        ) VALUES ($1, $2, 'saida', $3, 'ia', $4, $5, $6, $7, $8, $9, NOW())
+        RETURNING id, criado_em
       `, [
         conversa_id, empresa_id, result.text,
         result.tokensInput, result.tokensOutput,
         result.toolsCalled.length > 0 ? JSON.stringify(result.toolsCalled.map(tc => tc.name)) : null,
         modelo, usedKeyId, processingTime
-      ]).catch(err => {
-        createLogger.error('Failed to log outgoing message', { error: err.message });
-      });
+      ]);
+
+      // Emit WebSocket for AI response (real-time)
+      if (outgoingMsgResult.rows[0]) {
+        const conversaForFila2 = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+        const currentFilaId2 = conversaForFila2.rows[0]?.fila_id;
+        emitNovaMensagem(conversa_id, currentFilaId2, {
+          id: outgoingMsgResult.rows[0].id,
+          conversa_id: conversa_id,
+          conteudo: result.text,
+          direcao: 'saida',
+          remetente_tipo: 'ia',
+          remetente_nome: agente_nome,
+          criado_em: outgoingMsgResult.rows[0].criado_em,
+        });
+      }
 
       // --- 13. Increment daily usage ---
       pool.query(`

@@ -225,6 +225,10 @@ export default async function conversasRoutes(fastify, opts) {
             id,
             direcao,
             conteudo,
+            remetente_tipo,
+            remetente_id,
+            remetente_nome,
+            status_entrega,
             tokens_input,
             tokens_output,
             tools_invocadas_json,
@@ -333,13 +337,16 @@ export default async function conversasRoutes(fastify, opts) {
         });
       }
 
-      // Atualizar conversa
+      // Atualizar conversa (sincronizar humano_id + operador_id)
       await client.query(`
         UPDATE conversas
         SET
           controlado_por = 'humano',
           humano_id = $1,
           humano_nome = $2,
+          operador_id = $1,
+          operador_nome = $2,
+          operador_atribuido_em = NOW(),
           humano_assumiu_em = NOW(),
           humano_ultima_msg_em = NOW(),
           atualizado_em = NOW()
@@ -355,25 +362,19 @@ export default async function conversasRoutes(fastify, opts) {
         )
         VALUES (
           gen_random_uuid(), $1, $2, 'admin_forcou',
-          'ia', 'humano', $3, $4, $5, NOW()
+          $3, 'humano', $4, $5, $6, NOW()
         )
-      `, [id, empresaId, userId, userName, motivo || 'Assumido manualmente pelo admin']);
-
-      // Criar notificação
-      await client.query(`
-        INSERT INTO notificacoes (
-          id, empresa_id, tipo, titulo, mensagem,
-          severidade, lida, criado_em
-        )
-        VALUES (
-          gen_random_uuid(), $1, 'conversa_assumida',
-          'Conversa assumida',
-          $2,
-          'info', false, NOW()
-        )
-      `, [empresaId, `${userName} assumiu a conversa ${conversa.conversation_id_chatwoot}`]);
+      `, [id, empresaId, conversa.controlado_por, userId, userName, motivo || 'Assumido manualmente pelo admin']);
 
       await client.query('COMMIT');
+
+      // Emitir WebSocket
+      const dados = { id, operador_id: userId, operador_nome: userName, controlado_por: 'humano' };
+      emitConversaAtribuida(id, conversa.fila_id, userId, dados);
+      if (conversa.fila_id) {
+        const stats = await calcularStatsFila(conversa.fila_id);
+        emitFilaStats(conversa.fila_id, stats);
+      }
 
       logger.info(`Conversa ${id} assumed by ${userName}`);
 
@@ -382,7 +383,8 @@ export default async function conversasRoutes(fastify, opts) {
         data: {
           message: 'Conversa assumida com sucesso',
           controlado_por: 'humano',
-          humano_nome: userName
+          operador_id: userId,
+          operador_nome: userName
         }
       };
     } catch (error) {

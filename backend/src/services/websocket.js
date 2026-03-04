@@ -12,9 +12,16 @@ let io = null;
  * Inicializa o Socket.IO no servidor Fastify
  */
 export function initializeWebSocket(server) {
+  // CORS: se origin='*', Socket.IO com credentials=true rejeita. Transformar em callback.
+  const corsOrigin = config.CORS_ORIGIN === '*'
+    ? (origin, callback) => callback(null, true)
+    : config.CORS_ORIGIN.includes(',')
+      ? config.CORS_ORIGIN.split(',').map(s => s.trim())
+      : config.CORS_ORIGIN;
+
   io = new Server(server, {
     cors: {
-      origin: config.CORS_ORIGIN,
+      origin: corsOrigin,
       credentials: true,
       methods: ['GET', 'POST'],
     },

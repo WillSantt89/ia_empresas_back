@@ -438,14 +438,22 @@ export default async function filasRoutes(fastify) {
       params
     );
 
-    // Dados
+    // Dados (LATERAL join para performance)
     const result = await pool.query(
       `SELECT c.*,
               a.nome as agente_nome,
-              (SELECT COUNT(*) FROM mensagens_log m WHERE m.conversa_id = c.id) as total_mensagens,
-              (SELECT conteudo FROM mensagens_log m WHERE m.conversa_id = c.id ORDER BY m.criado_em DESC LIMIT 1) as ultima_mensagem
+              lm.total_mensagens,
+              lm.ultima_mensagem,
+              lm.ultima_mensagem_em
        FROM conversas c
        LEFT JOIN agentes a ON c.agente_id = a.id
+       LEFT JOIN LATERAL (
+         SELECT
+           COUNT(*) as total_mensagens,
+           (SELECT conteudo FROM mensagens_log m2 WHERE m2.conversa_id = c.id ORDER BY m2.criado_em DESC LIMIT 1) as ultima_mensagem,
+           MAX(criado_em) as ultima_mensagem_em
+         FROM mensagens_log m WHERE m.conversa_id = c.id
+       ) lm ON true
        WHERE ${where}
        ORDER BY
          CASE c.prioridade
@@ -455,7 +463,7 @@ export default async function filasRoutes(fastify) {
            WHEN 'low' THEN 4
            ELSE 5
          END,
-         c.criado_em DESC
+         c.atualizado_em DESC
        LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
       [...params, parseInt(per_page), offset]
     );
