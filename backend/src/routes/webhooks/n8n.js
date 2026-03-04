@@ -689,49 +689,89 @@ const n8nWebhookRoutes = async (fastify) => {
         properties: {
           phone: { type: 'string', minLength: 1, maxLength: 30 },
           acao: { type: 'string', enum: ['assumir', 'devolver', 'encerrar'] },
-          operador_nome: { type: 'string', maxLength: 255 }
+          operador_nome: { type: 'string', maxLength: 255 },
+          chatwoot_account_id: { type: 'integer' },
+          chatwoot_conversation_id: { type: 'integer' }
         },
         required: ['phone', 'acao']
       }
     }
   }, async (request, reply) => {
-    const { phone, acao, operador_nome } = request.body;
+    const { phone, acao, operador_nome, chatwoot_account_id, chatwoot_conversation_id } = request.body;
     const webhookToken = request.headers['x-webhook-token'];
+    const internalSecret = request.headers['x-internal-secret'];
 
-    // --- Auth via webhook_token ---
-    if (!webhookToken) {
-      return reply.code(401).send({
-        success: false,
-        error: { code: 'MISSING_TOKEN', message: 'Header x-webhook-token is required' }
-      });
-    }
-
+    // --- Dual-mode authentication ---
+    // Mode 1: x-webhook-token header (direct n8n call)
+    // Mode 2: X-Internal-Secret + chatwoot_account_id (Chatwoot → n8n → backend)
     let empresa;
-    try {
-      const empresaResult = await pool.query(
-        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
-        [webhookToken]
-      );
 
-      if (empresaResult.rows.length === 0) {
+    if (webhookToken) {
+      // Mode 1: lookup by webhook_token
+      try {
+        const empresaResult = await pool.query(
+          'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
+          [webhookToken]
+        );
+
+        if (empresaResult.rows.length === 0) {
+          return reply.code(401).send({
+            success: false,
+            error: { code: 'INVALID_TOKEN', message: 'Invalid or inactive webhook token' }
+          });
+        }
+
+        empresa = empresaResult.rows[0];
+      } catch (err) {
+        createLogger.error('Token lookup failed (controle-humano)', { error: err.message });
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'DB_ERROR', message: 'Failed to validate token' }
+        });
+      }
+    } else if (internalSecret && chatwoot_account_id) {
+      // Mode 2: validate internal secret, then lookup by chatwoot_account_id
+      if (internalSecret !== process.env.INTERNAL_SECRET) {
         return reply.code(401).send({
           success: false,
-          error: { code: 'INVALID_TOKEN', message: 'Invalid or inactive webhook token' }
+          error: { code: 'INVALID_SECRET', message: 'Invalid internal secret' }
         });
       }
 
-      empresa = empresaResult.rows[0];
-    } catch (err) {
-      createLogger.error('Token lookup failed (controle-humano)', { error: err.message });
-      return reply.code(500).send({
+      try {
+        const empresaResult = await pool.query(
+          'SELECT id, nome FROM empresas WHERE chatwoot_account_id = $1 AND ativo = true LIMIT 1',
+          [chatwoot_account_id]
+        );
+
+        if (empresaResult.rows.length === 0) {
+          return reply.code(401).send({
+            success: false,
+            error: { code: 'EMPRESA_NOT_FOUND', message: 'No active company found for this Chatwoot account' }
+          });
+        }
+
+        empresa = empresaResult.rows[0];
+      } catch (err) {
+        createLogger.error('Chatwoot account lookup failed (controle-humano)', { error: err.message });
+        return reply.code(500).send({
+          success: false,
+          error: { code: 'DB_ERROR', message: 'Failed to lookup company by Chatwoot account' }
+        });
+      }
+    } else {
+      return reply.code(401).send({
         success: false,
-        error: { code: 'DB_ERROR', message: 'Failed to validate token' }
+        error: {
+          code: 'MISSING_AUTH',
+          message: 'Requires x-webhook-token header OR X-Internal-Secret header + chatwoot_account_id in body'
+        }
       });
     }
 
     const empresa_id = empresa.id;
 
-    createLogger.info('Controle humano request', { empresa_id, phone, acao, operador_nome });
+    createLogger.info('Controle humano request', { empresa_id, phone, acao, operador_nome, chatwoot_account_id });
 
     if (acao === 'devolver') {
       try {

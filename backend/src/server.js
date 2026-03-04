@@ -41,6 +41,11 @@ import dashboardRoutes from './routes/dashboard.js';
 import logsRoutes from './routes/logs.js';
 import configuracoesRoutes from './routes/configuracoes.js';
 import notificacoesRoutes from './routes/notificacoes.js';
+import filasRoutes from './routes/filas.js';
+import labelsRoutes from './routes/labels.js';
+
+// Import WebSocket
+import { initializeWebSocket } from './services/websocket.js';
 
 // Import jobs
 import timeoutChecker from './jobs/timeout-checker.js';
@@ -248,12 +253,17 @@ async function start() {
     await fastify.register(logsRoutes, { prefix: '/api/logs' });
     await fastify.register(configuracoesRoutes, { prefix: '/api/configuracoes' });
     await fastify.register(notificacoesRoutes, { prefix: '/api/notificacoes' });
+    await fastify.register(filasRoutes, { prefix: '/api/filas' });
+    await fastify.register(labelsRoutes, { prefix: '/api/labels' });
 
     // Start listening
     await fastify.listen({
       port: config.PORT,
       host: '0.0.0.0',
     });
+
+    // Initialize WebSocket after server is listening
+    initializeWebSocket(fastify.server);
 
     logger.info(`Server listening on port ${config.PORT} in ${config.NODE_ENV} mode`);
 
