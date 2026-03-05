@@ -1029,7 +1029,10 @@ const agentesRoutes = async (fastify) => {
       createLogger.error('Failed to create context cache', {
         empresa_id,
         agent_id: id,
-        error: error.message
+        error: error.message,
+        stack: error.stack,
+        code: error.code,
+        status: error.status
       });
 
       return reply.code(500).send({

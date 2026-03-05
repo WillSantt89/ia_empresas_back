@@ -385,15 +385,19 @@ export function validateResponse(response) {
  */
 export async function createContextCache({ apiKey, model, systemPrompt, tools, ttlSeconds = 86400 }) {
   const ai = new GoogleGenAI({ apiKey });
+  const cacheConfig = {
+    displayName: `agent-cache-${Date.now()}`,
+    systemInstruction: systemPrompt,
+    ttl: `${ttlSeconds}s`,
+  };
+
+  if (tools.length > 0) {
+    cacheConfig.tools = [{ functionDeclarations: tools }];
+  }
+
   const cachedContent = await ai.caches.create({
     model: model,
-    config: {
-      displayName: `agent-cache-${Date.now()}`,
-      systemInstruction: systemPrompt,
-      tools: tools.length > 0 ? [{ functionDeclarations: tools }] : undefined,
-      contents: [],
-      ttl: `${ttlSeconds}s`,
-    }
+    config: cacheConfig,
   });
 
   createLogger.info('Context cache created', {
