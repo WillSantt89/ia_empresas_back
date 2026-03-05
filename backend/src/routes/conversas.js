@@ -167,7 +167,8 @@ export default async function conversasRoutes(fastify, opts) {
           wn.numero_formatado as numero_whatsapp,
           ct.id as contato_id_ref,
           ct.email as contato_email,
-          ct.observacoes as contato_observacoes
+          ct.observacoes as contato_observacoes,
+          ct.dados_json as contato_dados_json
         FROM conversas c
         LEFT JOIN inboxes i ON i.id = c.inbox_id
         LEFT JOIN agentes a ON a.id = c.agente_id
@@ -810,11 +811,19 @@ export default async function conversasRoutes(fastify, opts) {
         return reply.code(404).send({ success: false, error: { message: 'Fila destino nao encontrada' } });
       }
 
-      // Operador so pode transferir para fila que pertence
+      // Operador precisa pertencer a fila de ORIGEM (ou ser o atribuido) para transferir
       if (user.role === 'operador') {
-        const isMembro = await isMembroDaFila(user.id, fila_id);
-        if (!isMembro) {
-          return reply.code(403).send({ success: false, error: { message: 'Voce nao pertence a fila destino' } });
+        const conversaCheck = await pool.query(
+          `SELECT fila_id, operador_id FROM conversas WHERE id = $1 AND empresa_id = $2`,
+          [id, empresaId]
+        );
+        if (conversaCheck.rows.length > 0) {
+          const conv = conversaCheck.rows[0];
+          const isAtribuido = conv.operador_id === user.id;
+          const isMembroOrigem = conv.fila_id ? await isMembroDaFila(user.id, conv.fila_id) : false;
+          if (!isAtribuido && !isMembroOrigem) {
+            return reply.code(403).send({ success: false, error: { message: 'Sem permissao para transferir esta conversa' } });
+          }
         }
       }
 
