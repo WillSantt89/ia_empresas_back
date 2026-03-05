@@ -27,6 +27,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
       let query = `
         SELECT
           wn.*,
+          (wn.whatsapp_app_secret IS NOT NULL) as has_app_secret,
           i.nome as inbox_nome,
           i.inbox_id_chatwoot,
           COUNT(DISTINCT c.id) as total_conversas,
@@ -111,7 +112,8 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
           waba_id: { type: 'string' },
           token_graph_api: { type: 'string' },
           numero_formatado: { type: 'string' },
-          inbox_id: { type: 'string', format: 'uuid' }
+          inbox_id: { type: 'string', format: 'uuid' },
+          whatsapp_app_secret: { type: 'string' }
         }
       }
     }
@@ -127,7 +129,8 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
         waba_id,
         token_graph_api,
         numero_formatado,
-        inbox_id
+        inbox_id,
+        whatsapp_app_secret
       } = request.body;
       const { empresaId } = request;
 
@@ -165,21 +168,23 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
         }
       }
 
-      // Encriptar token
+      // Encriptar token e app secret
       const encryptedToken = await fastify.encrypt(token_graph_api);
+      const encryptedAppSecret = whatsapp_app_secret ? await fastify.encrypt(whatsapp_app_secret) : null;
 
       // Criar número
       const result = await client.query(`
         INSERT INTO whatsapp_numbers (
           id, empresa_id, inbox_id, nome_exibicao,
           phone_number_id, waba_id, token_graph_api,
-          numero_formatado, ativo, criado_em
+          numero_formatado, whatsapp_app_secret, ativo, criado_em
         )
         VALUES (
-          gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, true, NOW()
+          gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, true, NOW()
         )
         RETURNING id, empresa_id, inbox_id, nome_exibicao,
-          phone_number_id, waba_id, numero_formatado, ativo, criado_em
+          phone_number_id, waba_id, numero_formatado, ativo, criado_em,
+          (whatsapp_app_secret IS NOT NULL) as has_app_secret
       `, [
         empresaId,
         inbox_id,
@@ -187,7 +192,8 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
         phone_number_id,
         waba_id,
         encryptedToken,
-        numero_formatado
+        numero_formatado,
+        encryptedAppSecret
       ]);
 
       await client.query('COMMIT');
@@ -237,6 +243,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
           wn.name_status, wn.messaging_limit_tier, wn.platform_type,
           wn.account_mode, wn.verificacao_status, wn.verificacao_erro,
           wn.ultima_verificacao,
+          (wn.whatsapp_app_secret IS NOT NULL) as has_app_secret,
           i.nome as inbox_nome,
           i.inbox_id_chatwoot,
           a.nome as agente_nome,
@@ -308,7 +315,8 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
           token_graph_api: { type: 'string' },
           numero_formatado: { type: 'string' },
           inbox_id: { type: ['string', 'null'], format: 'uuid' },
-          ativo: { type: 'boolean' }
+          ativo: { type: 'boolean' },
+          whatsapp_app_secret: { type: 'string' }
         }
       }
     }
@@ -362,8 +370,8 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
       let paramCount = 1;
 
       for (const [key, value] of Object.entries(updates)) {
-        if (key === 'token_graph_api') {
-          // Encriptar novo token
+        if (key === 'token_graph_api' || key === 'whatsapp_app_secret') {
+          // Encriptar campo sensível
           fields.push(`${key} = $${paramCount}`);
           values.push(await fastify.encrypt(value));
         } else {

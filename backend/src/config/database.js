@@ -7,7 +7,7 @@ const { Pool } = pg;
 // Configure PostgreSQL connection pool
 const poolConfig = {
   connectionString: config.DATABASE_URL,
-  max: 50, // Maximum number of clients in the pool
+  max: 120, // Maximum number of clients in the pool (scaled for 200 operators + webhooks)
   idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
   connectionTimeoutMillis: 5000, // Return an error after 5 seconds if connection could not be established
   allowExitOnIdle: true, // Allows the process to exit if the pool is idle

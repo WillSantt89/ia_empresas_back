@@ -3,7 +3,7 @@ import rateLimit from '@fastify/rate-limit';
 // Configuração global de rate limiting
 export const globalRateLimit = {
   global: true,
-  max: 1000, // 1000 requests por minuto
+  max: 5000, // 5000 requests por minuto (scaled for 200 operators)
   timeWindow: '1 minute',
   skipSuccessfulRequests: false,
   skipFailedRequests: true,
@@ -42,6 +42,27 @@ export const chatRateLimit = {
       error: {
         code: 'CHAT_RATE_LIMITED',
         message: 'Chat rate limit exceeded. Please wait before sending more messages.',
+        statusCode: 429,
+        after: context.after,
+        limit: context.max
+      }
+    };
+  }
+};
+
+// Rate limit por usuário autenticado
+export const perUserRateLimit = {
+  max: 120, // 120 req/min por usuário
+  timeWindow: '1 minute',
+  keyGenerator: (request) => {
+    return request.user?.id ? `user:${request.user.id}` : `ip:${request.ip}`;
+  },
+  errorResponseBuilder: function (request, context) {
+    return {
+      success: false,
+      error: {
+        code: 'USER_RATE_LIMITED',
+        message: 'Muitas requisições. Aguarde um momento.',
         statusCode: 429,
         after: context.after,
         limit: context.max
@@ -144,6 +165,7 @@ export function setupRouteRateLimits(fastify) {
 
 export default {
   globalRateLimit,
+  perUserRateLimit,
   chatRateLimit,
   loginRateLimit,
   createResourceRateLimit,

@@ -51,20 +51,36 @@ export function initializeWebSocket(server) {
 
       const decoded = jwt.verify(token, config.JWT_SECRET);
 
-      // Buscar usuario no banco
-      const userResult = await pool.query(
-        `SELECT u.id, u.nome, u.email, u.role, u.empresa_id, e.nome as empresa_nome
-         FROM usuarios u
-         JOIN empresas e ON u.empresa_id = e.id
-         WHERE u.id = $1 AND u.ativo = true AND e.ativo = true`,
-        [decoded.id]
-      );
+      // Buscar usuario com cache Redis (5min)
+      const cacheKey = `user_ws:${decoded.id}`;
+      let user;
+      try {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+          user = JSON.parse(cached);
+        }
+      } catch (_) { /* cache miss, segue pro banco */ }
 
-      if (userResult.rows.length === 0) {
-        return next(new Error('Usuario nao encontrado'));
+      if (!user) {
+        const userResult = await pool.query(
+          `SELECT u.id, u.nome, u.email, u.role, u.empresa_id, e.nome as empresa_nome
+           FROM usuarios u
+           JOIN empresas e ON u.empresa_id = e.id
+           WHERE u.id = $1 AND u.ativo = true AND e.ativo = true`,
+          [decoded.id]
+        );
+
+        if (userResult.rows.length === 0) {
+          return next(new Error('Usuario nao encontrado'));
+        }
+
+        user = userResult.rows[0];
+        try {
+          await redis.set(cacheKey, JSON.stringify(user), 'EX', 300);
+        } catch (_) { /* falha no cache não bloqueia */ }
       }
 
-      socket.user = userResult.rows[0];
+      socket.user = user;
       next();
     } catch (error) {
       logger.warn('Socket.IO auth failed:', error.message);
@@ -75,21 +91,45 @@ export function initializeWebSocket(server) {
   // Conexao estabelecida
   io.on('connection', async (socket) => {
     const user = socket.user;
+
+    // Limitar a 3 conexões simultâneas por usuário
+    const userSockets = await io.in(`usuario:${user.id}`).fetchSockets();
+    if (userSockets.length >= 3) {
+      logger.warn(`Socket rejected: ${user.nome} already has ${userSockets.length} connections`);
+      socket.emit('error', { message: 'Maximo de conexoes atingido (3)' });
+      socket.disconnect(true);
+      return;
+    }
+
     logger.info(`Socket connected: ${user.nome} (${user.role}) [${socket.id}]`);
 
     // Auto-join rooms baseado no usuario
     socket.join(`usuario:${user.id}`);
     socket.join(`empresa:${user.empresa_id}`);
 
-    // Auto-join nas filas do usuario
+    // Auto-join nas filas do usuario (com cache Redis 5min)
     try {
-      const filasResult = await pool.query(
-        `SELECT fm.fila_id FROM fila_membros fm
-         JOIN filas_atendimento fa ON fm.fila_id = fa.id
-         WHERE fm.usuario_id = $1 AND fa.ativo = true`,
-        [user.id]
-      );
-      for (const row of filasResult.rows) {
+      let filas;
+      const filasCacheKey = `user_filas:${user.id}`;
+      try {
+        const cachedFilas = await redis.get(filasCacheKey);
+        if (cachedFilas) filas = JSON.parse(cachedFilas);
+      } catch (_) { /* cache miss */ }
+
+      if (!filas) {
+        const filasResult = await pool.query(
+          `SELECT fm.fila_id FROM fila_membros fm
+           JOIN filas_atendimento fa ON fm.fila_id = fa.id
+           WHERE fm.usuario_id = $1 AND fa.ativo = true`,
+          [user.id]
+        );
+        filas = filasResult.rows;
+        try {
+          await redis.set(filasCacheKey, JSON.stringify(filas), 'EX', 300);
+        } catch (_) { /* falha no cache não bloqueia */ }
+      }
+
+      for (const row of filas) {
         socket.join(`fila:${row.fila_id}`);
       }
 
@@ -308,8 +348,14 @@ export function emitNovaConversaNaFila(filaId, conversa) {
 }
 
 /**
- * Emite stats atualizadas de fila
+ * Emite stats atualizadas de fila (debounced 500ms para evitar emissões excessivas)
  */
+const statsTimers = new Map();
+
 export function emitFilaStats(filaId, stats) {
-  emitToFila(filaId, 'fila:stats', stats);
+  if (statsTimers.has(filaId)) clearTimeout(statsTimers.get(filaId));
+  statsTimers.set(filaId, setTimeout(() => {
+    emitToFila(filaId, 'fila:stats', stats);
+    statsTimers.delete(filaId);
+  }, 500));
 }
