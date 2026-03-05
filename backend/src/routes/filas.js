@@ -449,7 +449,7 @@ export default async function filasRoutes(fastify) {
     }
 
     if (tipo === 'nao_atribuidas') {
-      where += ` AND c.operador_id IS NULL AND c.controlado_por = 'fila'`;
+      where += ` AND c.operador_id IS NULL AND c.controlado_por IN ('fila', 'ia')`;
     } else if (tipo === 'minhas') {
       paramCount++;
       where += ` AND c.operador_id = $${paramCount}`;
