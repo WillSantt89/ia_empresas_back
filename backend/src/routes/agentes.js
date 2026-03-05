@@ -31,7 +31,8 @@ const agentesRoutes = async (fastify) => {
       temperatura: { type: 'number', minimum: 0, maximum: 2, default: DEFAULT_LIMITS.TEMPERATURE },
       max_tokens: { type: 'integer', minimum: 100, maximum: 8192, default: DEFAULT_LIMITS.MAX_TOKENS },
       config_json: { type: 'object' },
-      ativo: { type: 'boolean' }
+      ativo: { type: 'boolean' },
+      mensagem_midia_nao_suportada: { type: ['string', 'null'], maxLength: 1000 }
     }
   };
 
