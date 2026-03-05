@@ -106,6 +106,7 @@ export default async function mediaRoutes(fastify) {
       reply.header('Content-Length', stat.size);
       reply.header('Cache-Control', 'private, max-age=86400');
       reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('Access-Control-Allow-Origin', '*');
 
       // Documents: force download
       if (ATTACHMENT_TYPES.has(contentType)) {
