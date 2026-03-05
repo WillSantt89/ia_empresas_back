@@ -1572,7 +1572,7 @@ export default async function conversasRoutes(fastify, opts) {
           await client.query(
             `INSERT INTO controle_historico
                (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
-             VALUES ($1, $2, 'devolvido_ia', $3, 'ia', $4, $5, 'Devolvido para IA em massa')`,
+             VALUES ($1, $2, 'humano_devolveu', $3, 'ia', $4, $5, 'Devolvido para IA em massa')`,
             [cid, empresaId, conversa.controlado_por, user.id, user.nome]
           );
 
