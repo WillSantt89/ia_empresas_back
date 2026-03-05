@@ -207,6 +207,9 @@ export async function buildGeminiParts(parsedMessage, accessToken) {
     return {
       parts: [{ text }],
       historyText: text,
+      mediaBuffer: null,
+      mediaMimeType: null,
+      mediaFileName: null,
     };
   }
 
@@ -249,7 +252,7 @@ export async function buildGeminiParts(parsedMessage, accessToken) {
           historyText = `[Mídia recebida: ${type}]`;
       }
 
-      return { parts, historyText };
+      return { parts, historyText, mediaBuffer: buffer, mediaMimeType: actualMimeType, mediaFileName: fileName || null };
     } catch (error) {
       createLogger.error('Failed to download/process media', {
         type,
@@ -262,6 +265,9 @@ export async function buildGeminiParts(parsedMessage, accessToken) {
       return {
         parts: [{ text: fallbackText }],
         historyText: `[${type} recebido - falha no download]`,
+        mediaBuffer: null,
+        mediaMimeType: null,
+        mediaFileName: null,
       };
     }
   }
@@ -271,5 +277,8 @@ export async function buildGeminiParts(parsedMessage, accessToken) {
   return {
     parts: [{ text: fallbackText }],
     historyText: fallbackText,
+    mediaBuffer: null,
+    mediaMimeType: null,
+    mediaFileName: null,
   };
 }

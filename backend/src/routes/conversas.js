@@ -239,6 +239,10 @@ export default async function conversasRoutes(fastify, opts) {
             modelo_usado,
             latencia_ms,
             erro,
+            tipo_mensagem,
+            midia_url,
+            midia_mime_type,
+            midia_nome_arquivo,
             criado_em
           FROM mensagens_log
           WHERE conversa_id = $1

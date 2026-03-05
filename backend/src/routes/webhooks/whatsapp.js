@@ -7,6 +7,7 @@ import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini 
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { parseMetaMessage, buildGeminiParts } from '../../services/media-handler.js';
+import { saveMedia } from '../../services/media-storage.js';
 import { sendTextMessage, markAsRead } from '../../services/whatsapp-sender.js';
 import { atribuirConversaAutomatica, calcularStatsFila } from '../../services/fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats, emitStatusEntrega } from '../../services/websocket.js';
@@ -182,11 +183,22 @@ const whatsappWebhookRoutes = async (fastify) => {
     }
 
     // Build Gemini parts (downloads media if needed)
-    const { parts, historyText } = await buildGeminiParts(parsed, graphToken);
+    const { parts, historyText, mediaBuffer, mediaMimeType, mediaFileName } = await buildGeminiParts(parsed, graphToken);
+
+    // Save media to disk if present
+    let mediaSaved = null;
+    if (mediaBuffer) {
+      try {
+        mediaSaved = await saveMedia(mediaBuffer, empresa_id, mediaMimeType, mediaFileName);
+      } catch (err) {
+        createLogger.error('Failed to save media to disk', { error: err.message, empresa_id, type: parsed.type });
+      }
+    }
 
     createLogger.info('WhatsApp message received', {
       empresa_id, phone, type: parsed.type,
       historyText: historyText.substring(0, 100),
+      mediaSaved: !!mediaSaved,
     });
 
     // --- Resolve agent ---
@@ -259,10 +271,12 @@ const whatsappWebhookRoutes = async (fastify) => {
         });
 
         const logMsgResult = await pool.query(`
-          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, criado_em)
-          VALUES ($1, $2, 'entrada', $3, 'cliente', $4, NOW())
+          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
+          VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, NOW())
           RETURNING id, criado_em
-        `, [conversa_id, empresa_id, historyText, parsed.type]);
+        `, [conversa_id, empresa_id, historyText, parsed.type,
+            mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
+            mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null]);
 
         const fila_id = conversaResult.rows[0].fila_id;
         if (logMsgResult.rows[0]) {
@@ -273,6 +287,9 @@ const whatsappWebhookRoutes = async (fastify) => {
             direcao: 'entrada',
             remetente_tipo: 'cliente',
             tipo_mensagem: parsed.type,
+            midia_url: mediaSaved?.relativePath || null,
+            midia_mime_type: mediaSaved ? mediaMimeType : null,
+            midia_nome_arquivo: mediaSaved ? (mediaFileName || null) : null,
             criado_em: logMsgResult.rows[0].criado_em,
           });
         }
@@ -323,9 +340,11 @@ const whatsappWebhookRoutes = async (fastify) => {
           createLogger.info('Conversation auto-assigned', { conversa_id, operador: operador.nome });
           addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
           await pool.query(
-            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, criado_em)
-             VALUES ($1, $2, 'entrada', $3, 'cliente', $4, NOW())`,
-            [conversa_id, empresa_id, historyText, parsed.type]
+            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
+             VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, NOW())`,
+            [conversa_id, empresa_id, historyText, parsed.type,
+             mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
+             mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null]
           );
           return;
         }
@@ -393,10 +412,12 @@ const whatsappWebhookRoutes = async (fastify) => {
 
     // --- Log incoming message ---
     const incomingMsgResult = await pool.query(`
-      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, criado_em)
-      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, NOW())
+      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
+      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())
       RETURNING id, criado_em
-    `, [conversa_id, empresa_id, historyText, parsed.type, messageId]);
+    `, [conversa_id, empresa_id, historyText, parsed.type, messageId,
+        mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
+        mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null]);
 
     // Emit WebSocket for incoming message
     if (incomingMsgResult.rows[0]) {
@@ -409,6 +430,9 @@ const whatsappWebhookRoutes = async (fastify) => {
         direcao: 'entrada',
         remetente_tipo: 'cliente',
         tipo_mensagem: parsed.type,
+        midia_url: mediaSaved?.relativePath || null,
+        midia_mime_type: mediaSaved ? mediaMimeType : null,
+        midia_nome_arquivo: mediaSaved ? (mediaFileName || null) : null,
         criado_em: incomingMsgResult.rows[0].criado_em,
       });
     }
