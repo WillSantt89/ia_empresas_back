@@ -1259,4 +1259,349 @@ export default async function conversasRoutes(fastify, opts) {
       },
     });
   });
+
+  // ============================================
+  // BULK ACTIONS — Ações em massa (max 25)
+  // ============================================
+  const BULK_LIMIT = 25;
+
+  function validateBulkIds(conversa_ids, reply) {
+    if (!Array.isArray(conversa_ids) || conversa_ids.length === 0) {
+      reply.code(400).send({ success: false, error: { message: 'conversa_ids deve ser um array nao vazio' } });
+      return false;
+    }
+    if (conversa_ids.length > BULK_LIMIT) {
+      reply.code(400).send({ success: false, error: { message: `Maximo ${BULK_LIMIT} conversas por vez` } });
+      return false;
+    }
+    return true;
+  }
+
+  // POST /bulk/atribuir
+  fastify.post('/bulk/atribuir', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { conversa_ids } = request.body;
+    if (!validateBulkIds(conversa_ids, reply)) return;
+
+    const { empresaId, user } = request;
+    const operadorId = request.body.operador_id || user.id;
+
+    // Buscar nome do operador
+    const opResult = await pool.query(`SELECT nome FROM usuarios WHERE id = $1`, [operadorId]);
+    const operadorNome = opResult.rows[0]?.nome || 'Desconhecido';
+
+    // Verificar capacidade
+    const temCapacidade = await verificarCapacidadeOperador(operadorId);
+    if (!temCapacidade) {
+      return reply.code(400).send({ success: false, error: { message: 'Operador atingiu limite de conversas simultaneas' } });
+    }
+
+    const client = await pool.connect();
+    const sucesso = [];
+    const erros = [];
+
+    try {
+      await client.query('BEGIN');
+
+      const conversasResult = await client.query(
+        `SELECT id, fila_id, controlado_por FROM conversas
+         WHERE id = ANY($1) AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [conversa_ids, empresaId]
+      );
+      const conversasMap = new Map(conversasResult.rows.map(c => [c.id, c]));
+
+      for (const cid of conversa_ids) {
+        const conversa = conversasMap.get(cid);
+        if (!conversa) { erros.push({ id: cid, motivo: 'Nao encontrada ou inativa' }); continue; }
+
+        await client.query(
+          `UPDATE conversas SET
+             operador_id = $1, operador_nome = $2, operador_atribuido_em = NOW(),
+             controlado_por = 'humano', humano_id = $1, humano_nome = $2,
+             humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW()
+           WHERE id = $3`,
+          [operadorId, operadorNome, cid]
+        );
+
+        await client.query(
+          `INSERT INTO controle_historico
+             (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+           VALUES ($1, $2, 'operador_assumiu', $3, 'humano', $4, $5, 'Atribuido em massa')`,
+          [cid, empresaId, conversa.controlado_por, operadorId, operadorNome]
+        );
+
+        sucesso.push(cid);
+      }
+
+      await client.query('COMMIT');
+
+      // WebSocket (fora da transação)
+      const filasAfetadas = new Set();
+      for (const cid of sucesso) {
+        const conversa = conversasMap.get(cid);
+        emitConversaAtribuida(cid, conversa.fila_id, operadorId, { id: cid, operador_id: operadorId, operador_nome: operadorNome, controlado_por: 'humano' });
+        if (conversa.fila_id) filasAfetadas.add(conversa.fila_id);
+      }
+      for (const filaId of filasAfetadas) {
+        const stats = await calcularStatsFila(filaId);
+        emitFilaStats(filaId, stats);
+      }
+
+      logger.info(`Bulk atribuir: ${sucesso.length} ok, ${erros.length} erros`);
+      reply.send({ success: true, data: { sucesso: sucesso.length, erros } });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('Error bulk atribuir:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /bulk/desatribuir
+  fastify.post('/bulk/desatribuir', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { conversa_ids } = request.body;
+    if (!validateBulkIds(conversa_ids, reply)) return;
+
+    const { empresaId, user } = request;
+    const client = await pool.connect();
+    const sucesso = [];
+    const erros = [];
+
+    try {
+      await client.query('BEGIN');
+
+      const conversasResult = await client.query(
+        `SELECT id, fila_id, operador_id, operador_nome, controlado_por FROM conversas
+         WHERE id = ANY($1) AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [conversa_ids, empresaId]
+      );
+      const conversasMap = new Map(conversasResult.rows.map(c => [c.id, c]));
+
+      for (const cid of conversa_ids) {
+        const conversa = conversasMap.get(cid);
+        if (!conversa) { erros.push({ id: cid, motivo: 'Nao encontrada ou inativa' }); continue; }
+
+        const novoControlador = conversa.fila_id ? 'fila' : 'ia';
+
+        await client.query(
+          `UPDATE conversas SET
+             operador_id = NULL, operador_nome = NULL,
+             controlado_por = $1, atualizado_em = NOW()
+           WHERE id = $2`,
+          [novoControlador, cid]
+        );
+
+        await client.query(
+          `INSERT INTO controle_historico
+             (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+           VALUES ($1, $2, 'desatribuido', 'humano', $3, $4, $5, 'Desatribuido em massa')`,
+          [cid, empresaId, novoControlador, conversa.operador_id, conversa.operador_nome]
+        );
+
+        sucesso.push(cid);
+      }
+
+      await client.query('COMMIT');
+
+      const filasAfetadas = new Set();
+      for (const cid of sucesso) {
+        const conversa = conversasMap.get(cid);
+        const novoControlador = conversa.fila_id ? 'fila' : 'ia';
+        emitConversaAtualizada(cid, conversa.fila_id, { id: cid, operador_id: null, controlado_por: novoControlador });
+        if (conversa.fila_id) filasAfetadas.add(conversa.fila_id);
+      }
+      for (const filaId of filasAfetadas) {
+        const stats = await calcularStatsFila(filaId);
+        emitFilaStats(filaId, stats);
+      }
+
+      logger.info(`Bulk desatribuir: ${sucesso.length} ok, ${erros.length} erros`);
+      reply.send({ success: true, data: { sucesso: sucesso.length, erros } });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('Error bulk desatribuir:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /bulk/transferir
+  fastify.post('/bulk/transferir', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { conversa_ids, fila_id } = request.body;
+    if (!validateBulkIds(conversa_ids, reply)) return;
+
+    if (!fila_id) {
+      return reply.code(400).send({ success: false, error: { message: 'fila_id e obrigatorio' } });
+    }
+
+    const { empresaId, user } = request;
+
+    // Verificar fila destino
+    const filaResult = await pool.query(
+      `SELECT * FROM filas_atendimento WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+      [fila_id, empresaId]
+    );
+    if (filaResult.rows.length === 0) {
+      return reply.code(404).send({ success: false, error: { message: 'Fila destino nao encontrada' } });
+    }
+    const filaNome = filaResult.rows[0].nome;
+
+    const client = await pool.connect();
+    const sucesso = [];
+    const erros = [];
+
+    try {
+      await client.query('BEGIN');
+
+      const conversasResult = await client.query(
+        `SELECT id, fila_id, controlado_por, contato_whatsapp, contato_nome FROM conversas
+         WHERE id = ANY($1) AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [conversa_ids, empresaId]
+      );
+      const conversasMap = new Map(conversasResult.rows.map(c => [c.id, c]));
+
+      for (const cid of conversa_ids) {
+        const conversa = conversasMap.get(cid);
+        if (!conversa) { erros.push({ id: cid, motivo: 'Nao encontrada ou inativa' }); continue; }
+
+        await client.query(
+          `UPDATE conversas SET
+             fila_id = $1, fila_entrada_em = NOW(),
+             operador_id = NULL, operador_nome = NULL,
+             controlado_por = 'fila', atualizado_em = NOW()
+           WHERE id = $2`,
+          [fila_id, cid]
+        );
+
+        await client.query(
+          `INSERT INTO controle_historico
+             (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+           VALUES ($1, $2, 'transferencia_fila', $3, 'fila', $4, $5, 'Transferido em massa')`,
+          [cid, empresaId, conversa.controlado_por, user.id, user.nome]
+        );
+
+        sucesso.push(cid);
+      }
+
+      await client.query('COMMIT');
+
+      // WebSocket
+      const filasAntigas = new Set();
+      for (const cid of sucesso) {
+        const conversa = conversasMap.get(cid);
+        if (conversa.fila_id && conversa.fila_id !== fila_id) {
+          emitConversaAtualizada(cid, conversa.fila_id, { id: cid, removida: true });
+          filasAntigas.add(conversa.fila_id);
+        }
+        emitNovaConversaNaFila(fila_id, { id: cid, contato_whatsapp: conversa.contato_whatsapp, contato_nome: conversa.contato_nome });
+      }
+      for (const filaId of filasAntigas) {
+        const stats = await calcularStatsFila(filaId);
+        emitFilaStats(filaId, stats);
+      }
+      const statsNova = await calcularStatsFila(fila_id);
+      emitFilaStats(fila_id, statsNova);
+
+      logger.info(`Bulk transferir: ${sucesso.length} ok para fila ${filaNome}, ${erros.length} erros`);
+      reply.send({ success: true, data: { sucesso: sucesso.length, erros } });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('Error bulk transferir:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  // POST /bulk/devolver — Devolver para IA em massa
+  fastify.post('/bulk/devolver', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { conversa_ids } = request.body;
+    if (!validateBulkIds(conversa_ids, reply)) return;
+
+    const { empresaId, user } = request;
+    const client = await pool.connect();
+    const sucesso = [];
+    const erros = [];
+
+    try {
+      await client.query('BEGIN');
+
+      const conversasResult = await client.query(
+        `SELECT id, fila_id, operador_id, operador_nome, controlado_por FROM conversas
+         WHERE id = ANY($1) AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [conversa_ids, empresaId]
+      );
+      const conversasMap = new Map(conversasResult.rows.map(c => [c.id, c]));
+
+      for (const cid of conversa_ids) {
+        const conversa = conversasMap.get(cid);
+        if (!conversa) { erros.push({ id: cid, motivo: 'Nao encontrada ou inativa' }); continue; }
+
+        await client.query(
+          `UPDATE conversas SET
+             operador_id = NULL, operador_nome = NULL,
+             controlado_por = 'ia', humano_id = NULL, humano_nome = NULL,
+             atualizado_em = NOW()
+           WHERE id = $1`,
+          [cid]
+        );
+
+        await client.query(
+          `INSERT INTO controle_historico
+             (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+           VALUES ($1, $2, 'devolvido_ia', $3, 'ia', $4, $5, 'Devolvido para IA em massa')`,
+          [cid, empresaId, conversa.controlado_por, user.id, user.nome]
+        );
+
+        sucesso.push(cid);
+      }
+
+      await client.query('COMMIT');
+
+      const filasAfetadas = new Set();
+      for (const cid of sucesso) {
+        const conversa = conversasMap.get(cid);
+        emitConversaAtualizada(cid, conversa.fila_id, { id: cid, operador_id: null, controlado_por: 'ia' });
+        if (conversa.fila_id) filasAfetadas.add(conversa.fila_id);
+      }
+      for (const filaId of filasAfetadas) {
+        const stats = await calcularStatsFila(filaId);
+        emitFilaStats(filaId, stats);
+      }
+
+      logger.info(`Bulk devolver IA: ${sucesso.length} ok, ${erros.length} erros`);
+      reply.send({ success: true, data: { sucesso: sucesso.length, erros } });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error('Error bulk devolver:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
 }
