@@ -398,15 +398,17 @@ const agentesRoutes = async (fastify) => {
     const updates = request.body;
 
     try {
-      // Check if prompt changed and cache is active — invalidate cache
+      // Check if prompt ACTUALLY changed and cache is active — invalidate cache
       let cacheInvalidated = false;
       if (updates.prompt_ativo) {
         const cacheCheck = await pool.query(
-          'SELECT cache_enabled, gemini_cache_id, cache_api_key_id FROM agentes WHERE empresa_id = $1 AND id = $2',
+          'SELECT prompt_ativo, cache_enabled, gemini_cache_id, cache_api_key_id FROM agentes WHERE empresa_id = $1 AND id = $2',
           [empresa_id, id]
         );
 
-        if (cacheCheck.rows.length > 0 && cacheCheck.rows[0].cache_enabled && cacheCheck.rows[0].gemini_cache_id) {
+        const promptChanged = cacheCheck.rows.length > 0 && cacheCheck.rows[0].prompt_ativo !== updates.prompt_ativo;
+
+        if (promptChanged && cacheCheck.rows[0].cache_enabled && cacheCheck.rows[0].gemini_cache_id) {
           const agent = cacheCheck.rows[0];
           try {
             const keyResult = await pool.query(
