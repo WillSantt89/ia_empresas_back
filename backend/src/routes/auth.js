@@ -258,7 +258,6 @@ export default async function authRoutes(fastify, opts) {
           e.nome as empresa_nome,
           e.slug as empresa_slug,
           e.logo_url as empresa_logo,
-          e.chatwoot_status,
           p.nome as plano_nome
         FROM usuarios u
         LEFT JOIN empresas e ON e.id = u.empresa_id
@@ -290,8 +289,7 @@ export default async function authRoutes(fastify, opts) {
           nome: user.empresa_nome,
           slug: user.empresa_slug,
           logo_url: user.empresa_logo,
-          plano: user.plano_nome,
-          chatwoot_status: user.chatwoot_status
+          plano: user.plano_nome
         };
       }
 

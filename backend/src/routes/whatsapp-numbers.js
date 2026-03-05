@@ -29,8 +29,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
           wn.*,
           (wn.whatsapp_app_secret IS NOT NULL) as has_app_secret,
           i.nome as inbox_nome,
-          i.inbox_id_chatwoot,
-          COUNT(DISTINCT c.id) as total_conversas,
+                    COUNT(DISTINCT c.id) as total_conversas,
           COUNT(DISTINCT c.id) FILTER (WHERE c.status = 'ativo') as conversas_ativas
         FROM whatsapp_numbers wn
         LEFT JOIN inboxes i ON i.id = wn.inbox_id
@@ -55,7 +54,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
         query += ` AND ${conditions.join(' AND ')}`;
       }
 
-      query += ' GROUP BY wn.id, i.nome, i.inbox_id_chatwoot ORDER BY wn.nome_exibicao';
+      query += ' GROUP BY wn.id, i.nome ORDER BY wn.nome_exibicao';
 
       const result = await pool.query(query, params);
 
@@ -245,8 +244,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
           wn.ultima_verificacao,
           (wn.whatsapp_app_secret IS NOT NULL) as has_app_secret,
           i.nome as inbox_nome,
-          i.inbox_id_chatwoot,
-          a.nome as agente_nome,
+                    a.nome as agente_nome,
           COUNT(DISTINCT c.id) as total_conversas_mes
         FROM whatsapp_numbers wn
         LEFT JOIN inboxes i ON i.id = wn.inbox_id
@@ -254,7 +252,7 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
         LEFT JOIN conversas c ON c.inbox_id = i.id
           AND c.criado_em >= DATE_TRUNC('month', CURRENT_DATE)
         WHERE wn.id = $1 AND wn.empresa_id = $2
-        GROUP BY wn.id, i.nome, i.inbox_id_chatwoot, a.nome
+        GROUP BY wn.id, i.nome, a.nome
       `, [id, empresaId]);
 
       if (result.rows.length === 0) {

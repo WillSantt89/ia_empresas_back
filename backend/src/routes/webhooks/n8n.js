@@ -2,10 +2,9 @@ import { logger } from '../../config/logger.js';
 import { pool } from '../../config/database.js';
 import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
-import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, syncChatwootHistory, archiveConversation } from '../../services/memory.js';
+import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, archiveConversation } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
-import { sendMessage as chatwootSendMessage, getConversationMessages, unassignAgent } from '../../services/chatwoot.js';
 import { sendTextMessage } from '../../services/whatsapp-sender.js';
 import { atribuirConversaAutomatica } from '../../services/fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats } from '../../services/websocket.js';
@@ -829,7 +828,7 @@ const n8nWebhookRoutes = async (fastify) => {
 
   /**
    * POST /api/webhooks/n8n/controle-humano
-   * Endpoint for n8n to notify when a human operator assumes/releases a conversation in Chatwoot
+   * Endpoint for n8n to notify when a human operator assumes/releases a conversation
    *
    * Authentication: x-webhook-token header validated against empresas.webhook_token
    */
@@ -840,98 +839,60 @@ const n8nWebhookRoutes = async (fastify) => {
         properties: {
           phone: { type: 'string', minLength: 1, maxLength: 30 },
           acao: { type: 'string', enum: ['assumir', 'devolver', 'encerrar'] },
-          operador_nome: { type: 'string', maxLength: 255 },
-          chatwoot_account_id: { type: 'integer' },
-          chatwoot_conversation_id: { type: 'integer' }
+          operador_nome: { type: 'string', maxLength: 255 }
         },
         required: ['phone', 'acao']
       }
     }
   }, async (request, reply) => {
-    const { phone, acao, operador_nome, chatwoot_account_id, chatwoot_conversation_id } = request.body;
+    const { phone, acao, operador_nome } = request.body;
     const webhookToken = request.headers['x-webhook-token'];
-    const internalSecret = request.headers['x-internal-secret'];
 
-    // --- Dual-mode authentication ---
-    // Mode 1: x-webhook-token header (direct n8n call)
-    // Mode 2: X-Internal-Secret + chatwoot_account_id (Chatwoot → n8n → backend)
+    // Authentication via webhook token
     let empresa;
 
-    if (webhookToken) {
-      // Mode 1: lookup by webhook_token
-      try {
-        const empresaResult = await pool.query(
-          'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
-          [webhookToken]
-        );
-
-        if (empresaResult.rows.length === 0) {
-          return reply.code(401).send({
-            success: false,
-            error: { code: 'INVALID_TOKEN', message: 'Invalid or inactive webhook token' }
-          });
-        }
-
-        empresa = empresaResult.rows[0];
-      } catch (err) {
-        createLogger.error('Token lookup failed (controle-humano)', { error: err.message });
-        return reply.code(500).send({
-          success: false,
-          error: { code: 'DB_ERROR', message: 'Failed to validate token' }
-        });
-      }
-    } else if (internalSecret && chatwoot_account_id) {
-      // Mode 2: validate internal secret, then lookup by chatwoot_account_id
-      if (internalSecret !== process.env.INTERNAL_SECRET) {
-        return reply.code(401).send({
-          success: false,
-          error: { code: 'INVALID_SECRET', message: 'Invalid internal secret' }
-        });
-      }
-
-      try {
-        const empresaResult = await pool.query(
-          'SELECT id, nome FROM empresas WHERE chatwoot_account_id = $1 AND ativo = true LIMIT 1',
-          [chatwoot_account_id]
-        );
-
-        if (empresaResult.rows.length === 0) {
-          return reply.code(401).send({
-            success: false,
-            error: { code: 'EMPRESA_NOT_FOUND', message: 'No active company found for this Chatwoot account' }
-          });
-        }
-
-        empresa = empresaResult.rows[0];
-      } catch (err) {
-        createLogger.error('Chatwoot account lookup failed (controle-humano)', { error: err.message });
-        return reply.code(500).send({
-          success: false,
-          error: { code: 'DB_ERROR', message: 'Failed to lookup company by Chatwoot account' }
-        });
-      }
-    } else {
+    if (!webhookToken) {
       return reply.code(401).send({
         success: false,
         error: {
           code: 'MISSING_AUTH',
-          message: 'Requires x-webhook-token header OR X-Internal-Secret header + chatwoot_account_id in body'
+          message: 'Requires x-webhook-token header'
         }
+      });
+    }
+
+    try {
+      const empresaResult = await pool.query(
+        'SELECT id, nome FROM empresas WHERE webhook_token = $1 AND ativo = true LIMIT 1',
+        [webhookToken]
+      );
+
+      if (empresaResult.rows.length === 0) {
+        return reply.code(401).send({
+          success: false,
+          error: { code: 'INVALID_TOKEN', message: 'Invalid or inactive webhook token' }
+        });
+      }
+
+      empresa = empresaResult.rows[0];
+    } catch (err) {
+      createLogger.error('Token lookup failed (controle-humano)', { error: err.message });
+      return reply.code(500).send({
+        success: false,
+        error: { code: 'DB_ERROR', message: 'Failed to validate token' }
       });
     }
 
     const empresa_id = empresa.id;
 
-    createLogger.info('Controle humano request', { empresa_id, phone, acao, operador_nome, chatwoot_account_id });
+    createLogger.info('Controle humano request', { empresa_id, phone, acao, operador_nome });
 
     if (acao === 'devolver') {
       try {
-        // Find active conversation for this phone (with config and chatwoot data)
+        // Find active conversation for this phone (with config)
         const conversaResult = await pool.query(`
-          SELECT c.*, cch.mensagem_retorno_ia, cch.notificar_admin_ao_devolver,
-                 e.chatwoot_url, e.chatwoot_api_token, e.chatwoot_account_id
+          SELECT c.*, cch.mensagem_retorno_ia, cch.notificar_admin_ao_devolver
           FROM conversas c
-          JOIN empresas e ON e.id = c.empresa_id
           LEFT JOIN config_controle_humano cch ON cch.empresa_id = c.empresa_id
           WHERE c.empresa_id = $1 AND c.contato_whatsapp = $2 AND c.status = 'ativo'
           ORDER BY c.criado_em DESC
@@ -980,9 +941,9 @@ const n8nWebhookRoutes = async (fastify) => {
           VALUES (
             gen_random_uuid(), $1, $2, 'humano_devolveu',
             'humano', 'ia',
-            $3, 'Operador devolveu via Chatwoot (n8n webhook)', NOW()
+            $3, 'Operador devolveu via n8n webhook', NOW()
           )
-        `, [conversa.id, empresa_id, operador_nome || 'Operador Chatwoot']);
+        `, [conversa.id, empresa_id, operador_nome || 'Operador']);
 
         // Create notification if configured
         if (conversa.notificar_admin_ao_devolver !== false) {
@@ -999,46 +960,10 @@ const n8nWebhookRoutes = async (fastify) => {
             )
           `, [
             empresa_id,
-            `${operador_nome || 'Operador'} devolveu a conversa com ${phone} para a IA via Chatwoot`
+            `${operador_nome || 'Operador'} devolveu a conversa com ${phone} para a IA`
           ]).catch(err => {
             createLogger.error('Failed to create notification', { error: err.message });
           });
-        }
-
-        // Non-blocking: send return message via Chatwoot
-        if (conversa.mensagem_retorno_ia && conversa.chatwoot_url && conversa.chatwoot_api_token && conversa.chatwoot_account_id && conversa.conversation_id_chatwoot) {
-          chatwootSendMessage({
-            baseUrl: conversa.chatwoot_url,
-            accountId: conversa.chatwoot_account_id,
-            apiKey: conversa.chatwoot_api_token,
-            conversationId: conversa.conversation_id_chatwoot,
-            content: conversa.mensagem_retorno_ia,
-          }).catch(err => {
-            createLogger.error('Failed to send return message to Chatwoot', { error: err.message });
-          });
-        }
-
-        // Non-blocking: sync Chatwoot messages to Redis (so AI has context of human conversation)
-        if (conversa.chatwoot_url && conversa.chatwoot_api_token && conversa.chatwoot_account_id && conversa.conversation_id_chatwoot && conversa.humano_assumiu_em) {
-          (async () => {
-            try {
-              const chatwootMessages = await getConversationMessages({
-                baseUrl: conversa.chatwoot_url,
-                accountId: conversa.chatwoot_account_id,
-                apiKey: conversa.chatwoot_api_token,
-                conversationId: conversa.conversation_id_chatwoot,
-                after: conversa.humano_assumiu_em
-              });
-
-              const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
-              if (chatwootMessages.length > 0) {
-                const synced = await syncChatwootHistory(empresa_id, conversationKey, chatwootMessages);
-                createLogger.info('Synced Chatwoot messages to Redis', { conversa_id: conversa.id, synced });
-              }
-            } catch (err) {
-              createLogger.error('Failed to sync Chatwoot history', { error: err.message, conversa_id: conversa.id });
-            }
-          })();
         }
 
         createLogger.info('Human control deactivated via n8n', {
@@ -1050,7 +975,7 @@ const n8nWebhookRoutes = async (fastify) => {
           data: {
             conversa_id: conversa.id,
             controlado_por: 'ia',
-            operador_nome: operador_nome || 'Operador Chatwoot'
+            operador_nome: operador_nome || 'Operador'
           }
         };
 
@@ -1070,8 +995,7 @@ const n8nWebhookRoutes = async (fastify) => {
       try {
         // Find active conversation for this phone
         const conversaResult = await pool.query(`
-          SELECT c.id, c.contato_whatsapp, c.status, c.controlado_por,
-                 c.conversation_id_chatwoot
+          SELECT c.id, c.contato_whatsapp, c.status, c.controlado_por
           FROM conversas c
           WHERE c.empresa_id = $1 AND c.contato_whatsapp = $2 AND c.status = 'ativo'
           ORDER BY c.criado_em DESC
@@ -1117,9 +1041,9 @@ const n8nWebhookRoutes = async (fastify) => {
           VALUES (
             gen_random_uuid(), $1, $2, 'humano_devolveu',
             $3, 'ia',
-            $4, 'Atendimento encerrado via Chatwoot (n8n webhook)', NOW()
+            $4, 'Atendimento encerrado via n8n webhook', NOW()
           )
-        `, [conversa.id, empresa_id, conversa.controlado_por, operador_nome || 'Operador Chatwoot']);
+        `, [conversa.id, empresa_id, conversa.controlado_por, operador_nome || 'Operador']);
 
         // Archive conversation history in Redis (move to archive with 30-day TTL)
         const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
@@ -1141,7 +1065,7 @@ const n8nWebhookRoutes = async (fastify) => {
           )
         `, [
           empresa_id,
-          `Atendimento com ${phone} foi encerrado no Chatwoot${operador_nome ? ` por ${operador_nome}` : ''}`
+          `Atendimento com ${phone} foi encerrado${operador_nome ? ` por ${operador_nome}` : ''}`
         ]).catch(err => {
           createLogger.error('Failed to create notification', { error: err.message });
         });
@@ -1211,7 +1135,7 @@ const n8nWebhookRoutes = async (fastify) => {
           humano_ultima_msg_em = NOW(),
           atualizado_em = NOW()
         WHERE id = $2
-      `, [operador_nome || 'Operador Chatwoot', conversa.id]);
+      `, [operador_nome || 'Operador', conversa.id]);
 
       // Log in controle_historico
       await pool.query(`
@@ -1223,9 +1147,9 @@ const n8nWebhookRoutes = async (fastify) => {
         VALUES (
           gen_random_uuid(), $1, $2, 'humano_assumiu',
           'ia', 'humano',
-          $3, 'Operador assumiu via Chatwoot (n8n webhook)', NOW()
+          $3, 'Operador assumiu via n8n webhook', NOW()
         )
-      `, [conversa.id, empresa_id, operador_nome || 'Operador Chatwoot']);
+      `, [conversa.id, empresa_id, operador_nome || 'Operador']);
 
       // Create notification
       pool.query(`
@@ -1241,7 +1165,7 @@ const n8nWebhookRoutes = async (fastify) => {
         )
       `, [
         empresa_id,
-        `${operador_nome || 'Operador'} assumiu a conversa com ${phone} via Chatwoot`
+        `${operador_nome || 'Operador'} assumiu a conversa com ${phone}`
       ]).catch(err => {
         createLogger.error('Failed to create notification', { error: err.message });
       });
@@ -1255,7 +1179,7 @@ const n8nWebhookRoutes = async (fastify) => {
         data: {
           conversa_id: conversa.id,
           controlado_por: 'humano',
-          operador_nome: operador_nome || 'Operador Chatwoot'
+          operador_nome: operador_nome || 'Operador'
         }
       };
 

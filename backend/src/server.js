@@ -26,7 +26,6 @@ import usuariosRoutes from './routes/usuarios.js';
 import agentesRoutes from './routes/agentes.js';
 import toolsRoutes from './routes/tools.js';
 import apiKeysRoutes from './routes/api-keys.js';
-import chatwootConfigRoutes from './routes/chatwoot-config.js';
 import analyticsRoutes from './routes/analytics.js';
 import planosRoutes from './routes/planos.js';
 import itensCobraveisRoutes from './routes/itens-cobraveis.js';
@@ -235,7 +234,6 @@ async function start() {
     await fastify.register(agentesRoutes, { prefix: '/api/agentes' });
     await fastify.register(toolsRoutes, { prefix: '/api/tools' });
     await fastify.register(apiKeysRoutes, { prefix: '/api/api-keys' });
-    await fastify.register(chatwootConfigRoutes, { prefix: '/api/chatwoot-config' });
     await fastify.register(analyticsRoutes, { prefix: '/api/analytics' });
     await fastify.register(planosRoutes, { prefix: '/api/planos' });
     await fastify.register(itensCobraveisRoutes, { prefix: '/api/itens-cobraveis' });

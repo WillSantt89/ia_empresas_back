@@ -98,13 +98,6 @@ export default async function configuracoesRoutes(fastify, opts) {
               mensagens_mes: parseInt(uso.mensagens_mes_atual || 0)
             }
           },
-          chatwoot: {
-            url: empresa.chatwoot_url,
-            account_id: empresa.chatwoot_account_id,
-            status: empresa.chatwoot_status,
-            admin_email: empresa.chatwoot_admin_email,
-            configurado: !!(empresa.chatwoot_url && empresa.chatwoot_api_token)
-          },
           n8n: {
             webhook_token: empresa.webhook_token || null,
             n8n_response_url: empresa.n8n_response_url || null,
@@ -163,16 +156,6 @@ export default async function configuracoesRoutes(fastify, opts) {
               logo_url: { type: 'string' }
             }
           },
-          chatwoot: {
-            type: 'object',
-            properties: {
-              url: { type: 'string' },
-              api_token: { type: 'string' },
-              account_id: { type: 'integer' },
-              admin_email: { type: 'string', format: 'email' },
-              admin_senha: { type: 'string' }
-            }
-          },
           controle_humano: {
             type: 'object',
             properties: {
@@ -203,7 +186,7 @@ export default async function configuracoesRoutes(fastify, opts) {
       await client.query('BEGIN');
 
       const { empresaId } = request;
-      const { empresa, chatwoot, controle_humano, n8n } = request.body;
+      const { empresa, controle_humano, n8n } = request.body;
 
       // Atualizar dados da empresa se fornecido
       if (empresa) {
@@ -230,62 +213,6 @@ export default async function configuracoesRoutes(fastify, opts) {
           await client.query(
             `UPDATE empresas SET ${empresaFields.join(', ')} WHERE id = $${paramCount}`,
             empresaValues
-          );
-        }
-      }
-
-      // Atualizar configuração Chatwoot se fornecido
-      if (chatwoot) {
-        const chatwootFields = [];
-        const chatwootValues = [];
-        let paramCount = 1;
-
-        if ('url' in chatwoot) {
-          chatwootFields.push(`chatwoot_url = $${paramCount}`);
-          chatwootValues.push(chatwoot.url);
-          paramCount++;
-        }
-
-        if ('api_token' in chatwoot) {
-          // Encriptar token antes de salvar
-          const encryptedToken = await fastify.encrypt(chatwoot.api_token);
-          chatwootFields.push(`chatwoot_api_token = $${paramCount}`);
-          chatwootValues.push(encryptedToken);
-          paramCount++;
-        }
-
-        if ('account_id' in chatwoot) {
-          chatwootFields.push(`chatwoot_account_id = $${paramCount}`);
-          chatwootValues.push(chatwoot.account_id);
-          paramCount++;
-        }
-
-        if ('admin_email' in chatwoot) {
-          chatwootFields.push(`chatwoot_admin_email = $${paramCount}`);
-          chatwootValues.push(chatwoot.admin_email);
-          paramCount++;
-        }
-
-        if ('admin_senha' in chatwoot && chatwoot.admin_senha) {
-          // Hash da senha antes de salvar
-          const bcrypt = await import('bcrypt');
-          const hashedPassword = await bcrypt.hash(chatwoot.admin_senha, 10);
-          chatwootFields.push(`chatwoot_admin_senha_hash = $${paramCount}`);
-          chatwootValues.push(hashedPassword);
-          paramCount++;
-        }
-
-        if (chatwootFields.length > 0) {
-          chatwootFields.push('chatwoot_status = $' + paramCount);
-          chatwootValues.push('ativo');
-          paramCount++;
-
-          chatwootFields.push('atualizado_em = NOW()');
-          chatwootValues.push(empresaId);
-
-          await client.query(
-            `UPDATE empresas SET ${chatwootFields.join(', ')} WHERE id = $${paramCount}`,
-            chatwootValues
           );
         }
       }
@@ -508,66 +435,4 @@ export default async function configuracoesRoutes(fastify, opts) {
     }
   });
 
-  // Testar conexão Chatwoot
-  fastify.post('/chatwoot/testar', {
-    preHandler: [
-      fastify.authenticate,
-      fastify.addTenantFilter,
-      fastify.requirePermission('configuracoes', 'write')
-    ]
-  }, async (request, reply) => {
-    try {
-      const { empresaId } = request;
-
-      // Buscar configuração
-      const empresaResult = await pool.query(
-        'SELECT chatwoot_url, chatwoot_api_token, chatwoot_account_id FROM empresas WHERE id = $1',
-        [empresaId]
-      );
-
-      if (empresaResult.rows.length === 0) {
-        return reply.code(404).send({
-          success: false,
-          error: {
-            code: 'EMPRESA_NOT_FOUND',
-            message: 'Empresa não encontrada'
-          }
-        });
-      }
-
-      const empresa = empresaResult.rows[0];
-
-      if (!empresa.chatwoot_url || !empresa.chatwoot_api_token) {
-        return reply.code(400).send({
-          success: false,
-          error: {
-            code: 'CHATWOOT_NOT_CONFIGURED',
-            message: 'Chatwoot não está configurado'
-          }
-        });
-      }
-
-      // TODO: Implementar teste real com API do Chatwoot
-      logger.info(`Chatwoot test requested for empresa ${empresaId}`);
-
-      return {
-        success: true,
-        data: {
-          status: 'connected',
-          account_id: empresa.chatwoot_account_id,
-          message: 'Conexão com Chatwoot estabelecida com sucesso'
-        }
-      };
-    } catch (error) {
-      logger.error('Error testing Chatwoot:', error);
-
-      return {
-        success: false,
-        data: {
-          status: 'error',
-          message: error.message || 'Erro ao conectar com Chatwoot'
-        }
-      };
-    }
-  });
 }

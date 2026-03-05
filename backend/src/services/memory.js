@@ -12,7 +12,7 @@ const createLogger = logger.child({ module: 'memory-service' });
 /**
  * Build Redis key for conversation
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {string} Redis key
  */
 function buildConversationKey(empresaId, conversationId) {
@@ -22,7 +22,7 @@ function buildConversationKey(empresaId, conversationId) {
 /**
  * Build Redis key for session data
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {string} Redis key
  */
 function buildSessionKey(empresaId, conversationId) {
@@ -32,7 +32,7 @@ function buildSessionKey(empresaId, conversationId) {
 /**
  * Get conversation history from Redis
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {Promise<Array>} Conversation history in Gemini format
  */
 export async function getHistory(empresaId, conversationId) {
@@ -69,7 +69,7 @@ export async function getHistory(empresaId, conversationId) {
 /**
  * Add a message to conversation history
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @param {string} role - Message role ('user' or 'model')
  * @param {string} text - Message text
  * @returns {Promise<Array>} Updated history
@@ -127,7 +127,7 @@ export async function addToHistory(empresaId, conversationId, role, text) {
 /**
  * Add tool call and response to history
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @param {Object} functionCall - Function call object
  * @param {Object} functionResponse - Function response object
  * @returns {Promise<void>}
@@ -192,7 +192,7 @@ export async function addToolCallToHistory(empresaId, conversationId, functionCa
 /**
  * Clear conversation history
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {Promise<boolean>} True if cleared
  */
 export async function clearHistory(empresaId, conversationId) {
@@ -221,7 +221,7 @@ export async function clearHistory(empresaId, conversationId) {
 /**
  * Get session data
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {Promise<Object>} Session data
  */
 export async function getSessionData(empresaId, conversationId) {
@@ -244,7 +244,7 @@ export async function getSessionData(empresaId, conversationId) {
 /**
  * Set/merge session data
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @param {Object} data - Data to set/merge
  * @returns {Promise<Object>} Updated session data
  */
@@ -287,7 +287,7 @@ export async function setSessionData(empresaId, conversationId, data) {
  * Update conversation history with new messages
  * Used when transferring between agents or updating history
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @param {Array} newHistory - Complete new history
  * @returns {Promise<void>}
  */
@@ -329,7 +329,7 @@ export async function updateHistory(empresaId, conversationId, newHistory) {
 /**
  * Get conversation metadata
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {Promise<Object>} Metadata
  */
 export async function getConversationMetadata(empresaId, conversationId) {
@@ -371,7 +371,7 @@ export async function getConversationMetadata(empresaId, conversationId) {
  * Archive conversation
  * Moves conversation data to archive with longer TTL
  * @param {string} empresaId - Company ID
- * @param {number} conversationId - Chatwoot conversation ID
+ * @param {number} conversationId - Conversation ID
  * @returns {Promise<boolean>} True if archived
  */
 export async function archiveConversation(empresaId, conversationId) {
@@ -422,96 +422,6 @@ export async function archiveConversation(empresaId, conversationId) {
       error: error.message
     });
     return false;
-  }
-}
-
-/**
- * Sync Chatwoot messages into Redis conversation history
- * Only imports outgoing messages (message_type === 1) — human agent responses
- * Incoming messages (message_type === 0) are already in Redis (saved by webhook)
- * @param {string} empresaId - Company ID
- * @param {string} conversationKey - Redis conversation key (e.g. "whatsapp:+5511...")
- * @param {Array} chatwootMessages - Messages from Chatwoot API
- * @returns {Promise<number>} Number of messages synced
- */
-export async function syncChatwootHistory(empresaId, conversationKey, chatwootMessages) {
-  try {
-    if (!chatwootMessages || chatwootMessages.length === 0) {
-      createLogger.debug('No Chatwoot messages to sync', { empresa_id: empresaId, conversation_key: conversationKey });
-      return 0;
-    }
-
-    // Filter only outgoing messages (human agent responses) with content
-    const outgoingMessages = chatwootMessages.filter(
-      msg => msg.message_type === 1 && msg.content && msg.content.trim()
-    );
-
-    if (outgoingMessages.length === 0) {
-      createLogger.debug('No outgoing messages to sync', { empresa_id: empresaId, conversation_key: conversationKey });
-      return 0;
-    }
-
-    // Sort by created_at ASC (oldest first)
-    outgoingMessages.sort((a, b) => a.created_at - b.created_at);
-
-    // Convert to Gemini format
-    const geminiMessages = outgoingMessages.map(msg => ({
-      role: 'model',
-      parts: [{ text: msg.content }],
-      timestamp: new Date(msg.created_at * 1000).toISOString(),
-      source: 'chatwoot_sync'
-    }));
-
-    // Get existing history
-    const key = buildConversationKey(empresaId, conversationKey);
-    let history = await getHistory(empresaId, conversationKey);
-
-    // Merge: add Chatwoot messages that aren't already in history
-    // Use timestamp comparison to avoid duplicates
-    const existingTimestamps = new Set(history.map(msg => msg.timestamp));
-
-    let synced = 0;
-    for (const msg of geminiMessages) {
-      if (!existingTimestamps.has(msg.timestamp)) {
-        history.push(msg);
-        synced++;
-      }
-    }
-
-    if (synced === 0) {
-      createLogger.debug('All messages already in history', { empresa_id: empresaId, conversation_key: conversationKey });
-      return 0;
-    }
-
-    // Re-sort by timestamp to maintain chronological order
-    history.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-    // Trim if exceeds limit
-    if (history.length > DEFAULT_LIMITS.CONVERSATION_HISTORY_SIZE) {
-      const systemMessages = history.filter(msg => msg.role === 'system' || msg.isSystemMessage);
-      const recentMessages = history.slice(-(DEFAULT_LIMITS.CONVERSATION_HISTORY_SIZE - systemMessages.length));
-      history = [...systemMessages, ...recentMessages];
-    }
-
-    // Save to Redis
-    await setWithExpiry(key, history, DEFAULT_LIMITS.SESSION_TTL_SECONDS);
-
-    createLogger.info('Chatwoot history synced to Redis', {
-      empresa_id: empresaId,
-      conversation_key: conversationKey,
-      messages_synced: synced,
-      total_history_size: history.length
-    });
-
-    return synced;
-
-  } catch (error) {
-    createLogger.error('Failed to sync Chatwoot history', {
-      empresa_id: empresaId,
-      conversation_key: conversationKey,
-      error: error.message
-    });
-    throw error;
   }
 }
 

@@ -3,7 +3,6 @@ import { validateApiKey, getActiveKeysForAgent, recordKeyError, recordKeySuccess
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../services/tool-runner.js';
-import { sendMessage as sendToChatwoot, sendTypingIndicator } from '../services/chatwoot.js';
 import { decrypt } from '../config/encryption.js';
 import { pool, tenantQuery } from '../config/database.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
@@ -231,18 +230,6 @@ const chatRoutes = async (fastify) => {
           const limitMessage = limitMsgResult.rows[0]?.mensagem_limite_atingido
             || 'Desculpe, nosso limite de atendimentos foi atingido. Tente novamente amanhã.';
 
-          // Send limit message to Chatwoot if configured
-          if (context?.account_id && process.env.CHATWOOT_API_KEY) {
-            sendToChatwoot({
-              baseUrl: process.env.CHATWOOT_BASE_URL,
-              accountId: context.account_id,
-              apiKey: process.env.CHATWOOT_API_KEY,
-              conversationId: conversation_id,
-              content: limitMessage,
-              messageType: 'outgoing'
-            }).catch(() => {});
-          }
-
           return {
             success: true,
             data: {
@@ -283,41 +270,17 @@ const chatRoutes = async (fastify) => {
       // Get conversation history
       const history = await getHistory(empresa_id, conversation_id);
 
-      // Send typing indicator if Chatwoot context provided
-      if (context?.account_id) {
-        sendTypingIndicator({
-          baseUrl: process.env.CHATWOOT_BASE_URL,
-          accountId: context.account_id,
-          apiKey: process.env.CHATWOOT_API_KEY,
-          conversationId: conversation_id,
-          status: 'on'
-        }).catch(err => {
-          createLogger.warn('Failed to send typing indicator', {
-            error: err.message
-          });
-        });
-      }
-
       // ========== RESOLVE CONVERSA_ID FOR MENSAGENS_LOG ==========
-      // Find or create internal conversa record based on Chatwoot conversation_id
       let conversa_id_interno = null;
       try {
         const conversaLookup = await pool.query(`
           SELECT id FROM conversas
-          WHERE empresa_id = $1 AND conversation_id_chatwoot = $2 AND status = 'ativo'
+          WHERE empresa_id = $1 AND status = 'ativo'
           ORDER BY criado_em DESC LIMIT 1
-        `, [empresa_id, conversation_id]);
+        `, [empresa_id]);
 
         if (conversaLookup.rows.length > 0) {
           conversa_id_interno = conversaLookup.rows[0].id;
-        } else {
-          // Create a new conversa record linked to this Chatwoot conversation
-          const insertConversa = await pool.query(`
-            INSERT INTO conversas (empresa_id, conversation_id_chatwoot, agente_id, agente_inicial_id, status, dados_json)
-            VALUES ($1, $2, $3, $3, 'ativo', $4)
-            RETURNING id
-          `, [empresa_id, conversation_id, agente_id, JSON.stringify({ source: 'chatwoot' })]);
-          conversa_id_interno = insertConversa.rows[0].id;
         }
       } catch (conversaErr) {
         createLogger.warn('Failed to resolve conversa_id for mensagens_log', { error: conversaErr.message });
@@ -453,22 +416,6 @@ const chatRoutes = async (fastify) => {
         });
       }
 
-      // Send response to Chatwoot if context provided
-      if (context?.account_id && process.env.CHATWOOT_API_KEY) {
-        sendToChatwoot({
-          baseUrl: process.env.CHATWOOT_BASE_URL,
-          accountId: context.account_id,
-          apiKey: process.env.CHATWOOT_API_KEY,
-          conversationId: conversation_id,
-          content: result.text,
-          messageType: 'outgoing'
-        }).catch(err => {
-          createLogger.error('Failed to send to Chatwoot', {
-            error: err.message
-          });
-        });
-      }
-
       // ========== INCREMENT DAILY USAGE ==========
       pool.query(`
         UPDATE uso_diario_agente
@@ -530,7 +477,7 @@ const chatRoutes = async (fastify) => {
                 UPDATE conversas
                 SET agente_id = $1, atualizado_em = CURRENT_TIMESTAMP
                 WHERE empresa_id = $2
-                  AND (conversation_id_chatwoot = $3 OR id::text = $3::text)
+                  AND id::text = $3::text
               `, [rule.agente_destino_id, empresa_id, conversation_id]);
 
               // Log transfer in controle_historico
@@ -540,7 +487,7 @@ const chatRoutes = async (fastify) => {
                 ) SELECT $1, c.id, 'transferencia_agente', $3
                 FROM conversas c
                 WHERE c.empresa_id = $1
-                  AND (c.conversation_id_chatwoot = $2 OR c.id::text = $2::text)
+                  AND c.id::text = $2::text
                 LIMIT 1
               `, [empresa_id, conversation_id,
                   rule.trigger_tipo + ':' + rule.trigger_valor
@@ -827,84 +774,6 @@ const chatRoutes = async (fastify) => {
     }
   });
 
-  /**
-   * POST /api/chat/typing
-   * Send typing indicator
-   */
-  fastify.post('/typing', {
-    schema: {
-      body: {
-        type: 'object',
-        properties: {
-          conversation_id: { type: 'integer' },
-          status: { type: 'string', enum: ['on', 'off'] },
-          context: {
-            type: 'object',
-            properties: {
-              account_id: { type: 'integer' }
-            }
-          }
-        },
-        required: ['conversation_id', 'status']
-      },
-      headers: apiKeyHeaderSchema
-    }
-  }, async (request, reply) => {
-    const { conversation_id, status, context } = request.body;
-    const apiKey = request.headers['x-api-key'];
-
-    try {
-      // Validate API key
-      const keyData = await validateApiKey(apiKey);
-      if (!keyData) {
-        return reply.code(401).send({
-          success: false,
-          error: {
-            code: 'INVALID_API_KEY',
-            message: 'Invalid or expired API key'
-          }
-        });
-      }
-
-      if (!context?.account_id || !process.env.CHATWOOT_API_KEY) {
-        return {
-          success: true,
-          data: {
-            message: 'Typing indicator not sent (Chatwoot not configured)'
-          }
-        };
-      }
-
-      await sendTypingIndicator({
-        baseUrl: process.env.CHATWOOT_BASE_URL,
-        accountId: context.account_id,
-        apiKey: process.env.CHATWOOT_API_KEY,
-        conversationId: conversation_id,
-        status
-      });
-
-      return {
-        success: true,
-        data: {
-          status
-        }
-      };
-
-    } catch (error) {
-      createLogger.error('Failed to send typing indicator', {
-        conversation_id,
-        error: error.message
-      });
-
-      // Don't fail the request for typing indicators
-      return {
-        success: true,
-        data: {
-          message: 'Typing indicator failed but request continued'
-        }
-      };
-    }
-  });
 };
 
 export default chatRoutes;

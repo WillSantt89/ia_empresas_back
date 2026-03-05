@@ -48,11 +48,11 @@ docker compose --profile tools up -d    # + pgAdmin (5050) + Redis Commander (80
 WhatsApp → Meta → n8n Flow 1 → POST /api/webhooks/n8n → Gemini AI → POST n8n Flow 2 → Meta → WhatsApp
 ```
 
-### Human Control Flow (Chatwoot ↔ n8n ↔ Backend)
+### Human Control Flow (Chat Próprio)
 ```
-Chatwoot assign   → n8n detecta → POST /api/webhooks/n8n/controle-humano { acao: "assumir" }   → IA pausa
-Chatwoot unassign → n8n detecta → POST /api/webhooks/n8n/controle-humano { acao: "devolver" }  → IA retoma (sync msgs Chatwoot→Redis)
-Chatwoot resolved → n8n detecta → POST /api/webhooks/n8n/controle-humano { acao: "encerrar" }  → conversa finalizada, Redis arquivado
+Operador atribui  → POST /api/conversas/:id/atribuir    → IA pausa, operador assume
+Operador devolve  → POST /api/conversas/:id/desatribuir  → IA retoma
+Timeout inatividade → timeout-checker job                 → IA retoma automaticamente
 ```
 
 ### Multi-Tenancy
@@ -74,9 +74,10 @@ Every data table references `empresa_id`. The tenant middleware (`src/middleware
 ### Key Backend Services
 - `services/gemini.js` — Gemini API via `@google/genai` SDK, function calling loop, Gemini 3 thoughtSignature, context caching (`ai.caches.*`)
 - `services/api-key-manager.js` — AES-256 encrypted keys, failover, rate limit tracking
-- `services/memory.js` — Redis-based conversation history (24h TTL), archive (30d), Chatwoot sync
+- `services/memory.js` — Redis-based conversation history (24h TTL), archive (30d)
 - `services/tool-runner.js` — HTTP tool executor with timeout and result transformation
-- `services/chatwoot.js` — Chatwoot API client, send/get messages, assign/unassign agents
+- `services/media-storage.js` — Save/serve WhatsApp media files to disk
+- `services/whatsapp-sender.js` — Direct WhatsApp message sending via Meta Graph API
 
 ### Key Backend Middleware Stack
 `rate-limit → auth (JWT) → tenant → permission → route handler`
@@ -113,7 +114,7 @@ See `ia_empresas_back/backend/.env.example` and `ia_empresas_front/.env.example`
 ## Webhook Authentication
 
 - **n8n webhook**: `X-Webhook-Token` header validated against `empresas.webhook_token`
-- **Chatwoot webhook**: HMAC signature in `X-Chatwoot-Signature` header
+- **WhatsApp webhook**: HMAC signature in `X-Hub-Signature-256` header
 - **Chat API**: `X-Api-Key` header validated against `api_keys` table
 
 ## n8n Webhook Endpoints

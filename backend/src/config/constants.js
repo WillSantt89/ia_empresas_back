@@ -91,13 +91,6 @@ export const SUBSCRIPTION_HISTORY_ACTIONS = {
   DESCONTO_APLICADO: 'desconto_aplicado'
 };
 
-// Chatwoot Status
-export const CHATWOOT_STATUS = {
-  ATIVO: 'ativo',
-  PROVISIONANDO: 'provisionando',
-  ERRO: 'erro'
-};
-
 // HTTP Methods
 export const HTTP_METHODS = {
   GET: 'GET',

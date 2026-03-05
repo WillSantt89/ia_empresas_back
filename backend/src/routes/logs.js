@@ -48,8 +48,7 @@ export default async function logsRoutes(fastify, opts) {
           ml.latencia_ms,
           ml.erro,
           ml.criado_em,
-          c.conversation_id_chatwoot,
-          c.contato_whatsapp,
+                    c.contato_whatsapp,
           a.nome as agente_nome,
           ak.nome_exibicao as api_key_nome
         FROM mensagens_log ml
@@ -187,8 +186,7 @@ export default async function logsRoutes(fastify, opts) {
       const result = await pool.query(`
         SELECT
           ml.*,
-          c.conversation_id_chatwoot,
-          c.contato_whatsapp,
+                    c.contato_whatsapp,
           c.controlado_por,
           a.nome as agente_nome,
           a.tipo as agente_tipo,
@@ -309,8 +307,7 @@ export default async function logsRoutes(fastify, opts) {
           ml.modelo_usado,
           ml.latencia_ms,
           ml.erro IS NOT NULL as tem_erro,
-          c.conversation_id_chatwoot,
-          c.contato_whatsapp,
+                    c.contato_whatsapp,
           a.nome as agente_nome
         FROM mensagens_log ml
         JOIN conversas c ON c.id = ml.conversa_id
@@ -355,7 +352,6 @@ export default async function logsRoutes(fastify, opts) {
           'Modelo',
           'Latência (ms)',
           'Erro',
-          'Conversation ID',
           'Contato',
           'Agente'
         ].filter(h => h !== null).join(',');
@@ -371,7 +367,6 @@ export default async function logsRoutes(fastify, opts) {
             row.modelo_usado || '',
             row.latencia_ms || 0,
             row.tem_erro ? 'Sim' : 'Não',
-            row.conversation_id_chatwoot || '',
             row.contato_whatsapp || '',
             row.agente_nome || ''
           ].filter(v => v !== null);

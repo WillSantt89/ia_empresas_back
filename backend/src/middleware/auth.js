@@ -15,7 +15,6 @@ export async function authMiddleware(request, reply) {
       '/api/auth/forgot-password',
       '/api/auth/reset-password',
       '/api/chat', // Chat uses webhook API key instead
-      '/api/webhook/chatwoot',
       '/api/webhooks/whatsapp' // Meta WhatsApp webhook (uses HMAC signature)
     ];
 
@@ -128,7 +127,7 @@ export async function authMiddleware(request, reply) {
 
 /**
  * Webhook authentication middleware
- * Used for /api/chat and /api/webhook/chatwoot endpoints
+ * Used for /api/chat webhook endpoints
  */
 export async function webhookAuthMiddleware(request, reply) {
   try {

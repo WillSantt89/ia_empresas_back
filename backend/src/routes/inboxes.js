@@ -67,9 +67,8 @@ export default async function inboxesRoutes(fastify, opts) {
     schema: {
       body: {
         type: 'object',
-        required: ['inbox_id_chatwoot', 'nome'],
+        required: ['nome'],
         properties: {
-          inbox_id_chatwoot: { type: 'integer' },
           nome: { type: 'string', minLength: 1, maxLength: 100 },
           agente_id: { type: 'string', format: 'uuid' }
         }
@@ -81,24 +80,8 @@ export default async function inboxesRoutes(fastify, opts) {
     try {
       await client.query('BEGIN');
 
-      const { inbox_id_chatwoot, nome, agente_id } = request.body;
+      const { nome, agente_id } = request.body;
       const { empresaId } = request;
-
-      // Verificar se inbox_id_chatwoot já existe para esta empresa
-      const exists = await client.query(
-        'SELECT id FROM inboxes WHERE empresa_id = $1 AND inbox_id_chatwoot = $2',
-        [empresaId, inbox_id_chatwoot]
-      );
-
-      if (exists.rows.length > 0) {
-        return reply.code(409).send({
-          success: false,
-          error: {
-            code: 'INBOX_EXISTS',
-            message: 'Já existe uma inbox com este ID do Chatwoot'
-          }
-        });
-      }
 
       // Validar agente se fornecido
       if (agente_id) {
@@ -121,14 +104,14 @@ export default async function inboxesRoutes(fastify, opts) {
       // Criar inbox
       const result = await client.query(`
         INSERT INTO inboxes (
-          id, empresa_id, inbox_id_chatwoot, nome,
+          id, empresa_id, nome,
           agente_id, ativo, criado_em
         )
         VALUES (
-          gen_random_uuid(), $1, $2, $3, $4, true, NOW()
+          gen_random_uuid(), $1, $2, $3, true, NOW()
         )
         RETURNING *
-      `, [empresaId, inbox_id_chatwoot, nome, agente_id]);
+      `, [empresaId, nome, agente_id]);
 
       await client.query('COMMIT');
 
@@ -173,12 +156,9 @@ export default async function inboxesRoutes(fastify, opts) {
           i.*,
           a.nome as agente_nome,
           a.tipo as agente_tipo,
-          a.modelo_llm as agente_modelo,
-          e.chatwoot_url,
-          e.chatwoot_account_id
+          a.modelo_llm as agente_modelo
         FROM inboxes i
         LEFT JOIN agentes a ON a.id = i.agente_id
-        JOIN empresas e ON e.id = i.empresa_id
         WHERE i.id = $1 AND i.empresa_id = $2
       `, [id, empresaId]);
 
@@ -443,68 +423,4 @@ export default async function inboxesRoutes(fastify, opts) {
     }
   });
 
-  // Sincronizar inboxes do Chatwoot
-  fastify.post('/sync-chatwoot', {
-    preHandler: [
-      fastify.authenticate,
-      fastify.addTenantFilter,
-      fastify.requirePermission('inboxes', 'write')
-    ]
-  }, async (request, reply) => {
-    const client = await pool.connect();
-
-    try {
-      await client.query('BEGIN');
-
-      const { empresaId } = request;
-
-      // Buscar configuração do Chatwoot da empresa
-      const empresaResult = await pool.query(
-        'SELECT chatwoot_url, chatwoot_api_token, chatwoot_account_id FROM empresas WHERE id = $1',
-        [empresaId]
-      );
-
-      if (empresaResult.rows.length === 0) {
-        return reply.code(404).send({
-          success: false,
-          error: {
-            code: 'EMPRESA_NOT_FOUND',
-            message: 'Empresa não encontrada'
-          }
-        });
-      }
-
-      const empresa = empresaResult.rows[0];
-
-      if (!empresa.chatwoot_url || !empresa.chatwoot_api_token || !empresa.chatwoot_account_id) {
-        return reply.code(400).send({
-          success: false,
-          error: {
-            code: 'CHATWOOT_NOT_CONFIGURED',
-            message: 'Chatwoot não está configurado para esta empresa'
-          }
-        });
-      }
-
-      // TODO: Implementar chamada real à API do Chatwoot
-      // Por enquanto, retornar sucesso simulado
-      logger.info(`Chatwoot sync requested for empresa ${empresaId}`);
-
-      await client.query('COMMIT');
-
-      return {
-        success: true,
-        data: {
-          message: 'Sincronização iniciada',
-          inboxes_sincronizadas: 0
-        }
-      };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      logger.error('Error syncing Chatwoot inboxes:', error);
-      throw error;
-    } finally {
-      client.release();
-    }
-  });
 }

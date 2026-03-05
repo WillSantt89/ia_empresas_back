@@ -7,16 +7,6 @@ import {
   emitNovaConversaNaFila, emitFilaStats, emitToUser,
 } from '../services/websocket.js';
 
-// Imports legados (manter durante transicao)
-let getConversationMessages, syncChatwootHistory;
-try {
-  const chatwootModule = await import('../services/chatwoot.js');
-  getConversationMessages = chatwootModule.getConversationMessages;
-  const memoryModule = await import('../services/memory.js');
-  syncChatwootHistory = memoryModule.syncChatwootHistory;
-} catch (e) {
-  // Chatwoot pode nao estar disponivel
-}
 
 export default async function conversasRoutes(fastify, opts) {
   // Listar conversas
@@ -54,7 +44,6 @@ export default async function conversasRoutes(fastify, opts) {
         SELECT
           c.*,
           i.nome as inbox_nome,
-          i.inbox_id_chatwoot,
           a.nome as agente_nome,
           a.tipo as agente_tipo,
           u.nome as humano_nome_atual,
@@ -169,7 +158,6 @@ export default async function conversasRoutes(fastify, opts) {
         SELECT
           c.*,
           i.nome as inbox_nome,
-          i.inbox_id_chatwoot,
           a.nome as agente_nome,
           a.tipo as agente_tipo,
           a.modelo_llm as agente_modelo,
@@ -177,7 +165,6 @@ export default async function conversasRoutes(fastify, opts) {
           u.nome as humano_nome_atual,
           u.email as humano_email,
           wn.numero_formatado as numero_whatsapp,
-          e.chatwoot_url,
           ct.id as contato_id_ref,
           ct.email as contato_email,
           ct.observacoes as contato_observacoes
@@ -442,12 +429,8 @@ export default async function conversasRoutes(fastify, opts) {
       const conversaResult = await client.query(`
         SELECT
           c.*,
-          cch.mensagem_retorno_ia,
-          e.chatwoot_url,
-          e.chatwoot_api_token,
-          e.chatwoot_account_id
+          cch.mensagem_retorno_ia
         FROM conversas c
-        JOIN empresas e ON e.id = c.empresa_id
         LEFT JOIN config_controle_humano cch ON cch.empresa_id = c.empresa_id
         WHERE c.id = $1 AND c.empresa_id = $2 AND c.status = $3
       `, [id, empresaId, 'ativo']);
@@ -497,42 +480,7 @@ export default async function conversasRoutes(fastify, opts) {
         )
       `, [id, empresaId, conversa.humano_id, conversa.humano_nome, motivo || 'Devolvido manualmente pelo admin']);
 
-      // Enviar mensagem de retorno se configurado
-      if (enviar_mensagem_retorno && conversa.mensagem_retorno_ia && conversa.chatwoot_url) {
-        try {
-          const chatwootService = await import('../services/chatwoot.js');
-          await chatwootService.default.sendMessage(
-            conversa,
-            conversa.conversation_id_chatwoot,
-            conversa.mensagem_retorno_ia
-          );
-        } catch (error) {
-          logger.error('Failed to send return message:', error);
-        }
-      }
-
       await client.query('COMMIT');
-
-      // Sync Chatwoot messages to Redis before IA resumes (non-blocking)
-      if (conversa.chatwoot_url && conversa.chatwoot_api_token && conversa.chatwoot_account_id && conversa.conversation_id_chatwoot && conversa.humano_assumiu_em) {
-        try {
-          const chatwootMessages = await getConversationMessages({
-            baseUrl: conversa.chatwoot_url,
-            accountId: conversa.chatwoot_account_id,
-            apiKey: conversa.chatwoot_api_token,
-            conversationId: conversa.conversation_id_chatwoot,
-            after: conversa.humano_assumiu_em
-          });
-
-          const conversationKey = conversa.contato_whatsapp ? `whatsapp:${conversa.contato_whatsapp}` : null;
-          if (conversationKey && chatwootMessages.length > 0) {
-            const synced = await syncChatwootHistory(conversa.empresa_id, conversationKey, chatwootMessages);
-            logger.info(`Synced ${synced} Chatwoot messages for conversation ${id}`);
-          }
-        } catch (syncError) {
-          logger.error(`Failed to sync Chatwoot messages for conversation ${id} (non-blocking):`, syncError);
-        }
-      }
 
       logger.info(`Conversa ${id} returned to IA`);
 
