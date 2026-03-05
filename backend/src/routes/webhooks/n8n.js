@@ -143,6 +143,22 @@ const n8nWebhookRoutes = async (fastify) => {
       // --- 4. Generate consistent conversation_id ---
       const conversationKey = `whatsapp:${phone}`;
 
+      // --- 4.5. Find or create contato ---
+      let contato_id = null;
+      try {
+        const contatoResult = await pool.query(`
+          INSERT INTO contatos (empresa_id, whatsapp, nome)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (empresa_id, whatsapp) DO UPDATE SET
+            nome = COALESCE(NULLIF($3, ''), contatos.nome),
+            atualizado_em = NOW()
+          RETURNING id
+        `, [empresa_id, phone, name || null]);
+        contato_id = contatoResult.rows[0].id;
+      } catch (err) {
+        createLogger.error('Failed to upsert contato (non-blocking)', { error: err.message });
+      }
+
       // --- 5. Find or create conversa record ---
       let conversa_id;
 
@@ -155,6 +171,11 @@ const n8nWebhookRoutes = async (fastify) => {
 
       if (conversaResult.rows.length > 0) {
         conversa_id = conversaResult.rows[0].id;
+
+        // Backfill contato_id se conversa antiga não tem
+        if (contato_id) {
+          pool.query('UPDATE conversas SET contato_id = $1 WHERE id = $2 AND contato_id IS NULL', [contato_id, conversa_id]).catch(() => {});
+        }
 
         // --- Check human control (only skip AI when an operator is actively handling) ---
         const controlador = conversaResult.rows[0].controlado_por;
@@ -219,11 +240,11 @@ const n8nWebhookRoutes = async (fastify) => {
         const defaultFilaId = filaResult.rows[0]?.id || null;
 
         const insertConversa = await pool.query(`
-          INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json)
-          VALUES ($1, $2, $3, $4, $4, 'ativo', $5, $6, $7)
+          INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json)
+          VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8)
           RETURNING id
         `, [
-          empresa_id, phone, name || null, agente_id,
+          empresa_id, phone, name || null, contato_id, agente_id,
           defaultFilaId ? 'fila' : 'ia',
           defaultFilaId,
           JSON.stringify({ name: name || null, source: 'n8n' })

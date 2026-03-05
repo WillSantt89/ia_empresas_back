@@ -43,6 +43,7 @@ import configuracoesRoutes from './routes/configuracoes.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import filasRoutes from './routes/filas.js';
 import labelsRoutes from './routes/labels.js';
+import contatosRoutes from './routes/contatos.js';
 
 // Import WebSocket
 import { initializeWebSocket } from './services/websocket.js';
@@ -255,6 +256,7 @@ async function start() {
     await fastify.register(notificacoesRoutes, { prefix: '/api/notificacoes' });
     await fastify.register(filasRoutes, { prefix: '/api/filas' });
     await fastify.register(labelsRoutes, { prefix: '/api/labels' });
+    await fastify.register(contatosRoutes, { prefix: '/api/contatos' });
 
     // Start listening
     await fastify.listen({

@@ -177,13 +177,17 @@ export default async function conversasRoutes(fastify, opts) {
           u.nome as humano_nome_atual,
           u.email as humano_email,
           wn.numero_formatado as numero_whatsapp,
-          e.chatwoot_url
+          e.chatwoot_url,
+          ct.id as contato_id_ref,
+          ct.email as contato_email,
+          ct.observacoes as contato_observacoes
         FROM conversas c
         LEFT JOIN inboxes i ON i.id = c.inbox_id
         LEFT JOIN agentes a ON a.id = c.agente_id
         LEFT JOIN agentes ai ON ai.id = c.agente_inicial_id
         LEFT JOIN usuarios u ON u.id = c.humano_id
         LEFT JOIN whatsapp_numbers wn ON wn.inbox_id = i.id AND wn.ativo = true
+        LEFT JOIN contatos ct ON ct.id = c.contato_id
         JOIN empresas e ON e.id = c.empresa_id
         WHERE c.id = $1 AND c.empresa_id = $2
       `, [id, empresaId]);

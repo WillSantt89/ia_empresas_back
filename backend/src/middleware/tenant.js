@@ -73,7 +73,8 @@ export async function tenantMiddleware(request, reply) {
       '/api/dashboard',
       '/api/logs',
       '/api/usuarios',
-      '/api/configuracoes'
+      '/api/configuracoes',
+      '/api/contatos'
     ];
 
     if (requiresEmpresa.some(route => request.url.startsWith(route)) && !request.empresaId) {
