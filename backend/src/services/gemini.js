@@ -18,7 +18,8 @@ const createLogger = logger.child({ module: 'gemini-service' });
  * @param {string} options.systemPrompt - System instructions for the agent
  * @param {Array} options.tools - Available tools in Gemini format
  * @param {Array} options.history - Conversation history
- * @param {string} options.message - Current user message
+ * @param {string} options.message - Current user message (text)
+ * @param {Array} options.parts - Current user message parts (for media support, overrides message)
  * @param {number} options.temperature - Temperature setting (0.0-1.0)
  * @param {number} options.maxTokens - Maximum output tokens
  * @returns {Promise<Object>} Processing result with text and tool calls
@@ -31,6 +32,7 @@ export async function processMessage(options) {
     tools = [],
     history = [],
     message,
+    parts,
     temperature = DEFAULT_LIMITS.TEMPERATURE,
     maxTokens = DEFAULT_LIMITS.MAX_TOKENS,
   } = options;
@@ -56,11 +58,12 @@ export async function processMessage(options) {
     };
 
     // Build conversation history
+    const userParts = parts || [{ text: message }];
     const contents = [
       ...history,
       {
         role: 'user',
-        parts: [{ text: message }]
+        parts: userParts
       }
     ];
 
@@ -427,6 +430,7 @@ export async function processMessageWithTools(options, toolExecutor) {
     tools = [],
     history = [],
     message,
+    parts,
     temperature = DEFAULT_LIMITS.TEMPERATURE,
     maxTokens = DEFAULT_LIMITS.MAX_TOKENS,
     cachedContentName,
@@ -467,10 +471,11 @@ export async function processMessageWithTools(options, toolExecutor) {
       };
     }
 
-    // Add user message to history
+    // Add user message to history (supports parts array for media)
+    const userParts = parts || [{ text: message }];
     currentHistory.push({
       role: 'user',
-      parts: [{ text: message }]
+      parts: userParts
     });
 
     // Function calling loop

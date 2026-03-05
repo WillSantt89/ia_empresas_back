@@ -2,13 +2,14 @@ import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
 import { addToHistory } from './memory.js';
 import { decrypt } from '../config/encryption.js';
-import { emitNovaMensagem, emitStatusEntrega } from './websocket.js';
+import { emitNovaMensagem } from './websocket.js';
+import { sendTextMessage } from './whatsapp-sender.js';
 
 /**
- * Envia mensagem do operador para o cliente via WhatsApp (n8n Flow 2)
+ * Envia mensagem do operador para o cliente via WhatsApp (envio direto Meta API)
  */
 export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
-  // 1. Buscar conversa + empresa + whatsapp_number
+  // 1. Buscar conversa + empresa
   const conversaResult = await pool.query(
     `SELECT c.*, e.n8n_response_url, e.webhook_token
      FROM conversas c
@@ -25,10 +26,6 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
 
   if (!conversa.contato_whatsapp) {
     throw new Error('Conversa sem contato WhatsApp');
-  }
-
-  if (!conversa.n8n_response_url) {
-    throw new Error('Empresa sem n8n_response_url configurada');
   }
 
   // 2. Buscar numero WhatsApp ativo para a empresa
@@ -75,39 +72,32 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
     [conversaId]
   );
 
-  // 6. Enviar para n8n Flow 2
+  // 6. Enviar diretamente via Meta Graph API
   try {
-    const response = await fetch(conversa.n8n_response_url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        phone: conversa.contato_whatsapp,
-        message: conteudo,
-        phone_number_id: whatsappNumber.phone_number_id,
-        token: token,
-        webhook_token: conversa.webhook_token,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+    const result = await sendTextMessage(
+      whatsappNumber.phone_number_id,
+      token,
+      conversa.contato_whatsapp,
+      conteudo
+    );
 
-    if (!response.ok) {
-      logger.warn(`n8n Flow 2 retornou ${response.status} para conversa ${conversaId}`);
-      // Atualizar status para failed
+    if (result.success) {
       await pool.query(
-        `UPDATE mensagens_log SET status_entrega = 'failed' WHERE id = $1`,
-        [mensagem.id]
-      );
-      mensagem.status_entrega = 'failed';
-    } else {
-      // Atualizar status para sent
-      await pool.query(
-        `UPDATE mensagens_log SET status_entrega = 'sent' WHERE id = $1`,
-        [mensagem.id]
+        `UPDATE mensagens_log SET status_entrega = 'sent', whatsapp_message_id = $1 WHERE id = $2`,
+        [result.wamid, mensagem.id]
       );
       mensagem.status_entrega = 'sent';
+      mensagem.whatsapp_message_id = result.wamid;
+    } else {
+      logger.warn(`Meta API falhou para conversa ${conversaId}: ${result.error}`);
+      await pool.query(
+        `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
+        [result.error, mensagem.id]
+      );
+      mensagem.status_entrega = 'failed';
     }
   } catch (error) {
-    logger.error(`Erro enviando msg para n8n Flow 2:`, error.message);
+    logger.error(`Erro enviando msg via Meta API:`, error.message);
     await pool.query(
       `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
       [error.message, mensagem.id]

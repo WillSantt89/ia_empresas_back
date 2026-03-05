@@ -15,7 +15,8 @@ export async function authMiddleware(request, reply) {
       '/api/auth/forgot-password',
       '/api/auth/reset-password',
       '/api/chat', // Chat uses webhook API key instead
-      '/api/webhook/chatwoot'
+      '/api/webhook/chatwoot',
+      '/api/webhooks/whatsapp' // Meta WhatsApp webhook (uses HMAC signature)
     ];
 
     if (publicRoutes.some(route => request.url.startsWith(route))) {

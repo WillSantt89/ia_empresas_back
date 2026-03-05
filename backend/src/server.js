@@ -106,21 +106,16 @@ async function registerPlugins() {
   // Setup route-specific rate limits
   setupRouteRateLimits(fastify);
 
-  // Add raw body parser for webhook signature validation
+  // Add raw body parser for webhook signature validation (HMAC)
+  // Stores raw string on req.rawBody before JSON parsing
   fastify.addContentTypeParser('application/json', { parseAs: 'string' }, function (req, body, done) {
+    req.rawBody = body; // Store original raw body on Node.js IncomingMessage
     try {
       const json = JSON.parse(body);
       done(null, json);
     } catch (err) {
       err.statusCode = 400;
       done(err, undefined);
-    }
-  });
-
-  fastify.addHook('preHandler', async (request, reply) => {
-    // Store raw body for webhook signature validation
-    if (request.routeOptions.config?.rawBody && request.body) {
-      request.rawBody = request.payload || JSON.stringify(request.body);
     }
   });
 }

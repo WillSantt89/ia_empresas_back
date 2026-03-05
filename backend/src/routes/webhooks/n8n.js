@@ -1,10 +1,12 @@
 import { logger } from '../../config/logger.js';
 import { pool } from '../../config/database.js';
+import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, syncChatwootHistory, archiveConversation } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
 import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { sendMessage as chatwootSendMessage, getConversationMessages, unassignAgent } from '../../services/chatwoot.js';
+import { sendTextMessage } from '../../services/whatsapp-sender.js';
 import { atribuirConversaAutomatica } from '../../services/fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats } from '../../services/websocket.js';
 import { calcularStatsFila } from '../../services/fila-manager.js';
@@ -603,8 +605,8 @@ const n8nWebhookRoutes = async (fastify) => {
         });
       }
 
-      // --- 16. Send response to n8n Flow 2 (async, non-blocking) ---
-      if (empresa.n8n_response_url && phone_number_id) {
+      // --- 16. Send response to WhatsApp ---
+      if (phone_number_id) {
         let whatsappToken = null;
         try {
           const wnResult = await pool.query(
@@ -612,30 +614,49 @@ const n8nWebhookRoutes = async (fastify) => {
             [phone_number_id, empresa_id]
           );
           if (wnResult.rows.length > 0 && wnResult.rows[0].token_graph_api) {
-            whatsappToken = await fastify.decrypt(wnResult.rows[0].token_graph_api);
+            whatsappToken = decrypt(wnResult.rows[0].token_graph_api);
           }
         } catch (err) {
-          createLogger.error('Failed to get WhatsApp token for Flow 2', { error: err.message, phone_number_id });
+          createLogger.error('Failed to get WhatsApp token', { error: err.message, phone_number_id });
         }
 
-        const flow2Payload = {
-          phone,
-          message: result.text,
-          phone_number_id,
-          token: whatsappToken,
-          webhook_token: webhookToken
-        };
+        if (whatsappToken) {
+          // Send directly via Meta Graph API (no n8n intermediary)
+          sendTextMessage(phone_number_id, whatsappToken, phone, result.text)
+            .then(sendResult => {
+              if (sendResult.wamid) {
+                // Save wamid directly (no need for confirmar-envio endpoint)
+                pool.query(
+                  `UPDATE mensagens_log SET whatsapp_message_id = $1, status_entrega = 'sent' WHERE id = $2`,
+                  [sendResult.wamid, outgoingMsgResult.rows[0]?.id]
+                ).catch(() => {});
+              }
+              createLogger.info('Response sent via Meta API', { phone, wamid: sendResult.wamid });
+            })
+            .catch(err => {
+              createLogger.error('Failed to send via Meta API', { error: err.message, phone });
+            });
+        } else if (empresa.n8n_response_url) {
+          // Fallback: use n8n Flow 2 (legacy)
+          const flow2Payload = {
+            phone,
+            message: result.text,
+            phone_number_id,
+            token: whatsappToken,
+            webhook_token: webhookToken
+          };
 
-        fetch(empresa.n8n_response_url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(flow2Payload),
-          signal: AbortSignal.timeout(10000)
-        }).then(res => {
-          createLogger.info('Flow 2 response sent', { status: res.status, phone, phone_number_id });
-        }).catch(err => {
-          createLogger.error('Failed to send to Flow 2', { error: err.message, url: empresa.n8n_response_url, phone });
-        });
+          fetch(empresa.n8n_response_url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(flow2Payload),
+            signal: AbortSignal.timeout(10000)
+          }).then(res => {
+            createLogger.info('Flow 2 response sent (legacy)', { status: res.status, phone });
+          }).catch(err => {
+            createLogger.error('Failed to send to Flow 2', { error: err.message, url: empresa.n8n_response_url, phone });
+          });
+        }
       }
 
       // --- Return synchronous response to n8n ---
