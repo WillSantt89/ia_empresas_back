@@ -207,31 +207,6 @@ const whatsappWebhookRoutes = async (fastify) => {
     const agent = agentResult.rows[0];
     const { agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent;
 
-    // --- Reject non-text media if agent has mensagem_midia_nao_suportada configured ---
-    if (agent.mensagem_midia_nao_suportada && parsed.type !== 'text') {
-      createLogger.info('Non-text message rejected by agent config', {
-        empresa_id, phone, type: parsed.type, agente_id,
-      });
-
-      const rejectMsg = agent.mensagem_midia_nao_suportada;
-      const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, rejectMsg);
-
-      // Log incoming + outgoing
-      await pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, whatsapp_message_id, criado_em)
-        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, NOW())
-      `, [conversa_id, empresa_id, historyText, messageId]);
-
-      if (sendResult.wamid) {
-        await pool.query(`
-          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, whatsapp_message_id, criado_em)
-          VALUES ($1, $2, 'saida', $3, 'ia', $4, NOW())
-        `, [conversa_id, empresa_id, rejectMsg, sendResult.wamid]);
-      }
-
-      return;
-    }
-
     // --- Get API keys with failover ---
     const availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
     if (availableKeys.length === 0) {
@@ -284,10 +259,10 @@ const whatsappWebhookRoutes = async (fastify) => {
         });
 
         const logMsgResult = await pool.query(`
-          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
-          VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())
+          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, criado_em)
+          VALUES ($1, $2, 'entrada', $3, 'cliente', $4, NOW())
           RETURNING id, criado_em
-        `, [conversa_id, empresa_id, historyText]);
+        `, [conversa_id, empresa_id, historyText, parsed.type]);
 
         const fila_id = conversaResult.rows[0].fila_id;
         if (logMsgResult.rows[0]) {
@@ -297,6 +272,7 @@ const whatsappWebhookRoutes = async (fastify) => {
             conteudo: historyText,
             direcao: 'entrada',
             remetente_tipo: 'cliente',
+            tipo_mensagem: parsed.type,
             criado_em: logMsgResult.rows[0].criado_em,
           });
         }
@@ -347,9 +323,9 @@ const whatsappWebhookRoutes = async (fastify) => {
           createLogger.info('Conversation auto-assigned', { conversa_id, operador: operador.nome });
           addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
           await pool.query(
-            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
-             VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())`,
-            [conversa_id, empresa_id, historyText]
+            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, criado_em)
+             VALUES ($1, $2, 'entrada', $3, 'cliente', $4, NOW())`,
+            [conversa_id, empresa_id, historyText, parsed.type]
           );
           return;
         }
@@ -389,8 +365,8 @@ const whatsappWebhookRoutes = async (fastify) => {
         const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, limitMessage);
         if (sendResult.wamid) {
           await pool.query(`
-            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, whatsapp_message_id, criado_em)
-            VALUES ($1, $2, 'saida', $3, 'ia', $4, NOW())
+            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, criado_em)
+            VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, NOW())
           `, [conversa_id, empresa_id, limitMessage, sendResult.wamid]);
         }
         return;
@@ -417,10 +393,10 @@ const whatsappWebhookRoutes = async (fastify) => {
 
     // --- Log incoming message ---
     const incomingMsgResult = await pool.query(`
-      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, whatsapp_message_id, criado_em)
-      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, NOW())
+      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, criado_em)
+      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, NOW())
       RETURNING id, criado_em
-    `, [conversa_id, empresa_id, historyText, messageId]);
+    `, [conversa_id, empresa_id, historyText, parsed.type, messageId]);
 
     // Emit WebSocket for incoming message
     if (incomingMsgResult.rows[0]) {
@@ -432,8 +408,44 @@ const whatsappWebhookRoutes = async (fastify) => {
         conteudo: historyText,
         direcao: 'entrada',
         remetente_tipo: 'cliente',
+        tipo_mensagem: parsed.type,
         criado_em: incomingMsgResult.rows[0].criado_em,
       });
+    }
+
+    // --- Reject non-text media if agent has mensagem_midia_nao_suportada configured ---
+    // (runs AFTER incoming message is saved + emitted, so operators see the media in chat)
+    if (agent.mensagem_midia_nao_suportada && parsed.type !== 'text') {
+      createLogger.info('Non-text message rejected by agent config', {
+        empresa_id, phone, type: parsed.type, agente_id,
+      });
+
+      const rejectMsg = agent.mensagem_midia_nao_suportada;
+      const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, rejectMsg);
+
+      if (sendResult.wamid) {
+        const rejectLogResult = await pool.query(`
+          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, criado_em)
+          VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, NOW())
+          RETURNING id, criado_em
+        `, [conversa_id, empresa_id, rejectMsg, sendResult.wamid]);
+
+        if (rejectLogResult.rows[0]) {
+          const conversaForFila3 = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+          emitNovaMensagem(conversa_id, conversaForFila3.rows[0]?.fila_id, {
+            id: rejectLogResult.rows[0].id,
+            conversa_id,
+            conteudo: rejectMsg,
+            direcao: 'saida',
+            remetente_tipo: 'ia',
+            remetente_nome: agente_nome,
+            tipo_mensagem: 'text',
+            criado_em: rejectLogResult.rows[0].criado_em,
+          });
+        }
+      }
+
+      return;
     }
 
     // --- Process with Gemini (failover) ---
@@ -510,11 +522,11 @@ const whatsappWebhookRoutes = async (fastify) => {
     // --- Log outgoing message with wamid ---
     const outgoingMsgResult = await pool.query(`
       INSERT INTO mensagens_log (
-        conversa_id, empresa_id, direcao, conteudo, remetente_tipo,
+        conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem,
         tokens_input, tokens_output, tools_invocadas_json,
         modelo_usado, api_key_usada_id, latencia_ms,
         whatsapp_message_id, status_entrega, criado_em
-      ) VALUES ($1, $2, 'saida', $3, 'ia', $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+      ) VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, $5, $6, $7, $8, $9, $10, $11, NOW())
       RETURNING id, criado_em
     `, [
       conversa_id, empresa_id, result.text,
@@ -536,6 +548,7 @@ const whatsappWebhookRoutes = async (fastify) => {
         direcao: 'saida',
         remetente_tipo: 'ia',
         remetente_nome: agente_nome,
+        tipo_mensagem: 'text',
         criado_em: outgoingMsgResult.rows[0].criado_em,
       });
     }
