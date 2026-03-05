@@ -389,6 +389,31 @@ export default async function filasRoutes(fastify) {
   });
 
   // ============================================
+  // POST /api/filas/:id/membros/remover-bulk — Remover membros em massa
+  // ============================================
+  fastify.post('/:id/membros/remover-bulk', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('filas', 'write'),
+    ],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const { usuario_ids } = request.body;
+
+    if (!Array.isArray(usuario_ids) || usuario_ids.length === 0) {
+      return reply.code(400).send({ success: false, error: { message: 'usuario_ids deve ser um array nao vazio' } });
+    }
+
+    const result = await pool.query(
+      `DELETE FROM fila_membros WHERE fila_id = $1 AND usuario_id = ANY($2)`,
+      [id, usuario_ids]
+    );
+
+    reply.send({ success: true, data: { removidos: result.rowCount } });
+  });
+
+  // ============================================
   // GET /api/filas/:id/conversas — Conversas da fila
   // ============================================
   fastify.get('/:id/conversas', {
