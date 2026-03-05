@@ -21,9 +21,10 @@ export default async function filasRoutes(fastify) {
   }, async (request, reply) => {
     const { empresaId, user } = request;
     const isOperador = user.role === 'operador';
+    const { todas } = request.query || {};
 
     let filas;
-    if (isOperador) {
+    if (isOperador && !todas) {
       filas = await getFilasDoUsuario(user.id, empresaId);
     } else {
       const result = await pool.query(
