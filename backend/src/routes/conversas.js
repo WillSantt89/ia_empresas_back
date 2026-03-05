@@ -656,71 +656,76 @@ export default async function conversasRoutes(fastify, opts) {
       fastify.requirePermission('conversas', 'write')
     ]
   }, async (request, reply) => {
-    const { id } = request.params;
-    const { empresaId, user } = request;
-    const operadorId = request.body?.operador_id || user.id;
+    try {
+      const { id } = request.params;
+      const { empresaId, user } = request;
+      const operadorId = request.body?.operador_id || user.id;
 
-    // Buscar conversa
-    const conversaResult = await pool.query(
-      `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
-      [id, empresaId]
-    );
-    if (conversaResult.rows.length === 0) {
-      return reply.code(404).send({ success: false, error: { message: 'Conversa ativa nao encontrada' } });
-    }
-    const conversa = conversaResult.rows[0];
-
-    // Operador so pode atribuir a si mesmo e se for membro da fila
-    if (user.role === 'operador') {
-      if (operadorId !== user.id) {
-        return reply.code(403).send({ success: false, error: { message: 'Operador so pode atribuir a si mesmo' } });
+      // Buscar conversa
+      const conversaResult = await pool.query(
+        `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [id, empresaId]
+      );
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Conversa ativa nao encontrada' } });
       }
-      if (conversa.fila_id) {
-        const isMembro = await isMembroDaFila(user.id, conversa.fila_id);
-        if (!isMembro) {
-          return reply.code(403).send({ success: false, error: { message: 'Voce nao pertence a esta fila' } });
+      const conversa = conversaResult.rows[0];
+
+      // Operador so pode atribuir a si mesmo e se for membro da fila
+      if (user.role === 'operador') {
+        if (operadorId !== user.id) {
+          return reply.code(403).send({ success: false, error: { message: 'Operador so pode atribuir a si mesmo' } });
+        }
+        if (conversa.fila_id) {
+          const isMembro = await isMembroDaFila(user.id, conversa.fila_id);
+          if (!isMembro) {
+            return reply.code(403).send({ success: false, error: { message: 'Voce nao pertence a esta fila' } });
+          }
         }
       }
+
+      // Verificar capacidade do operador
+      const temCapacidade = await verificarCapacidadeOperador(operadorId);
+      if (!temCapacidade) {
+        return reply.code(400).send({ success: false, error: { message: 'Operador atingiu limite de conversas simultaneas' } });
+      }
+
+      // Buscar nome do operador
+      const opResult = await pool.query(`SELECT nome FROM usuarios WHERE id = $1`, [operadorId]);
+      const operadorNome = opResult.rows[0]?.nome || 'Desconhecido';
+
+      // Atualizar conversa
+      await pool.query(
+        `UPDATE conversas SET
+           operador_id = $1, operador_nome = $2, operador_atribuido_em = NOW(),
+           controlado_por = 'humano', humano_id = $1, humano_nome = $2,
+           humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW()
+         WHERE id = $3`,
+        [operadorId, operadorNome, id]
+      );
+
+      // Registrar historico
+      await pool.query(
+        `INSERT INTO controle_historico
+           (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+         VALUES ($1, $2, 'operador_assumiu', $3, 'humano', $4, $5, $6)`,
+        [id, empresaId, conversa.controlado_por, operadorId, operadorNome, 'Atribuido via painel']
+      );
+
+      // WebSocket
+      const dados = { id, operador_id: operadorId, operador_nome: operadorNome, controlado_por: 'humano' };
+      emitConversaAtribuida(id, conversa.fila_id, operadorId, dados);
+      if (conversa.fila_id) {
+        const stats = await calcularStatsFila(conversa.fila_id);
+        emitFilaStats(conversa.fila_id, stats);
+      }
+
+      logger.info(`Conversa ${id} atribuida a ${operadorNome}`);
+      reply.send({ success: true, data: { message: 'Conversa atribuida com sucesso', operador_nome: operadorNome } });
+    } catch (error) {
+      logger.error('Erro ao atribuir conversa:', { error: error.message, stack: error.stack, params: request.params });
+      reply.code(500).send({ success: false, error: { message: 'Erro ao atribuir conversa', detail: error.message } });
     }
-
-    // Verificar capacidade do operador
-    const temCapacidade = await verificarCapacidadeOperador(operadorId);
-    if (!temCapacidade) {
-      return reply.code(400).send({ success: false, error: { message: 'Operador atingiu limite de conversas simultaneas' } });
-    }
-
-    // Buscar nome do operador
-    const opResult = await pool.query(`SELECT nome FROM usuarios WHERE id = $1`, [operadorId]);
-    const operadorNome = opResult.rows[0]?.nome || 'Desconhecido';
-
-    // Atualizar conversa
-    await pool.query(
-      `UPDATE conversas SET
-         operador_id = $1, operador_nome = $2, operador_atribuido_em = NOW(),
-         controlado_por = 'humano', humano_id = $1, humano_nome = $2,
-         humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW()
-       WHERE id = $3`,
-      [operadorId, operadorNome, id]
-    );
-
-    // Registrar historico
-    await pool.query(
-      `INSERT INTO controle_historico
-         (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
-       VALUES ($1, $2, 'operador_assumiu', $3, 'humano', $4, $5, $6)`,
-      [id, empresaId, conversa.controlado_por, operadorId, operadorNome, 'Atribuido via painel']
-    );
-
-    // WebSocket
-    const dados = { id, operador_id: operadorId, operador_nome: operadorNome, controlado_por: 'humano' };
-    emitConversaAtribuida(id, conversa.fila_id, operadorId, dados);
-    if (conversa.fila_id) {
-      const stats = await calcularStatsFila(conversa.fila_id);
-      emitFilaStats(conversa.fila_id, stats);
-    }
-
-    logger.info(`Conversa ${id} atribuida a ${operadorNome}`);
-    reply.send({ success: true, data: { message: 'Conversa atribuida com sucesso', operador_nome: operadorNome } });
   });
 
   // ============================================
@@ -733,43 +738,48 @@ export default async function conversasRoutes(fastify, opts) {
       fastify.requirePermission('conversas', 'write')
     ]
   }, async (request, reply) => {
-    const { id } = request.params;
-    const { empresaId } = request;
+    try {
+      const { id } = request.params;
+      const { empresaId } = request;
 
-    const conversaResult = await pool.query(
-      `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
-      [id, empresaId]
-    );
-    if (conversaResult.rows.length === 0) {
-      return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+      const conversaResult = await pool.query(
+        `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [id, empresaId]
+      );
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+      }
+      const conversa = conversaResult.rows[0];
+
+      // Voltar pra fila se tem fila, senao pra IA
+      const novoControlador = conversa.fila_id ? 'fila' : 'ia';
+
+      await pool.query(
+        `UPDATE conversas SET
+           operador_id = NULL, operador_nome = NULL,
+           controlado_por = $1, atualizado_em = NOW()
+         WHERE id = $2`,
+        [novoControlador, id]
+      );
+
+      await pool.query(
+        `INSERT INTO controle_historico
+           (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+         VALUES ($1, $2, 'desatribuido', 'humano', $3, $4, $5, $6)`,
+        [id, empresaId, novoControlador, conversa.operador_id, conversa.operador_nome, 'Desatribuido via painel']
+      );
+
+      emitConversaAtualizada(id, conversa.fila_id, { id, operador_id: null, controlado_por: novoControlador });
+      if (conversa.fila_id) {
+        const stats = await calcularStatsFila(conversa.fila_id);
+        emitFilaStats(conversa.fila_id, stats);
+      }
+
+      reply.send({ success: true, data: { message: 'Conversa desatribuida', controlado_por: novoControlador } });
+    } catch (error) {
+      logger.error('Erro ao desatribuir conversa:', { error: error.message, stack: error.stack, params: request.params });
+      reply.code(500).send({ success: false, error: { message: 'Erro ao desatribuir conversa', detail: error.message } });
     }
-    const conversa = conversaResult.rows[0];
-
-    // Voltar pra fila se tem fila, senao pra IA
-    const novoControlador = conversa.fila_id ? 'fila' : 'ia';
-
-    await pool.query(
-      `UPDATE conversas SET
-         operador_id = NULL, operador_nome = NULL,
-         controlado_por = $1, atualizado_em = NOW()
-       WHERE id = $2`,
-      [novoControlador, id]
-    );
-
-    await pool.query(
-      `INSERT INTO controle_historico
-         (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
-       VALUES ($1, $2, 'desatribuido', 'humano', $3, $4, $5, $6)`,
-      [id, empresaId, novoControlador, conversa.operador_id, conversa.operador_nome, 'Desatribuido via painel']
-    );
-
-    emitConversaAtualizada(id, conversa.fila_id, { id, operador_id: null, controlado_por: novoControlador });
-    if (conversa.fila_id) {
-      const stats = await calcularStatsFila(conversa.fila_id);
-      emitFilaStats(conversa.fila_id, stats);
-    }
-
-    reply.send({ success: true, data: { message: 'Conversa desatribuida', controlado_por: novoControlador } });
   });
 
   // ============================================
@@ -782,70 +792,75 @@ export default async function conversasRoutes(fastify, opts) {
       fastify.requirePermission('conversas', 'write')
     ]
   }, async (request, reply) => {
-    const { id } = request.params;
-    const { empresaId, user } = request;
-    const { fila_id, motivo } = request.body;
+    try {
+      const { id } = request.params;
+      const { empresaId, user } = request;
+      const { fila_id, motivo } = request.body || {};
 
-    if (!fila_id) {
-      return reply.code(400).send({ success: false, error: { message: 'fila_id e obrigatorio' } });
-    }
-
-    // Verificar fila destino existe
-    const filaResult = await pool.query(
-      `SELECT * FROM filas_atendimento WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
-      [fila_id, empresaId]
-    );
-    if (filaResult.rows.length === 0) {
-      return reply.code(404).send({ success: false, error: { message: 'Fila destino nao encontrada' } });
-    }
-
-    // Operador so pode transferir para fila que pertence
-    if (user.role === 'operador') {
-      const isMembro = await isMembroDaFila(user.id, fila_id);
-      if (!isMembro) {
-        return reply.code(403).send({ success: false, error: { message: 'Voce nao pertence a fila destino' } });
+      if (!fila_id) {
+        return reply.code(400).send({ success: false, error: { message: 'fila_id e obrigatorio' } });
       }
+
+      // Verificar fila destino existe
+      const filaResult = await pool.query(
+        `SELECT * FROM filas_atendimento WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+        [fila_id, empresaId]
+      );
+      if (filaResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Fila destino nao encontrada' } });
+      }
+
+      // Operador so pode transferir para fila que pertence
+      if (user.role === 'operador') {
+        const isMembro = await isMembroDaFila(user.id, fila_id);
+        if (!isMembro) {
+          return reply.code(403).send({ success: false, error: { message: 'Voce nao pertence a fila destino' } });
+        }
+      }
+
+      const conversaResult = await pool.query(
+        `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [id, empresaId]
+      );
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+      }
+      const conversa = conversaResult.rows[0];
+      const filaAntigaId = conversa.fila_id;
+
+      // Transferir
+      await pool.query(
+        `UPDATE conversas SET
+           fila_id = $1, fila_entrada_em = NOW(),
+           operador_id = NULL, operador_nome = NULL,
+           controlado_por = 'fila', atualizado_em = NOW()
+         WHERE id = $2`,
+        [fila_id, id]
+      );
+
+      await pool.query(
+        `INSERT INTO controle_historico
+           (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+         VALUES ($1, $2, 'transferencia_fila', $3, 'fila', $4, $5, $6)`,
+        [id, empresaId, conversa.controlado_por, user.id, user.nome, motivo || 'Transferido para outra fila']
+      );
+
+      // WebSocket: notificar fila antiga e nova
+      if (filaAntigaId) {
+        emitConversaAtualizada(id, filaAntigaId, { id, removida: true });
+        const statsAntiga = await calcularStatsFila(filaAntigaId);
+        emitFilaStats(filaAntigaId, statsAntiga);
+      }
+      emitNovaConversaNaFila(fila_id, { id, contato_whatsapp: conversa.contato_whatsapp, contato_nome: conversa.contato_nome });
+      const statsNova = await calcularStatsFila(fila_id);
+      emitFilaStats(fila_id, statsNova);
+
+      logger.info(`Conversa ${id} transferida para fila ${filaResult.rows[0].nome}`);
+      reply.send({ success: true, data: { message: `Transferida para ${filaResult.rows[0].nome}` } });
+    } catch (error) {
+      logger.error('Erro ao transferir conversa para fila:', { error: error.message, stack: error.stack, params: request.params, body: request.body });
+      reply.code(500).send({ success: false, error: { message: 'Erro ao transferir conversa', detail: error.message } });
     }
-
-    const conversaResult = await pool.query(
-      `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
-      [id, empresaId]
-    );
-    if (conversaResult.rows.length === 0) {
-      return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
-    }
-    const conversa = conversaResult.rows[0];
-    const filaAntigaId = conversa.fila_id;
-
-    // Transferir
-    await pool.query(
-      `UPDATE conversas SET
-         fila_id = $1, fila_entrada_em = NOW(),
-         operador_id = NULL, operador_nome = NULL,
-         controlado_por = 'fila', atualizado_em = NOW()
-       WHERE id = $2`,
-      [fila_id, id]
-    );
-
-    await pool.query(
-      `INSERT INTO controle_historico
-         (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
-       VALUES ($1, $2, 'transferencia_fila', $3, 'fila', $4, $5, $6)`,
-      [id, empresaId, conversa.controlado_por, user.id, user.nome, motivo || 'Transferido para outra fila']
-    );
-
-    // WebSocket: notificar fila antiga e nova
-    if (filaAntigaId) {
-      emitConversaAtualizada(id, filaAntigaId, { id, removida: true });
-      const statsAntiga = await calcularStatsFila(filaAntigaId);
-      emitFilaStats(filaAntigaId, statsAntiga);
-    }
-    emitNovaConversaNaFila(fila_id, { id, contato_whatsapp: conversa.contato_whatsapp, contato_nome: conversa.contato_nome });
-    const statsNova = await calcularStatsFila(fila_id);
-    emitFilaStats(fila_id, statsNova);
-
-    logger.info(`Conversa ${id} transferida para fila ${filaResult.rows[0].nome}`);
-    reply.send({ success: true, data: { message: `Transferida para ${filaResult.rows[0].nome}` } });
   });
 
   // ============================================
