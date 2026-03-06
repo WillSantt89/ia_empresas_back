@@ -1,6 +1,7 @@
 import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
 import { checkPermission } from '../middleware/permission.js';
+import { emitNovaConversaNaFila } from '../services/websocket.js';
 
 const createLogger = logger.child({ module: 'contatos-routes' });
 
@@ -278,7 +279,25 @@ const contatosRoutes = async (fastify) => {
     }
   }, async (request, reply) => {
     const { empresa_id } = request.user;
-    const { whatsapp, nome, email, observacoes, dados_json } = request.body;
+    let { whatsapp, nome, email, observacoes, dados_json } = request.body;
+
+    // Normalizar: remover caracteres não numéricos
+    whatsapp = whatsapp.replace(/\D/g, '');
+
+    // Forçar prefixo 55
+    if (!whatsapp.startsWith('55')) {
+      return reply.code(400).send({
+        success: false,
+        error: { code: 'INVALID_PHONE', message: 'O número deve começar com 55 (DDI Brasil)' }
+      });
+    }
+
+    if (whatsapp.length < 12 || whatsapp.length > 13) {
+      return reply.code(400).send({
+        success: false,
+        error: { code: 'INVALID_PHONE', message: 'Número inválido. Formato esperado: 55 + DDD + número (12-13 dígitos)' }
+      });
+    }
 
     try {
       // Verificar duplicidade
@@ -313,6 +332,137 @@ const contatosRoutes = async (fastify) => {
       };
     } catch (error) {
       createLogger.error('Failed to create contato', { empresa_id, error: error.message });
+      throw error;
+    }
+  });
+
+  /**
+   * POST /api/contatos/:id/iniciar-conversa
+   * Iniciar conversa a partir de um contato (retorna existente ativa ou cria nova)
+   */
+  fastify.post('/:id/iniciar-conversa', {
+    preHandler: [fastify.authenticate],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id, id: userId, nome: userName, role } = request.user;
+    const { id } = request.params;
+
+    try {
+      // 1. Buscar contato
+      const contatoResult = await pool.query(
+        'SELECT * FROM contatos WHERE id = $1 AND empresa_id = $2 AND ativo = true',
+        [id, empresa_id]
+      );
+      if (contatoResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'CONTATO_NOT_FOUND', message: 'Contato não encontrado' }
+        });
+      }
+      const contato = contatoResult.rows[0];
+
+      // 2. Verificar se já existe conversa ativa para este contato
+      const conversaExistente = await pool.query(
+        `SELECT id FROM conversas WHERE contato_id = $1 AND empresa_id = $2 AND status = 'ativo'
+         ORDER BY criado_em DESC LIMIT 1`,
+        [id, empresa_id]
+      );
+      if (conversaExistente.rows.length > 0) {
+        return {
+          success: true,
+          data: {
+            conversa_id: conversaExistente.rows[0].id,
+            existente: true,
+            message: 'Conversa ativa já existe para este contato'
+          }
+        };
+      }
+
+      // 3. Buscar fila default
+      const filaResult = await pool.query(
+        `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`,
+        [empresa_id]
+      );
+      const defaultFilaId = filaResult.rows[0]?.id || null;
+
+      // 4. Gerar ticket
+      const { rows: [{ get_next_ticket_number: numero_ticket }] } = await pool.query(
+        `SELECT get_next_ticket_number($1)`, [empresa_id]
+      );
+
+      // 5. Criar conversa — controlado_por 'humano' atribuída ao operador que iniciou
+      const insertResult = await pool.query(`
+        INSERT INTO conversas (
+          empresa_id, contato_whatsapp, contato_nome, contato_id,
+          status, controlado_por, operador_id, operador_nome,
+          fila_id, fila_entrada_em, numero_ticket,
+          dados_json
+        )
+        VALUES ($1, $2, $3, $4, 'ativo', 'humano', $5, $6, $7, NOW(), $8, $9)
+        RETURNING id
+      `, [
+        empresa_id,
+        contato.whatsapp,
+        contato.nome || null,
+        id,
+        userId,
+        userName,
+        defaultFilaId,
+        numero_ticket,
+        JSON.stringify({ source: 'manual', initiated_by: userName })
+      ]);
+
+      const conversaId = insertResult.rows[0].id;
+
+      // 6. Registrar no controle_historico
+      await pool.query(`
+        INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, usuario_id, usuario_nome)
+        VALUES ($1, $2, 'criada_manual', NULL, 'humano', $3, $4)
+      `, [conversaId, empresa_id, userId, userName]);
+
+      // 7. Emitir WebSocket
+      if (defaultFilaId) {
+        emitNovaConversaNaFila(defaultFilaId, {
+          id: conversaId,
+          contato_whatsapp: contato.whatsapp,
+          contato_nome: contato.nome,
+          status: 'ativo',
+          controlado_por: 'humano',
+          operador_id: userId,
+          operador_nome: userName,
+          fila_id: defaultFilaId,
+          numero_ticket,
+        });
+      }
+
+      createLogger.info('Conversa initiated from contato', {
+        empresa_id,
+        contato_id: id,
+        conversa_id: conversaId,
+        by: userName,
+      });
+
+      return {
+        success: true,
+        data: {
+          conversa_id: conversaId,
+          existente: false,
+          message: 'Conversa criada com sucesso'
+        }
+      };
+    } catch (error) {
+      createLogger.error('Failed to initiate conversa from contato', {
+        empresa_id,
+        contato_id: id,
+        error: error.message,
+      });
       throw error;
     }
   });
