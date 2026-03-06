@@ -137,6 +137,7 @@ const whatsappWebhookRoutes = async (fastify) => {
             graphToken,
             empresa_id,
             startTime,
+            wnId: whatsappNumber.wn_id,
           });
         } catch (err) {
           createLogger.error('Failed to process incoming message', {
@@ -160,7 +161,7 @@ const whatsappWebhookRoutes = async (fastify) => {
    * Process a single incoming WhatsApp message
    * Reuses the same logic as n8n.js webhook
    */
-  async function processIncomingMessage({ message, contacts, phoneNumberId, graphToken, empresa_id, startTime }) {
+  async function processIncomingMessage({ message, contacts, phoneNumberId, graphToken, empresa_id, startTime, wnId }) {
     const phone = message.from;
     const contactName = contacts[0]?.profile?.name || null;
     const messageId = message.id;
@@ -320,7 +321,7 @@ const whatsappWebhookRoutes = async (fastify) => {
         defaultFilaId,
         JSON.stringify({ name: contactName || null, source: 'whatsapp_direct' }),
         numero_ticket,
-        whatsappNumber.wn_id
+        wnId
       ]);
 
       conversa_id = insertConversa.rows[0].id;
