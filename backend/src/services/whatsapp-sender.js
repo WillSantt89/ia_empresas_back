@@ -150,11 +150,17 @@ export async function sendTemplateMessage(phoneNumberId, token, recipientPhone, 
 export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/media`;
 
+  // Meta API doesn't accept audio/webm — remap to audio/ogg (Opus codec is compatible)
+  const uploadMimeType = mimeType === 'audio/webm' || mimeType.startsWith('audio/webm;')
+    ? 'audio/ogg; codecs=opus'
+    : mimeType;
+  const uploadFileName = uploadMimeType.startsWith('audio/ogg') ? 'audio.ogg' : 'file';
+
   try {
     const formData = new FormData();
     formData.append('messaging_product', 'whatsapp');
-    formData.append('type', mimeType);
-    formData.append('file', new Blob([buffer], { type: mimeType }), 'file');
+    formData.append('type', uploadMimeType);
+    formData.append('file', new Blob([buffer], { type: uploadMimeType }), uploadFileName);
 
     const response = await fetch(url, {
       method: 'POST',
@@ -169,7 +175,7 @@ export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) 
 
     if (!response.ok) {
       const errorMsg = data?.error?.message || `HTTP ${response.status}`;
-      createLogger.error('Meta API error uploading media', { status: response.status, error: errorMsg });
+      createLogger.error(`Meta API error uploading media: ${errorMsg} (HTTP ${response.status}, mime=${uploadMimeType})`);
       return { media_id: null, success: false, error: errorMsg };
     }
 
