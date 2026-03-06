@@ -354,7 +354,7 @@ const contatosRoutes = async (fastify) => {
       body: {
         type: 'object',
         properties: {
-          whatsapp_number_id: { type: 'string', format: 'uuid' },
+          whatsapp_number_id: { type: 'string', format: 'uuid', nullable: true },
           template_name: { type: 'string' },
           language_code: { type: 'string' }
         }
