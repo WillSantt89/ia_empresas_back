@@ -1,4 +1,9 @@
 import { logger } from '../config/logger.js';
+import { execFile } from 'child_process';
+import { writeFile, readFile, unlink } from 'fs/promises';
+import { randomUUID } from 'crypto';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 /**
  * WhatsApp Sender Service
@@ -147,20 +152,68 @@ export async function sendTemplateMessage(phoneNumberId, token, recipientPhone, 
  * @param {string} mimeType
  * @returns {Promise<{media_id: string|null, success: boolean, error?: string}>}
  */
+/**
+ * Convert audio buffer from webm to ogg/opus using ffmpeg
+ */
+async function convertWebmToOgg(buffer) {
+  const id = randomUUID();
+  const inputPath = join(tmpdir(), `${id}.webm`);
+  const outputPath = join(tmpdir(), `${id}.ogg`);
+
+  try {
+    await writeFile(inputPath, buffer);
+
+    await new Promise((resolve, reject) => {
+      execFile('ffmpeg', [
+        '-i', inputPath,
+        '-c:a', 'libopus',
+        '-b:a', '48k',
+        '-ar', '48000',
+        '-ac', '1',
+        '-y', outputPath,
+      ], { timeout: 15000 }, (error, stdout, stderr) => {
+        if (error) reject(new Error(`ffmpeg error: ${error.message}`));
+        else resolve(stdout);
+      });
+    });
+
+    const oggBuffer = await readFile(outputPath);
+    return oggBuffer;
+  } finally {
+    unlink(inputPath).catch(() => {});
+    unlink(outputPath).catch(() => {});
+  }
+}
+
 export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/media`;
 
-  // Meta API doesn't accept audio/webm — remap to audio/ogg (Opus codec is compatible)
-  const uploadMimeType = mimeType === 'audio/webm' || mimeType.startsWith('audio/webm;')
-    ? 'audio/ogg; codecs=opus'
-    : mimeType;
-  const uploadFileName = uploadMimeType.startsWith('audio/ogg') ? 'audio.ogg' : 'file';
+  // Meta API doesn't accept audio/webm — convert to real ogg/opus via ffmpeg
+  let uploadBuffer = buffer;
+  let uploadMimeType = mimeType;
+  let uploadFileName = 'file';
+
+  if (mimeType === 'audio/webm' || mimeType.startsWith('audio/webm;')) {
+    try {
+      uploadBuffer = await convertWebmToOgg(buffer);
+      uploadMimeType = 'audio/ogg; codecs=opus';
+      uploadFileName = 'audio.ogg';
+      createLogger.info('Audio converted from webm to ogg/opus');
+    } catch (err) {
+      createLogger.error(`Failed to convert webm to ogg: ${err.message}`);
+      // Fallback: try sending as-is with ogg mime type
+      uploadMimeType = 'audio/ogg; codecs=opus';
+      uploadFileName = 'audio.ogg';
+    }
+  } else if (mimeType.startsWith('audio/ogg')) {
+    uploadFileName = 'audio.ogg';
+  }
 
   try {
     const formData = new FormData();
     formData.append('messaging_product', 'whatsapp');
     formData.append('type', uploadMimeType);
-    formData.append('file', new Blob([buffer], { type: uploadMimeType }), uploadFileName);
+    formData.append('file', new Blob([uploadBuffer], { type: uploadMimeType }), uploadFileName);
 
     const response = await fetch(url, {
       method: 'POST',
