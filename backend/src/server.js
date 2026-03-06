@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import sensible from '@fastify/sensible';
+import multipart from '@fastify/multipart';
 import { config } from './config/env.js';
 import { logger } from './config/logger.js';
 import { testConnection, closePool } from './config/database.js';
@@ -90,6 +91,14 @@ async function registerPlugins() {
 
   // Rate Limiting
   await fastify.register(rateLimit, globalRateLimit);
+
+  // Multipart (file uploads)
+  await fastify.register(multipart, {
+    limits: {
+      fileSize: 25 * 1024 * 1024, // 25MB
+      files: 1,
+    },
+  });
 
   // Error handling
   await fastify.register(sensible);

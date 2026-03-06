@@ -140,6 +140,105 @@ export async function sendTemplateMessage(phoneNumberId, token, recipientPhone, 
 }
 
 /**
+ * Upload media to Meta and get a media_id
+ * @param {string} phoneNumberId
+ * @param {string} token
+ * @param {Buffer} buffer - File data
+ * @param {string} mimeType
+ * @returns {Promise<{media_id: string|null, success: boolean, error?: string}>}
+ */
+export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) {
+  const url = `${GRAPH_API_BASE}/${phoneNumberId}/media`;
+
+  try {
+    const formData = new FormData();
+    formData.append('messaging_product', 'whatsapp');
+    formData.append('type', mimeType);
+    formData.append('file', new Blob([buffer], { type: mimeType }), 'file');
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+      body: formData,
+      signal: AbortSignal.timeout(30000),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      const errorMsg = data?.error?.message || `HTTP ${response.status}`;
+      createLogger.error('Meta API error uploading media', { status: response.status, error: errorMsg });
+      return { media_id: null, success: false, error: errorMsg };
+    }
+
+    createLogger.info('Media uploaded to Meta', { media_id: data.id, mimeType });
+    return { media_id: data.id, success: true };
+  } catch (error) {
+    createLogger.error('Failed to upload media to Meta', { error: error.message });
+    return { media_id: null, success: false, error: error.message };
+  }
+}
+
+/**
+ * Send a media message via WhatsApp
+ * @param {string} phoneNumberId
+ * @param {string} token
+ * @param {string} recipientPhone
+ * @param {string} mediaType - image, audio, video, document
+ * @param {string} mediaId - Meta media_id (from upload)
+ * @param {string} [caption] - Optional caption
+ * @param {string} [fileName] - Optional filename (documents)
+ * @returns {Promise<{wamid: string|null, success: boolean, error?: string}>}
+ */
+export async function sendMediaMessage(phoneNumberId, token, recipientPhone, mediaType, mediaId, caption, fileName) {
+  const url = `${GRAPH_API_BASE}/${phoneNumberId}/messages`;
+
+  try {
+    const mediaObj = { id: mediaId };
+    if (caption && (mediaType === 'image' || mediaType === 'video' || mediaType === 'document')) {
+      mediaObj.caption = caption;
+    }
+    if (fileName && mediaType === 'document') {
+      mediaObj.filename = fileName;
+    }
+
+    const body = {
+      messaging_product: 'whatsapp',
+      to: recipientPhone,
+      type: mediaType,
+      [mediaType]: mediaObj,
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      const errorMsg = data?.error?.message || `HTTP ${response.status}`;
+      createLogger.error('Meta API error sending media', { status: response.status, error: errorMsg, mediaType });
+      return { wamid: null, success: false, error: errorMsg };
+    }
+
+    const wamid = data?.messages?.[0]?.id || null;
+    createLogger.info('Media message sent via Meta API', { phoneNumberId, recipientPhone, mediaType, wamid });
+    return { wamid, success: true };
+  } catch (error) {
+    createLogger.error('Failed to send media message', { error: error.message, mediaType });
+    return { wamid: null, success: false, error: error.message };
+  }
+}
+
+/**
  * Mark a message as read
  * @param {string} phoneNumberId - WhatsApp Business phone number ID
  * @param {string} token - Graph API access token (decrypted)

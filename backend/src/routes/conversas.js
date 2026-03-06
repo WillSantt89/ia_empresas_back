@@ -2,8 +2,10 @@ import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
 import { isMembroDaFila, verificarCapacidadeOperador, calcularStatsFila } from '../services/fila-manager.js';
 import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
-import { sendTemplateMessage } from '../services/whatsapp-sender.js';
+import { sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
 import { decrypt } from '../config/encryption.js';
+import { saveMedia } from '../services/media-storage.js';
+import { addToHistory } from '../services/memory.js';
 import {
   emitConversaAtribuida, emitConversaAtualizada,
   emitNovaConversaNaFila, emitFilaStats, emitToUser,
@@ -1319,6 +1321,158 @@ export default async function conversasRoutes(fastify, opts) {
       reply.send({ success: true, data: mensagem });
     } catch (error) {
       logger.error('Erro enviando template:', error);
+      reply.code(500).send({ success: false, error: { message: error.message } });
+    }
+  });
+
+  // ============================================
+  // POST /enviar-midia — Operador envia mídia WhatsApp
+  // ============================================
+  fastify.post('/enviar-midia', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { user } = request;
+
+    const data = await request.file();
+    if (!data) {
+      return reply.code(400).send({ success: false, error: { message: 'Arquivo obrigatorio' } });
+    }
+
+    const conversaId = data.fields?.conversa_id?.value;
+    const caption = data.fields?.caption?.value || '';
+
+    if (!conversaId) {
+      return reply.code(400).send({ success: false, error: { message: 'conversa_id obrigatorio' } });
+    }
+
+    // Verificar conversa
+    const conversaResult = await pool.query(
+      `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2`,
+      [conversaId, request.empresaId]
+    );
+    if (conversaResult.rows.length === 0) {
+      return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+    }
+    const conversa = conversaResult.rows[0];
+
+    if (!conversa.contato_whatsapp) {
+      return reply.code(400).send({ success: false, error: { message: 'Conversa sem contato WhatsApp' } });
+    }
+
+    // Operador so pode enviar se for membro da fila
+    if (user.role === 'operador' && conversa.fila_id) {
+      const isMembro = await isMembroDaFila(user.id, conversa.fila_id);
+      if (!isMembro) {
+        return reply.code(403).send({ success: false, error: { message: 'Sem acesso a esta conversa' } });
+      }
+    }
+
+    // Buscar numero WhatsApp ativo
+    const whatsappResult = await pool.query(
+      `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers
+       WHERE empresa_id = $1 AND ativo = true
+       ORDER BY criado_em ASC LIMIT 1`,
+      [conversa.empresa_id]
+    );
+    if (whatsappResult.rows.length === 0) {
+      return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
+    }
+
+    const whatsappNumber = whatsappResult.rows[0];
+    const token = decrypt(whatsappNumber.token_graph_api);
+    if (!token) {
+      return reply.code(500).send({ success: false, error: { message: 'Token WhatsApp invalido' } });
+    }
+
+    try {
+      const buffer = await data.toBuffer();
+      const mimeType = data.mimetype;
+      const fileName = data.filename;
+
+      // Determinar tipo WhatsApp
+      let mediaType = 'document';
+      if (mimeType.startsWith('image/')) mediaType = 'image';
+      else if (mimeType.startsWith('audio/')) mediaType = 'audio';
+      else if (mimeType.startsWith('video/')) mediaType = 'video';
+
+      // 1. Salvar arquivo localmente
+      const saved = await saveMedia(buffer, conversa.empresa_id, mimeType, fileName);
+
+      // 2. Upload para Meta
+      const uploadResult = await uploadMediaToMeta(
+        whatsappNumber.phone_number_id, token, buffer, mimeType
+      );
+      if (!uploadResult.success) {
+        return reply.code(502).send({ success: false, error: { message: uploadResult.error } });
+      }
+
+      // 3. Salvar em mensagens_log
+      const conteudo = caption || `[${mediaType}: ${fileName}]`;
+      const msgResult = await pool.query(
+        `INSERT INTO mensagens_log
+           (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome,
+            tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, status_entrega)
+         VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, $6, $7, $8, $9, $10, 'sending')
+         RETURNING *`,
+        [conversaId, conversa.empresa_id, conteudo, user.id, user.nome,
+         mediaType, saved.relativePath, mimeType, fileName, saved.sizeBytes]
+      );
+      const mensagem = msgResult.rows[0];
+
+      // 4. Adicionar ao histórico Redis
+      const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+      try {
+        await addToHistory(conversa.empresa_id, conversationKey, 'model', conteudo);
+      } catch {}
+
+      // 5. Enviar via Meta API
+      const sendResult = await sendMediaMessage(
+        whatsappNumber.phone_number_id, token, conversa.contato_whatsapp,
+        mediaType, uploadResult.media_id, caption || undefined, fileName
+      );
+
+      if (sendResult.success) {
+        await pool.query(
+          `UPDATE mensagens_log SET status_entrega = 'sent', whatsapp_message_id = $1 WHERE id = $2`,
+          [sendResult.wamid, mensagem.id]
+        );
+        mensagem.status_entrega = 'sent';
+        mensagem.whatsapp_message_id = sendResult.wamid;
+      } else {
+        await pool.query(
+          `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
+          [sendResult.error, mensagem.id]
+        );
+        mensagem.status_entrega = 'failed';
+      }
+
+      // 6. Atualizar conversa
+      await pool.query(`UPDATE conversas SET atualizado_em = NOW() WHERE id = $1`, [conversaId]);
+
+      // 7. Emitir WebSocket
+      emitNovaMensagem(conversaId, conversa.fila_id, {
+        id: mensagem.id,
+        conversa_id: conversaId,
+        conteudo,
+        direcao: 'saida',
+        remetente_tipo: 'operador',
+        remetente_id: user.id,
+        remetente_nome: user.nome,
+        tipo_mensagem: mediaType,
+        midia_url: saved.relativePath,
+        midia_mime_type: mimeType,
+        midia_nome_arquivo: fileName,
+        status_entrega: mensagem.status_entrega,
+        criado_em: mensagem.criado_em,
+      });
+
+      reply.send({ success: true, data: mensagem });
+    } catch (error) {
+      logger.error('Erro enviando midia:', error);
       reply.code(500).send({ success: false, error: { message: error.message } });
     }
   });
