@@ -5,7 +5,6 @@ import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
 import { sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
 import { decrypt } from '../config/encryption.js';
 import { saveMedia } from '../services/media-storage.js';
-import { createTempMediaUrl } from './media.js';
 import { addToHistory } from '../services/memory.js';
 import {
   emitConversaAtribuida, emitConversaAtualizada,
@@ -1403,8 +1402,13 @@ export default async function conversasRoutes(fastify, opts) {
       // 1. Salvar arquivo localmente
       const saved = await saveMedia(buffer, conversa.empresa_id, mimeType, fileName);
 
-      // 2. Criar URL pública temporária (5 min) para envio via link
-      const tempUrl = await createTempMediaUrl(saved.relativePath, mimeType);
+      // 2. Upload para Meta e obter media_id (necessário para áudio PTT)
+      const uploadResult = await uploadMediaToMeta(
+        whatsappNumber.phone_number_id, token, buffer, mimeType
+      );
+      if (!uploadResult.success) {
+        return reply.code(502).send({ success: false, error: { message: `Falha ao enviar mídia para Meta: ${uploadResult.error}` } });
+      }
 
       // 3. Salvar em mensagens_log
       const conteudo = caption || `[${mediaType}: ${fileName}]`;
@@ -1425,10 +1429,10 @@ export default async function conversasRoutes(fastify, opts) {
         await addToHistory(conversa.empresa_id, conversationKey, 'model', conteudo);
       } catch {}
 
-      // 5. Enviar via Meta API usando link (evita label "Encaminhada")
+      // 5. Enviar via Meta API usando media_id (upload direto = áudio chega como PTT)
       const sendResult = await sendMediaMessage(
         whatsappNumber.phone_number_id, token, conversa.contato_whatsapp,
-        mediaType, tempUrl, caption || undefined, fileName
+        mediaType, uploadResult.media_id, caption || undefined, fileName
       );
 
       if (sendResult.success) {
