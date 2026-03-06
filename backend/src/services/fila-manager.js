@@ -129,7 +129,14 @@ export async function calcularStatsFilas(empresaId, filaIds = null) {
     params
   );
 
-  return result.rows;
+  return result.rows.map(r => ({
+    ...r,
+    aguardando: parseInt(r.aguardando) || 0,
+    em_atendimento: parseInt(r.em_atendimento) || 0,
+    operadores_atendendo: parseInt(r.operadores_atendendo) || 0,
+    membros_online: parseInt(r.membros_online) || 0,
+    membros_total: parseInt(r.membros_total) || 0,
+  }));
 }
 
 /**
@@ -149,7 +156,14 @@ export async function calcularStatsFila(filaId) {
     [filaId]
   );
 
-  return result.rows[0] || { aguardando: 0, em_atendimento: 0, membros_online: 0, membros_total: 0 };
+  const row = result.rows[0] || { aguardando: 0, em_atendimento: 0, membros_online: 0, membros_total: 0 };
+  return {
+    ...row,
+    aguardando: parseInt(row.aguardando) || 0,
+    em_atendimento: parseInt(row.em_atendimento) || 0,
+    membros_online: parseInt(row.membros_online) || 0,
+    membros_total: parseInt(row.membros_total) || 0,
+  };
 }
 
 /**
