@@ -648,6 +648,77 @@ export default async function conversasRoutes(fastify, opts) {
   });
 
   // ============================================
+  // POST /:id/reabrir — Reabrir conversa finalizada/timeout
+  // ============================================
+  fastify.post('/:id/reabrir', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    try {
+      const { id } = request.params;
+      const { empresaId, user } = request;
+
+      // Buscar conversa finalizada ou timeout
+      const conversaResult = await pool.query(
+        `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('finalizado', 'timeout')`,
+        [id, empresaId]
+      );
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { message: 'Conversa finalizada/timeout não encontrada' }
+        });
+      }
+
+      const conversa = conversaResult.rows[0];
+
+      // Reabrir: status=ativo, controlado_por=fila (se tem fila) ou ia
+      const novoControlador = conversa.fila_id ? 'fila' : 'ia';
+
+      await pool.query(`
+        UPDATE conversas SET
+          status = 'ativo',
+          controlado_por = $1,
+          operador_id = NULL,
+          operador_nome = NULL,
+          humano_id = NULL,
+          humano_nome = NULL,
+          snoozed_ate = NULL,
+          atualizado_em = NOW()
+        WHERE id = $2
+      `, [novoControlador, id]);
+
+      // Registrar no histórico
+      await pool.query(`
+        INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+        VALUES ($1, $2, 'reaberta', $3, $4, $5, $6, 'Reaberta via painel')
+      `, [id, empresaId, conversa.controlado_por || conversa.status, novoControlador, user.id, user.nome || user.email]);
+
+      // WebSocket
+      emitConversaAtualizada(id, conversa.fila_id, {
+        id,
+        status: 'ativo',
+        controlado_por: novoControlador,
+        operador_id: null,
+        operador_nome: null,
+      });
+      if (conversa.fila_id) {
+        const stats = await calcularStatsFila(conversa.fila_id);
+        emitFilaStats(conversa.fila_id, stats);
+      }
+
+      logger.info(`Conversa ${id} reaberta por ${user.nome || user.email}`);
+      reply.send({ success: true, data: { message: 'Conversa reaberta com sucesso' } });
+    } catch (error) {
+      logger.error('Erro ao reabrir conversa:', { error: error.message, stack: error.stack, params: request.params });
+      reply.code(500).send({ success: false, error: { message: 'Erro ao reabrir conversa', detail: error.message } });
+    }
+  });
+
+  // ============================================
   // POST /:id/atribuir — Atribuir conversa a operador
   // ============================================
   fastify.post('/:id/atribuir', {

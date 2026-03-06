@@ -305,15 +305,21 @@ const whatsappWebhookRoutes = async (fastify) => {
       );
       const defaultFilaId = filaResult.rows[0]?.id || null;
 
+      // Gerar número de ticket sequencial
+      const { rows: [{ get_next_ticket_number: numero_ticket }] } = await pool.query(
+        `SELECT get_next_ticket_number($1)`, [empresa_id]
+      );
+
       const insertConversa = await pool.query(`
-        INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json)
-        VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8)
+        INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket)
+        VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9)
         RETURNING id
       `, [
         empresa_id, phone, contactName || null, contato_id, agente_id,
         defaultFilaId ? 'fila' : 'ia',
         defaultFilaId,
-        JSON.stringify({ name: contactName || null, source: 'whatsapp_direct' })
+        JSON.stringify({ name: contactName || null, source: 'whatsapp_direct' }),
+        numero_ticket
       ]);
 
       conversa_id = insertConversa.rows[0].id;
@@ -328,6 +334,7 @@ const whatsappWebhookRoutes = async (fastify) => {
           status: 'ativo',
           controlado_por: 'fila',
           fila_id: defaultFilaId,
+          numero_ticket,
           criado_em: new Date().toISOString(),
         });
 

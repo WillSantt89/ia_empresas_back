@@ -173,6 +173,91 @@ const contatosRoutes = async (fastify) => {
   });
 
   /**
+   * GET /api/contatos/:id/conversas
+   * Histórico de conversas do contato (paginado)
+   */
+  fastify.get('/:id/conversas', {
+    preHandler: [fastify.authenticate],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      },
+      querystring: {
+        type: 'object',
+        properties: {
+          page: { type: 'integer', minimum: 1, default: 1 },
+          per_page: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
+          exclude: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id } = request.user;
+    const { id } = request.params;
+    const { page, per_page, exclude } = request.query;
+    const offset = (page - 1) * per_page;
+
+    try {
+      // Verificar se contato pertence à empresa
+      const contatoCheck = await pool.query(
+        'SELECT id FROM contatos WHERE id = $1 AND empresa_id = $2',
+        [id, empresa_id]
+      );
+      if (contatoCheck.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'CONTATO_NOT_FOUND', message: 'Contato não encontrado' }
+        });
+      }
+
+      let query = `
+        SELECT
+          c.id, c.numero_ticket, c.status, c.controlado_por,
+          c.criado_em, c.atualizado_em,
+          a.nome as agente_nome,
+          (SELECT COUNT(*) FROM mensagens_log WHERE conversa_id = c.id) as total_mensagens
+        FROM conversas c
+        LEFT JOIN agentes a ON a.id = c.agente_id
+        WHERE c.contato_id = $1 AND c.empresa_id = $2
+      `;
+      const params = [id, empresa_id];
+      let paramIndex = 3;
+
+      if (exclude) {
+        query += ` AND c.id != $${paramIndex}`;
+        params.push(exclude);
+        paramIndex++;
+      }
+
+      // Count total
+      const countResult = await pool.query(
+        `SELECT COUNT(*) as total FROM conversas WHERE contato_id = $1 AND empresa_id = $2${exclude ? ` AND id != $3` : ''}`,
+        exclude ? [id, empresa_id, exclude] : [id, empresa_id]
+      );
+      const total = parseInt(countResult.rows[0].total) || 0;
+
+      query += ` ORDER BY c.criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      params.push(per_page, offset);
+
+      const result = await pool.query(query, params);
+
+      return {
+        success: true,
+        data: {
+          conversas: result.rows,
+          pagination: { page, per_page, total, pages: Math.ceil(total / per_page) }
+        }
+      };
+    } catch (error) {
+      createLogger.error('Failed to list contato conversas', { empresa_id, contato_id: id, error: error.message });
+      throw error;
+    }
+  });
+
+  /**
    * POST /api/contatos
    * Criar contato
    */
