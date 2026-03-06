@@ -487,6 +487,72 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
     }
   });
 
+  // ============================================
+  // GET /api/whatsapp-numbers/templates — Listar templates da Meta
+  // ============================================
+  fastify.get('/templates', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+    ]
+  }, async (request, reply) => {
+    try {
+      const { empresaId } = request;
+
+      // Buscar primeiro número ativo com waba_id
+      const numberResult = await pool.query(
+        `SELECT waba_id, token_graph_api FROM whatsapp_numbers
+         WHERE empresa_id = $1 AND ativo = true AND waba_id IS NOT NULL
+         ORDER BY criado_em ASC LIMIT 1`,
+        [empresaId]
+      );
+
+      if (numberResult.rows.length === 0) {
+        return reply.code(400).send({
+          success: false,
+          error: { message: 'Nenhum número WhatsApp ativo com WABA ID configurado' }
+        });
+      }
+
+      const { waba_id, token_graph_api } = numberResult.rows[0];
+      const token = await fastify.decrypt(token_graph_api);
+
+      // Chamar Meta API para listar templates
+      const metaUrl = `https://graph.facebook.com/v21.0/${waba_id}/message_templates?fields=name,status,language,category,components&limit=100`;
+
+      const metaResponse = await fetch(metaUrl, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal: AbortSignal.timeout(15000),
+      });
+
+      const metaData = await metaResponse.json();
+
+      if (!metaResponse.ok) {
+        const errorMsg = metaData?.error?.message || `HTTP ${metaResponse.status}`;
+        logger.error('Meta API error fetching templates', { error: errorMsg, waba_id });
+        return reply.code(502).send({
+          success: false,
+          error: { message: `Erro ao buscar templates: ${errorMsg}` }
+        });
+      }
+
+      // Filtrar apenas templates aprovados
+      const templates = (metaData.data || [])
+        .filter(t => t.status === 'APPROVED')
+        .map(t => ({
+          name: t.name,
+          language: t.language,
+          category: t.category,
+          components: t.components || [],
+        }));
+
+      return { success: true, data: templates };
+    } catch (error) {
+      logger.error('Error fetching WhatsApp templates:', error);
+      throw error;
+    }
+  });
+
   // Testar/verificar conexão do número via Meta Graph API
   fastify.post('/:id/testar', {
     preHandler: [

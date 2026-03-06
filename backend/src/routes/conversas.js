@@ -2,9 +2,12 @@ import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
 import { isMembroDaFila, verificarCapacidadeOperador, calcularStatsFila } from '../services/fila-manager.js';
 import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
+import { sendTemplateMessage } from '../services/whatsapp-sender.js';
+import { decrypt } from '../config/encryption.js';
 import {
   emitConversaAtribuida, emitConversaAtualizada,
   emitNovaConversaNaFila, emitFilaStats, emitToUser,
+  emitNovaMensagem,
 } from '../services/websocket.js';
 
 
@@ -1190,6 +1193,132 @@ export default async function conversasRoutes(fastify, opts) {
       reply.send({ success: true, data: mensagem });
     } catch (error) {
       logger.error('Erro enviando mensagem:', error);
+      reply.code(500).send({ success: false, error: { message: error.message } });
+    }
+  });
+
+  // ============================================
+  // POST /enviar-template — Operador envia template WhatsApp
+  // ============================================
+  fastify.post('/enviar-template', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { user } = request;
+    const { conversa_id, template_name, language_code = 'pt_BR', components = [] } = request.body;
+
+    if (!conversa_id || !template_name) {
+      return reply.code(400).send({ success: false, error: { message: 'conversa_id e template_name sao obrigatorios' } });
+    }
+
+    // Verificar conversa
+    const conversaResult = await pool.query(
+      `SELECT c.*, ct.nome as contato_nome FROM conversas c
+       LEFT JOIN contatos ct ON ct.empresa_id = c.empresa_id AND ct.whatsapp = c.contato_whatsapp
+       WHERE c.id = $1 AND c.empresa_id = $2`,
+      [conversa_id, request.empresaId]
+    );
+    if (conversaResult.rows.length === 0) {
+      return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+    }
+
+    const conversa = conversaResult.rows[0];
+
+    if (!conversa.contato_whatsapp) {
+      return reply.code(400).send({ success: false, error: { message: 'Conversa sem contato WhatsApp' } });
+    }
+
+    // Operador so pode enviar se for membro da fila
+    if (user.role === 'operador' && conversa.fila_id) {
+      const isMembro = await isMembroDaFila(user.id, conversa.fila_id);
+      if (!isMembro) {
+        return reply.code(403).send({ success: false, error: { message: 'Sem acesso a esta conversa' } });
+      }
+    }
+
+    // Buscar numero WhatsApp ativo
+    const whatsappResult = await pool.query(
+      `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers
+       WHERE empresa_id = $1 AND ativo = true
+       ORDER BY criado_em ASC LIMIT 1`,
+      [conversa.empresa_id]
+    );
+    if (whatsappResult.rows.length === 0) {
+      return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
+    }
+
+    const whatsappNumber = whatsappResult.rows[0];
+    const token = decrypt(whatsappNumber.token_graph_api);
+    if (!token) {
+      return reply.code(500).send({ success: false, error: { message: 'Token WhatsApp invalido' } });
+    }
+
+    try {
+      // Montar texto do template para salvar no log
+      const templateLabel = `[Template: ${template_name}]`;
+
+      // Salvar em mensagens_log
+      const msgResult = await pool.query(
+        `INSERT INTO mensagens_log
+           (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega)
+         VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending')
+         RETURNING *`,
+        [conversa_id, conversa.empresa_id, templateLabel, user.id, user.nome]
+      );
+
+      const mensagem = msgResult.rows[0];
+
+      // Enviar via Meta API
+      const result = await sendTemplateMessage(
+        whatsappNumber.phone_number_id,
+        token,
+        conversa.contato_whatsapp,
+        template_name,
+        language_code,
+        components
+      );
+
+      if (result.success) {
+        await pool.query(
+          `UPDATE mensagens_log SET status_entrega = 'sent', whatsapp_message_id = $1 WHERE id = $2`,
+          [result.wamid, mensagem.id]
+        );
+        mensagem.status_entrega = 'sent';
+        mensagem.whatsapp_message_id = result.wamid;
+      } else {
+        await pool.query(
+          `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
+          [result.error, mensagem.id]
+        );
+        mensagem.status_entrega = 'failed';
+        return reply.code(502).send({ success: false, error: { message: result.error } });
+      }
+
+      // Atualizar conversa
+      await pool.query(
+        `UPDATE conversas SET atualizado_em = NOW() WHERE id = $1`,
+        [conversa_id]
+      );
+
+      // Emitir WebSocket
+      emitNovaMensagem(conversa_id, conversa.fila_id, {
+        id: mensagem.id,
+        conversa_id,
+        conteudo: templateLabel,
+        direcao: 'saida',
+        remetente_tipo: 'operador',
+        remetente_id: user.id,
+        remetente_nome: user.nome,
+        status_entrega: mensagem.status_entrega,
+        criado_em: mensagem.criado_em,
+      });
+
+      reply.send({ success: true, data: mensagem });
+    } catch (error) {
+      logger.error('Erro enviando template:', error);
       reply.code(500).send({ success: false, error: { message: error.message } });
     }
   });
