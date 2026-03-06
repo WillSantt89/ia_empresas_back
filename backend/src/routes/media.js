@@ -1,6 +1,8 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { logger } from '../config/logger.js';
+import { redis } from '../config/redis.js';
 import { getMediaAbsolutePath, getMediaStream } from '../services/media-storage.js';
 
 const createLogger = logger.child({ module: 'media-routes' });
@@ -124,6 +126,61 @@ export default async function mediaRoutes(fastify) {
       return reply.code(500).send({ error: 'Internal error' });
     }
   });
+
+  /**
+   * GET /api/media/temp/:key
+   * Serve media via temporary public key (no auth required).
+   * Used for WhatsApp API link-based sending to avoid "forwarded" label.
+   * Keys expire in 5 minutes via Redis TTL.
+   */
+  fastify.get('/temp/:key', {
+    config: { rawBody: false },
+  }, async (request, reply) => {
+    try {
+      const { key } = request.params;
+
+      const data = await redis.get(`media_temp:${key}`);
+      if (!data) {
+        return reply.code(404).send({ error: 'Link expired or not found' });
+      }
+
+      const { relativePath, mimeType } = JSON.parse(data);
+      const absolutePath = getMediaAbsolutePath(relativePath);
+
+      try {
+        await fs.access(absolutePath);
+      } catch {
+        return reply.code(404).send({ error: 'File not found' });
+      }
+
+      const stat = await fs.stat(absolutePath);
+
+      reply.header('Content-Type', mimeType || 'application/octet-stream');
+      reply.header('Content-Length', stat.size);
+      reply.header('Cache-Control', 'no-store');
+      reply.header('Access-Control-Allow-Origin', '*');
+
+      const stream = getMediaStream(relativePath);
+      return reply.send(stream);
+    } catch (error) {
+      createLogger.error('Error serving temp media', { error: error.message });
+      return reply.code(500).send({ error: 'Internal error' });
+    }
+  });
+}
+
+/**
+ * Create a temporary public URL for a media file.
+ * Stores a Redis key with 5 min TTL. Returns the full URL.
+ */
+export async function createTempMediaUrl(relativePath, mimeType) {
+  const key = randomUUID();
+  await redis.setex(`media_temp:${key}`, 300, JSON.stringify({ relativePath, mimeType }));
+
+  // Build public URL — EasyPanel exposes the service via HTTPS
+  const baseUrl = process.env.PUBLIC_URL
+    || 'https://wschat-ia-empresas-back.fldxjw.easypanel.host';
+  return `${baseUrl}/api/media/temp/${key}`;
 }
 
 function getContentType(ext) {

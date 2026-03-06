@@ -251,11 +251,13 @@ export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) 
  * @param {string} [fileName] - Optional filename (documents)
  * @returns {Promise<{wamid: string|null, success: boolean, error?: string}>}
  */
-export async function sendMediaMessage(phoneNumberId, token, recipientPhone, mediaType, mediaId, caption, fileName) {
+export async function sendMediaMessage(phoneNumberId, token, recipientPhone, mediaType, mediaIdOrLink, caption, fileName) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/messages`;
 
   try {
-    const mediaObj = { id: mediaId };
+    // Support both media_id and link-based sending
+    const isLink = typeof mediaIdOrLink === 'string' && mediaIdOrLink.startsWith('http');
+    const mediaObj = isLink ? { link: mediaIdOrLink } : { id: mediaIdOrLink };
     if (caption && (mediaType === 'image' || mediaType === 'video' || mediaType === 'document')) {
       mediaObj.caption = caption;
     }
