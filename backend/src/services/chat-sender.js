@@ -28,13 +28,12 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
     throw new Error('Conversa sem contato WhatsApp');
   }
 
-  // 2. Buscar numero WhatsApp ativo para a empresa
-  const whatsappResult = await pool.query(
-    `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers
-     WHERE empresa_id = $1 AND ativo = true
-     ORDER BY criado_em ASC LIMIT 1`,
-    [conversa.empresa_id]
-  );
+  // 2. Buscar numero WhatsApp — da conversa ou fallback FIFO
+  const wnQuery = conversa.whatsapp_number_id
+    ? `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+    : `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+  const wnParam = conversa.whatsapp_number_id || conversa.empresa_id;
+  const whatsappResult = await pool.query(wnQuery, [wnParam]);
 
   if (whatsappResult.rows.length === 0) {
     throw new Error('Nenhum numero WhatsApp ativo encontrado');

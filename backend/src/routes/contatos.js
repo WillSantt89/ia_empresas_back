@@ -1,7 +1,9 @@
 import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
+import { decrypt } from '../config/encryption.js';
 import { checkPermission } from '../middleware/permission.js';
-import { emitNovaConversaNaFila } from '../services/websocket.js';
+import { emitNovaConversaNaFila, emitNovaMensagem } from '../services/websocket.js';
+import { sendTemplateMessage } from '../services/whatsapp-sender.js';
 
 const createLogger = logger.child({ module: 'contatos-routes' });
 
@@ -348,11 +350,20 @@ const contatosRoutes = async (fastify) => {
         properties: {
           id: { type: 'string', format: 'uuid' }
         }
+      },
+      body: {
+        type: 'object',
+        properties: {
+          whatsapp_number_id: { type: 'string', format: 'uuid' },
+          template_name: { type: 'string' },
+          language_code: { type: 'string' }
+        }
       }
     }
   }, async (request, reply) => {
     const { empresa_id, id: userId, nome: userName, role } = request.user;
     const { id } = request.params;
+    const { whatsapp_number_id, template_name, language_code = 'pt_BR' } = request.body || {};
 
     try {
       // 1. Buscar contato
@@ -385,6 +396,22 @@ const contatosRoutes = async (fastify) => {
         };
       }
 
+      // 2b. Validar whatsapp_number_id se fornecido
+      let validatedWnId = null;
+      if (whatsapp_number_id) {
+        const wnCheck = await pool.query(
+          `SELECT id FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+          [whatsapp_number_id, empresa_id]
+        );
+        if (wnCheck.rows.length === 0) {
+          return reply.code(400).send({
+            success: false,
+            error: { message: 'Número WhatsApp não encontrado ou inativo' }
+          });
+        }
+        validatedWnId = whatsapp_number_id;
+      }
+
       // 3. Buscar fila default
       const filaResult = await pool.query(
         `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`,
@@ -403,9 +430,9 @@ const contatosRoutes = async (fastify) => {
           empresa_id, contato_whatsapp, contato_nome, contato_id,
           status, controlado_por, operador_id, operador_nome,
           fila_id, fila_entrada_em, numero_ticket,
-          dados_json
+          dados_json, whatsapp_number_id
         )
-        VALUES ($1, $2, $3, $4, 'ativo', 'humano', $5, $6, $7, NOW(), $8, $9)
+        VALUES ($1, $2, $3, $4, 'ativo', 'humano', $5, $6, $7, NOW(), $8, $9, $10)
         RETURNING id
       `, [
         empresa_id,
@@ -416,7 +443,8 @@ const contatosRoutes = async (fastify) => {
         userName,
         defaultFilaId,
         numero_ticket,
-        JSON.stringify({ source: 'manual', initiated_by: userName })
+        JSON.stringify({ source: 'manual', initiated_by: userName }),
+        validatedWnId
       ]);
 
       const conversaId = insertResult.rows[0].id;
@@ -427,7 +455,65 @@ const contatosRoutes = async (fastify) => {
         VALUES ($1, $2, 'criada_manual', NULL, 'humano', $3, $4)
       `, [conversaId, empresa_id, userId, userName]);
 
-      // 7. Emitir WebSocket
+      // 7. Se template_name fornecido, enviar template via WhatsApp
+      let templateEnviado = false;
+      if (template_name && validatedWnId) {
+        const wnResult = await pool.query(
+          `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1`,
+          [validatedWnId]
+        );
+        if (wnResult.rows.length > 0) {
+          const wn = wnResult.rows[0];
+          const token = decrypt(wn.token_graph_api);
+          if (token) {
+            try {
+              const templateLabel = `[Template: ${template_name}]`;
+              const msgResult = await pool.query(
+                `INSERT INTO mensagens_log
+                   (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega)
+                 VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending')
+                 RETURNING *`,
+                [conversaId, empresa_id, templateLabel, userId, userName]
+              );
+              const mensagem = msgResult.rows[0];
+
+              const result = await sendTemplateMessage(
+                wn.phone_number_id, token, contato.whatsapp, template_name, language_code, []
+              );
+
+              if (result.success) {
+                await pool.query(
+                  `UPDATE mensagens_log SET status_entrega = 'sent', whatsapp_message_id = $1 WHERE id = $2`,
+                  [result.wamid, mensagem.id]
+                );
+                mensagem.status_entrega = 'sent';
+                templateEnviado = true;
+              } else {
+                await pool.query(
+                  `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
+                  [result.error, mensagem.id]
+                );
+              }
+
+              emitNovaMensagem(conversaId, defaultFilaId, {
+                id: mensagem.id,
+                conversa_id: conversaId,
+                conteudo: templateLabel,
+                direcao: 'saida',
+                remetente_tipo: 'operador',
+                remetente_id: userId,
+                remetente_nome: userName,
+                status_entrega: mensagem.status_entrega,
+                criado_em: mensagem.criado_em,
+              });
+            } catch (err) {
+              createLogger.error('Erro enviando template ao iniciar conversa', { error: err.message });
+            }
+          }
+        }
+      }
+
+      // 8. Emitir WebSocket
       if (defaultFilaId) {
         emitNovaConversaNaFila(defaultFilaId, {
           id: conversaId,
@@ -447,6 +533,7 @@ const contatosRoutes = async (fastify) => {
         contato_id: id,
         conversa_id: conversaId,
         by: userName,
+        template: template_name || null,
       });
 
       return {
@@ -454,6 +541,7 @@ const contatosRoutes = async (fastify) => {
         data: {
           conversa_id: conversaId,
           existente: false,
+          template_enviado: templateEnviado,
           message: 'Conversa criada com sucesso'
         }
       };

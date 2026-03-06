@@ -498,14 +498,21 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
   }, async (request, reply) => {
     try {
       const { empresaId } = request;
+      const { whatsapp_number_id } = request.query || {};
 
-      // Buscar primeiro número ativo com waba_id
-      const numberResult = await pool.query(
-        `SELECT waba_id, token_graph_api FROM whatsapp_numbers
-         WHERE empresa_id = $1 AND ativo = true AND waba_id IS NOT NULL
-         ORDER BY criado_em ASC LIMIT 1`,
-        [empresaId]
-      );
+      // Buscar número por ID específico ou fallback FIFO
+      const numberResult = whatsapp_number_id
+        ? await pool.query(
+            `SELECT waba_id, token_graph_api FROM whatsapp_numbers
+             WHERE id = $1 AND empresa_id = $2 AND ativo = true AND waba_id IS NOT NULL`,
+            [whatsapp_number_id, empresaId]
+          )
+        : await pool.query(
+            `SELECT waba_id, token_graph_api FROM whatsapp_numbers
+             WHERE empresa_id = $1 AND ativo = true AND waba_id IS NOT NULL
+             ORDER BY criado_em ASC LIMIT 1`,
+            [empresaId]
+          );
 
       if (numberResult.rows.length === 0) {
         return reply.code(400).send({

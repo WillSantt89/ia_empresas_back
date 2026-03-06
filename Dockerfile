@@ -18,6 +18,8 @@ COPY --from=builder /build/package.json ./
 COPY --from=builder /build/src ./src
 COPY --from=builder /build/migrations ./migrations
 COPY --from=builder /build/scripts ./scripts
+# Create uploads directory for media storage
+RUN mkdir -p /app/uploads
 RUN chown -R nodejs:nodejs /app
 USER nodejs
 EXPOSE 3000

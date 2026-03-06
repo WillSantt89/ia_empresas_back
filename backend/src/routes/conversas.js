@@ -170,6 +170,8 @@ export default async function conversasRoutes(fastify, opts) {
           u.nome as humano_nome_atual,
           u.email as humano_email,
           wn.numero_formatado as numero_whatsapp,
+          wn.nome_exibicao as conexao_nome,
+          wn.numero_formatado as conexao_numero,
           ct.id as contato_id_ref,
           ct.email as contato_email,
           ct.observacoes as contato_observacoes,
@@ -179,7 +181,7 @@ export default async function conversasRoutes(fastify, opts) {
         LEFT JOIN agentes a ON a.id = c.agente_id
         LEFT JOIN agentes ai ON ai.id = c.agente_inicial_id
         LEFT JOIN usuarios u ON u.id = c.humano_id
-        LEFT JOIN whatsapp_numbers wn ON wn.inbox_id = i.id AND wn.ativo = true
+        LEFT JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
         LEFT JOIN contatos ct ON ct.id = c.contato_id
         JOIN empresas e ON e.id = c.empresa_id
         WHERE c.id = $1 AND c.empresa_id = $2
@@ -1241,13 +1243,12 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
 
-    // Buscar numero WhatsApp ativo
-    const whatsappResult = await pool.query(
-      `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers
-       WHERE empresa_id = $1 AND ativo = true
-       ORDER BY criado_em ASC LIMIT 1`,
-      [conversa.empresa_id]
-    );
+    // Buscar numero WhatsApp — da conversa ou fallback FIFO
+    const wnQuery = conversa.whatsapp_number_id
+      ? `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+      : `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+    const wnParam = conversa.whatsapp_number_id || conversa.empresa_id;
+    const whatsappResult = await pool.query(wnQuery, [wnParam]);
     if (whatsappResult.rows.length === 0) {
       return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
     }
@@ -1371,13 +1372,12 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
 
-    // Buscar numero WhatsApp ativo
-    const whatsappResult = await pool.query(
-      `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers
-       WHERE empresa_id = $1 AND ativo = true
-       ORDER BY criado_em ASC LIMIT 1`,
-      [conversa.empresa_id]
-    );
+    // Buscar numero WhatsApp — da conversa ou fallback FIFO
+    const wnQuery = conversa.whatsapp_number_id
+      ? `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+      : `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+    const wnParam = conversa.whatsapp_number_id || conversa.empresa_id;
+    const whatsappResult = await pool.query(wnQuery, [wnParam]);
     if (whatsappResult.rows.length === 0) {
       return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
     }

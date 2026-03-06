@@ -468,11 +468,14 @@ export default async function filasRoutes(fastify) {
     const result = await pool.query(
       `SELECT c.*,
               a.nome as agente_nome,
+              wn.nome_exibicao as conexao_nome,
+              wn.numero_formatado as conexao_numero,
               lm.total_mensagens,
               lm.ultima_mensagem,
               lm.ultima_mensagem_em
        FROM conversas c
        LEFT JOIN agentes a ON c.agente_id = a.id
+       LEFT JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
        LEFT JOIN LATERAL (
          SELECT
            COUNT(*) as total_mensagens,
