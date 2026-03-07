@@ -1180,6 +1180,17 @@ export default async function conversasRoutes(fastify, opts) {
 
     const conversa = conversaResult.rows[0];
 
+    // Validar janela 24h do WhatsApp
+    if (conversa.ultima_msg_entrada_em) {
+      const diffMs = Date.now() - new Date(conversa.ultima_msg_entrada_em).getTime();
+      if (diffMs > 24 * 60 * 60 * 1000) {
+        return reply.code(403).send({
+          success: false,
+          error: { code: 'WINDOW_EXPIRED', message: 'Janela de 24h expirada. Envie um template para reabrir.' }
+        });
+      }
+    }
+
     // Operador so pode enviar se for membro da fila
     if (user.role === 'operador' && conversa.fila_id) {
       const isMembro = await isMembroDaFila(user.id, conversa.fila_id);
@@ -1362,6 +1373,17 @@ export default async function conversasRoutes(fastify, opts) {
 
     if (!conversa.contato_whatsapp) {
       return reply.code(400).send({ success: false, error: { message: 'Conversa sem contato WhatsApp' } });
+    }
+
+    // Validar janela 24h do WhatsApp
+    if (conversa.ultima_msg_entrada_em) {
+      const diffMs = Date.now() - new Date(conversa.ultima_msg_entrada_em).getTime();
+      if (diffMs > 24 * 60 * 60 * 1000) {
+        return reply.code(403).send({
+          success: false,
+          error: { code: 'WINDOW_EXPIRED', message: 'Janela de 24h expirada. Envie um template para reabrir.' }
+        });
+      }
     }
 
     // Operador so pode enviar se for membro da fila
