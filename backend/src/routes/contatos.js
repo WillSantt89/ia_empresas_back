@@ -550,8 +550,12 @@ const contatosRoutes = async (fastify) => {
         empresa_id,
         contato_id: id,
         error: error.message,
+        stack: error.stack,
       });
-      throw error;
+      return reply.code(500).send({
+        success: false,
+        error: { message: error.message || 'Erro interno ao criar conversa' }
+      });
     }
   });
 
