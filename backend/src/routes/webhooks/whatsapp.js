@@ -88,20 +88,31 @@ const whatsappWebhookRoutes = async (fastify) => {
       const whatsappNumber = wnResult.rows[0];
       const empresa_id = whatsappNumber.empresa_id;
 
-      // --- HMAC signature validation (if app_secret is configured) ---
-      if (whatsappNumber.whatsapp_app_secret) {
-        const appSecret = decrypt(whatsappNumber.whatsapp_app_secret);
-        const signature = request.headers['x-hub-signature-256'];
+      // --- HMAC signature validation (REQUIRED) ---
+      if (!whatsappNumber.whatsapp_app_secret) {
+        createLogger.error('whatsapp_app_secret not configured — rejecting webhook for security', { phoneNumberId, empresa_id });
+        return reply.code(401).send('App secret not configured');
+      }
 
-        if (appSecret && signature) {
-          const rawBody = request.raw.rawBody || JSON.stringify(request.body);
-          const expectedSig = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
-          const receivedSig = signature.replace('sha256=', '');
+      const appSecret = decrypt(whatsappNumber.whatsapp_app_secret);
+      const signature = request.headers['x-hub-signature-256'];
 
-          if (expectedSig !== receivedSig) {
-            createLogger.warn('Invalid HMAC signature', { phoneNumberId, empresa_id });
-            return reply.code(401).send('Invalid signature');
-          }
+      if (!appSecret || !signature) {
+        createLogger.warn('Missing HMAC secret or signature header', { phoneNumberId, empresa_id });
+        return reply.code(401).send('Missing signature');
+      }
+
+      {
+        const rawBody = request.raw.rawBody || JSON.stringify(request.body);
+        const expectedSig = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+        const receivedSig = signature.replace('sha256=', '');
+
+        // Timing-safe comparison to prevent timing attacks
+        const expected = Buffer.from(expectedSig, 'utf8');
+        const received = Buffer.from(receivedSig, 'utf8');
+        if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
+          createLogger.warn('Invalid HMAC signature', { phoneNumberId, empresa_id });
+          return reply.code(401).send('Invalid signature');
         }
       }
 

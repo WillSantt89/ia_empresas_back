@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import jwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import sensible from '@fastify/sensible';
@@ -71,6 +72,17 @@ const fastify = Fastify({
 
 // Register plugins
 async function registerPlugins() {
+  // Security headers (helmet)
+  await fastify.register(helmet, {
+    contentSecurityPolicy: false, // CSP managed separately if needed
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow media loading
+    hsts: {
+      maxAge: 31536000, // 1 year
+      includeSubDomains: true,
+      preload: true,
+    },
+  });
+
   // CORS
   await fastify.register(cors, {
     origin: config.CORS_ORIGIN,

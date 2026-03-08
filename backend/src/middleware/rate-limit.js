@@ -3,7 +3,7 @@ import rateLimit from '@fastify/rate-limit';
 // Configuração global de rate limiting
 export const globalRateLimit = {
   global: true,
-  max: 5000, // 5000 requests por minuto (scaled for 200 operators)
+  max: 1000, // 1000 requests por minuto global
   timeWindow: '1 minute',
   skipSuccessfulRequests: false,
   skipFailedRequests: true,
@@ -118,6 +118,26 @@ export const apiKeyTestRateLimit = {
   }
 };
 
+// Rate limit para webhooks (por IP)
+export const webhookRateLimit = {
+  max: 300, // 300 requests por minuto por IP
+  timeWindow: '1 minute',
+  keyGenerator: (request) => {
+    return `webhook:${request.ip}`;
+  },
+  errorResponseBuilder: function (request, context) {
+    return {
+      success: false,
+      error: {
+        code: 'WEBHOOK_RATE_LIMITED',
+        message: 'Too many webhook requests.',
+        statusCode: 429,
+        after: context.after,
+      }
+    };
+  }
+};
+
 // Função para configurar rate limiting em rotas específicas
 export function setupRouteRateLimits(fastify) {
   // Chat endpoint
@@ -135,6 +155,29 @@ export function setupRouteRateLimits(fastify) {
     if (routeOptions.url === '/api/auth/login' && routeOptions.method === 'POST') {
       routeOptions.config = routeOptions.config || {};
       routeOptions.config.rateLimit = loginRateLimit;
+    }
+  });
+
+  // Webhook endpoints
+  fastify.addHook('onRoute', (routeOptions) => {
+    if (routeOptions.url?.startsWith('/api/webhooks') && routeOptions.method === 'POST') {
+      routeOptions.config = routeOptions.config || {};
+      routeOptions.config.rateLimit = webhookRateLimit;
+    }
+  });
+
+  // Forgot/reset password endpoints — strict rate limit per IP
+  fastify.addHook('onRoute', (routeOptions) => {
+    if (
+      (routeOptions.url === '/api/auth/forgot-password' || routeOptions.url === '/api/auth/reset-password')
+      && routeOptions.method === 'POST'
+    ) {
+      routeOptions.config = routeOptions.config || {};
+      routeOptions.config.rateLimit = {
+        max: 5,
+        timeWindow: '15 minutes',
+        keyGenerator: (request) => `auth_pwd:${request.ip}`,
+      };
     }
   });
 
@@ -170,5 +213,6 @@ export default {
   loginRateLimit,
   createResourceRateLimit,
   apiKeyTestRateLimit,
+  webhookRateLimit,
   setupRouteRateLimits
 };

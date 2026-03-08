@@ -10,6 +10,58 @@ export const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/uploads';
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB (WhatsApp Business limit)
 
+/**
+ * Magic bytes (file signatures) for validating actual file content.
+ * Prevents attackers from uploading executables disguised as images, etc.
+ */
+const MAGIC_BYTES = {
+  'image/jpeg':  [Buffer.from([0xFF, 0xD8, 0xFF])],
+  'image/png':   [Buffer.from([0x89, 0x50, 0x4E, 0x47])],
+  'image/webp':  [Buffer.from('RIFF')], // + WEBP at offset 8
+  'image/gif':   [Buffer.from('GIF87a'), Buffer.from('GIF89a')],
+  'audio/ogg':   [Buffer.from('OggS')],
+  'audio/mpeg':  [Buffer.from([0xFF, 0xFB]), Buffer.from([0xFF, 0xF3]), Buffer.from([0xFF, 0xF2]), Buffer.from('ID3')],
+  'audio/mp4':   [Buffer.from('ftyp')], // at offset 4
+  'audio/amr':   [Buffer.from('#!AMR')],
+  'video/mp4':   [Buffer.from('ftyp')], // at offset 4
+  'video/3gpp':  [Buffer.from('ftyp')], // at offset 4
+  'application/pdf': [Buffer.from('%PDF')],
+};
+
+/**
+ * Validate file content matches the claimed MIME type via magic bytes.
+ * Returns true if the file passes validation or if we don't have a signature for this type.
+ */
+function validateMagicBytes(buffer, mimeType) {
+  const baseMime = mimeType.split(';')[0].trim();
+  const signatures = MAGIC_BYTES[baseMime];
+
+  if (!signatures) {
+    // No magic bytes defined for this type — allow (documents like .docx are ZIP-based)
+    return true;
+  }
+
+  // MP4/M4A/3GP store 'ftyp' at offset 4
+  if (['audio/mp4', 'video/mp4', 'video/3gpp'].includes(baseMime)) {
+    if (buffer.length < 8) return false;
+    const ftypSlice = buffer.subarray(4, 8);
+    return signatures.some(sig => ftypSlice.subarray(0, sig.length).equals(sig));
+  }
+
+  // WEBP: RIFF at offset 0, WEBP at offset 8
+  if (baseMime === 'image/webp') {
+    if (buffer.length < 12) return false;
+    return buffer.subarray(0, 4).equals(Buffer.from('RIFF')) &&
+           buffer.subarray(8, 12).equals(Buffer.from('WEBP'));
+  }
+
+  // Standard check: signature at offset 0
+  return signatures.some(sig => {
+    if (buffer.length < sig.length) return false;
+    return buffer.subarray(0, sig.length).equals(sig);
+  });
+}
+
 const MIME_TO_EXT = {
   'image/jpeg': '.jpg',
   'image/png': '.png',
@@ -51,6 +103,16 @@ export async function saveMedia(buffer, empresaId, mimeType, fileName) {
 
   if (buffer.length > MAX_FILE_SIZE) {
     throw new Error(`File too large: ${buffer.length} bytes (max ${MAX_FILE_SIZE})`);
+  }
+
+  // Validate magic bytes — reject files that don't match their claimed MIME type
+  if (!validateMagicBytes(buffer, mimeType)) {
+    createLogger.warn('Magic bytes validation failed', {
+      mimeType,
+      firstBytes: buffer.subarray(0, 8).toString('hex'),
+      empresaId,
+    });
+    throw new Error(`File content does not match MIME type: ${mimeType}`);
   }
 
   const now = new Date();

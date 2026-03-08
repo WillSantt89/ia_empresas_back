@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
-import { encrypt, decrypt } from '../config/encryption.js';
+import { encrypt, decrypt, hash as sha256Hash } from '../config/encryption.js';
 import { redis, setWithExpiry, getJSON } from '../config/redis.js';
 
 /**
@@ -31,8 +31,9 @@ export async function createApiKey(options) {
   try {
     await client.query('BEGIN');
 
-    // Encrypt the Gemini API key
+    // Encrypt the Gemini API key + store hash for fast lookup
     const encryptedKey = encrypt(geminiApiKey);
+    const keyHash = sha256Hash(geminiApiKey);
 
     // Store in database
     const query = `
@@ -42,10 +43,11 @@ export async function createApiKey(options) {
         provedor,
         nome_exibicao,
         api_key_encrypted,
+        api_key_hash,
         status,
         prioridade,
         criado_por
-      ) VALUES ($1, $2, 'gemini', $3, $4, 'ativa', 1, $5)
+      ) VALUES ($1, $2, 'gemini', $3, $4, $5, 'ativa', 1, $6)
       RETURNING
         id,
         nome_exibicao,
@@ -54,7 +56,7 @@ export async function createApiKey(options) {
     `;
 
     const result = await client.query(query,
-      [empresaId, agenteId, nome, encryptedKey, createdBy]
+      [empresaId, agenteId, nome, encryptedKey, keyHash, createdBy]
     );
 
     await client.query('COMMIT');
@@ -91,11 +93,14 @@ export async function createApiKey(options) {
 
 /**
  * Validate API key and get associated Gemini key
+ * Uses hash-based O(1) lookup instead of decrypting all keys
  */
 export async function validateApiKey(apiKey) {
   try {
-    // Check cache first
-    const cacheKey = `${API_KEY_CACHE_PREFIX}${apiKey}`;
+    const keyHash = sha256Hash(apiKey);
+
+    // Check cache first (keyed by hash, NOT the raw key)
+    const cacheKey = `${API_KEY_CACHE_PREFIX}${keyHash}`;
     const cached = await getJSON(cacheKey);
 
     if (cached) {
@@ -103,7 +108,7 @@ export async function validateApiKey(apiKey) {
       return cached;
     }
 
-    // Query database - match by decrypting stored keys
+    // Fast lookup by hash — O(1) via index
     const query = `
       SELECT
         ak.id,
@@ -120,31 +125,48 @@ export async function validateApiKey(apiKey) {
       FROM api_keys ak
       LEFT JOIN agentes a ON ak.agente_id = a.id
       INNER JOIN empresas e ON ak.empresa_id = e.id
-      WHERE ak.status = 'ativa'
+      WHERE ak.api_key_hash = $1
+        AND ak.status = 'ativa'
         AND (a.ativo = true OR ak.agente_id IS NULL)
+      LIMIT 1
     `;
 
-    const result = await pool.query(query);
+    let result = await pool.query(query, [keyHash]);
 
-    // Find matching key by trying to decrypt
-    let matchedKey = null;
-    for (const row of result.rows) {
-      try {
-        const decryptedKey = decrypt(row.api_key_encrypted);
-        if (decryptedKey === apiKey) {
-          matchedKey = row;
-          break;
+    // Fallback for keys created before migration 046 (no hash stored)
+    if (result.rows.length === 0) {
+      const fallbackResult = await pool.query(`
+        SELECT ak.id, ak.empresa_id, ak.agente_id, ak.api_key_encrypted, ak.status,
+               a.nome as agente_nome, a.modelo, a.temperatura, a.max_tokens, a.prompt_ativo,
+               e.ativo as empresa_active
+        FROM api_keys ak
+        LEFT JOIN agentes a ON ak.agente_id = a.id
+        INNER JOIN empresas e ON ak.empresa_id = e.id
+        WHERE ak.api_key_hash IS NULL AND ak.status = 'ativa'
+          AND (a.ativo = true OR ak.agente_id IS NULL)
+      `);
+
+      for (const row of fallbackResult.rows) {
+        try {
+          const decryptedKey = decrypt(row.api_key_encrypted);
+          if (decryptedKey === apiKey) {
+            // Backfill the hash for future lookups
+            pool.query('UPDATE api_keys SET api_key_hash = $1 WHERE id = $2', [keyHash, row.id]).catch(() => {});
+            result = { rows: [row] };
+            break;
+          }
+        } catch (e) {
+          continue;
         }
-      } catch (e) {
-        // Skip keys that fail to decrypt
-        continue;
+      }
+
+      if (result.rows.length === 0) {
+        createLogger.warn('Invalid API key attempt');
+        return null;
       }
     }
 
-    if (!matchedKey) {
-      createLogger.warn('Invalid API key attempt');
-      return null;
-    }
+    const matchedKey = result.rows[0];
 
     // Check if company is active
     if (!matchedKey.empresa_active) {
@@ -154,10 +176,10 @@ export async function validateApiKey(apiKey) {
       return null;
     }
 
-    // Decrypt Gemini key (the key itself IS the Gemini key in this schema)
+    // Decrypt Gemini key
     const geminiApiKey = decrypt(matchedKey.api_key_encrypted);
 
-    // Update last used timestamp
+    // Update last used timestamp (non-blocking)
     pool.query(
       'UPDATE api_keys SET ultimo_uso = CURRENT_TIMESTAMP WHERE id = $1',
       [matchedKey.id]
@@ -180,7 +202,7 @@ export async function validateApiKey(apiKey) {
       prompt_ativo: matchedKey.prompt_ativo
     };
 
-    // Cache the validated data
+    // Cache keyed by hash (NOT the raw API key — never cache raw secrets as keys)
     await setWithExpiry(cacheKey, validatedData, API_KEY_CACHE_TTL);
 
     return validatedData;
@@ -379,6 +401,8 @@ export async function updateApiKeyInfo(empresaId, keyId, updates) {
     if (updates.gemini_api_key) {
       setClauses.push(`api_key_encrypted = $${paramIdx++}`);
       params.push(encrypt(updates.gemini_api_key));
+      setClauses.push(`api_key_hash = $${paramIdx++}`);
+      params.push(sha256Hash(updates.gemini_api_key));
     }
     if (updates.status !== undefined) {
       setClauses.push(`status = $${paramIdx++}`);
@@ -422,14 +446,15 @@ export async function updateApiKeyInfo(empresaId, keyId, updates) {
 export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
   try {
     const encryptedKey = encrypt(newGeminiKey);
+    const keyHash = sha256Hash(newGeminiKey);
 
     const query = `
       UPDATE api_keys
-      SET api_key_encrypted = $3, atualizado_em = CURRENT_TIMESTAMP
+      SET api_key_encrypted = $3, api_key_hash = $4, atualizado_em = CURRENT_TIMESTAMP
       WHERE empresa_id = $1 AND id = $2 AND status = 'ativa'
     `;
 
-    const result = await pool.query(query, [empresaId, keyId, encryptedKey]);
+    const result = await pool.query(query, [empresaId, keyId, encryptedKey, keyHash]);
 
     if (result.rowCount === 0) {
       return false;

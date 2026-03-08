@@ -4,6 +4,51 @@ import { generateSecureToken, hash } from '../config/encryption.js';
 import { logger } from '../config/logger.js';
 import { config } from '../config/env.js';
 import { ERROR_CODES } from '../config/constants.js';
+import { redis } from '../config/redis.js';
+
+// Brute force protection constants
+const LOGIN_MAX_ATTEMPTS = 5;          // Max failures before lockout
+const LOGIN_LOCKOUT_SECONDS = 900;     // 15 min lockout
+const LOGIN_ATTEMPT_WINDOW = 600;      // 10 min window for counting attempts
+const FORGOT_PWD_MAX_ATTEMPTS = 3;     // Max forgot-password per email per hour
+const FORGOT_PWD_WINDOW = 3600;        // 1 hour
+
+/**
+ * Check and increment failed login attempts for an IP+email combo.
+ * Returns { locked: boolean, remaining: number, lockoutSeconds: number }
+ */
+async function checkLoginAttempts(ip, email) {
+  const key = `login_attempts:${ip}:${email.toLowerCase()}`;
+  try {
+    const attempts = parseInt(await redis.get(key) || '0', 10);
+    if (attempts >= LOGIN_MAX_ATTEMPTS) {
+      const ttl = await redis.ttl(key);
+      return { locked: true, remaining: 0, lockoutSeconds: ttl > 0 ? ttl : LOGIN_LOCKOUT_SECONDS };
+    }
+    return { locked: false, remaining: LOGIN_MAX_ATTEMPTS - attempts, lockoutSeconds: 0 };
+  } catch {
+    return { locked: false, remaining: LOGIN_MAX_ATTEMPTS, lockoutSeconds: 0 };
+  }
+}
+
+async function recordFailedLogin(ip, email) {
+  const key = `login_attempts:${ip}:${email.toLowerCase()}`;
+  try {
+    const attempts = await redis.incr(key);
+    if (attempts === 1) {
+      await redis.expire(key, LOGIN_ATTEMPT_WINDOW);
+    }
+    // Extend lockout on exceeding max
+    if (attempts >= LOGIN_MAX_ATTEMPTS) {
+      await redis.expire(key, LOGIN_LOCKOUT_SECONDS);
+    }
+  } catch { /* non-blocking */ }
+}
+
+async function clearLoginAttempts(ip, email) {
+  const key = `login_attempts:${ip}:${email.toLowerCase()}`;
+  try { await redis.del(key); } catch { /* non-blocking */ }
+}
 
 /**
  * Authentication routes
@@ -50,6 +95,21 @@ export default async function authRoutes(fastify, opts) {
   }, async (request, reply) => {
     try {
       const { email, senha } = request.body;
+
+      // --- Brute force check ---
+      const attemptCheck = await checkLoginAttempts(request.ip, email);
+      if (attemptCheck.locked) {
+        logger.warn('Login blocked - too many attempts', {
+          email, ip: request.ip, lockout_seconds: attemptCheck.lockoutSeconds
+        });
+        return reply.code(429).send({
+          success: false,
+          error: {
+            code: 'LOGIN_LOCKED',
+            message: `Muitas tentativas. Tente novamente em ${Math.ceil(attemptCheck.lockoutSeconds / 60)} minutos.`,
+          }
+        });
+      }
 
       // Find user by email
       const { rows } = await query(
@@ -119,6 +179,9 @@ export default async function authRoutes(fastify, opts) {
         [user.id]
       );
 
+      // Clear failed attempts on successful login
+      await clearLoginAttempts(request.ip, email);
+
       logger.info('User logged in', {
         user_id: user.id,
         email: user.email,
@@ -142,6 +205,9 @@ export default async function authRoutes(fastify, opts) {
       };
 
     } catch (error) {
+      // Record failed attempt for brute force protection
+      await recordFailedLogin(request.ip, request.body.email);
+
       logger.warn('Login failed', {
         email: request.body.email,
         error: error.message,
@@ -329,6 +395,23 @@ export default async function authRoutes(fastify, opts) {
     try {
       const { email } = request.body;
 
+      // Rate limit forgot-password per IP
+      const fpKey = `forgot_pwd:${request.ip}`;
+      try {
+        const fpAttempts = parseInt(await redis.get(fpKey) || '0', 10);
+        if (fpAttempts >= FORGOT_PWD_MAX_ATTEMPTS) {
+          return reply.code(429).send({
+            success: false,
+            error: {
+              code: 'RATE_LIMITED',
+              message: 'Muitas solicitações. Tente novamente mais tarde.',
+            }
+          });
+        }
+        const cnt = await redis.incr(fpKey);
+        if (cnt === 1) await redis.expire(fpKey, FORGOT_PWD_WINDOW);
+      } catch { /* non-blocking */ }
+
       // Find user
       const { rows } = await query(
         'SELECT id, nome FROM usuarios WHERE LOWER(email) = LOWER($1) AND ativo = true',
@@ -409,6 +492,20 @@ export default async function authRoutes(fastify, opts) {
   }, async (request, reply) => {
     try {
       const { token, novaSenha } = request.body;
+
+      // Rate limit reset-password per IP (prevent token brute force)
+      const rpKey = `reset_pwd:${request.ip}`;
+      try {
+        const rpAttempts = parseInt(await redis.get(rpKey) || '0', 10);
+        if (rpAttempts >= 10) { // 10 attempts per hour
+          return reply.code(429).send({
+            success: false,
+            error: { code: 'RATE_LIMITED', message: 'Muitas tentativas. Tente novamente mais tarde.' }
+          });
+        }
+        const cnt = await redis.incr(rpKey);
+        if (cnt === 1) await redis.expire(rpKey, 3600);
+      } catch { /* non-blocking */ }
 
       // Hash the provided token
       const tokenHash = hash(token);

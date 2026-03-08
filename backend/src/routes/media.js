@@ -27,13 +27,40 @@ const ALLOWED_EXTENSIONS = new Set([
   '.bin',
 ]);
 
+// Media token TTL: 5 minutes
+const MEDIA_TOKEN_TTL = 300;
+
 export default async function mediaRoutes(fastify) {
+
+  /**
+   * POST /api/media/token
+   * Generate a short-lived media access token (5 min).
+   * Used by frontend to avoid putting the main JWT in query strings.
+   * Requires valid JWT authentication.
+   */
+  fastify.post('/token', {
+    preHandler: [fastify.authenticate],
+  }, async (request, reply) => {
+    const mediaToken = randomUUID();
+    const tokenData = {
+      user_id: request.user.id,
+      empresa_id: request.empresaId || request.user.empresa_id,
+      role: request.user.role,
+    };
+
+    await redis.setex(`media_token:${mediaToken}`, MEDIA_TOKEN_TTL, JSON.stringify(tokenData));
+
+    return reply.send({
+      success: true,
+      data: { token: mediaToken, expires_in: MEDIA_TOKEN_TTL },
+    });
+  });
+
   /**
    * GET /api/media/:empresaId/:yearMonth/:filename
    * Serve stored media files with authentication
    *
-   * Auth: JWT via Authorization header OR ?token= query param
-   * (query param needed for <img>, <audio>, <video> tags that can't set headers)
+   * Auth: JWT via Authorization header, OR ?mt= short-lived media token, OR ?token= JWT (legacy)
    */
   fastify.get('/:empresaId/:yearMonth/:filename', {
     config: { rawBody: false },
@@ -58,31 +85,44 @@ export default async function mediaRoutes(fastify) {
       }
 
       // --- Authentication ---
-      // Try Authorization header first, then query param
-      let token = null;
+      // Priority: 1) Authorization header (JWT), 2) ?mt= media token, 3) ?token= JWT (legacy)
+      let userEmpresaId = null;
+      let userRole = null;
+
       const authHeader = request.headers.authorization;
       if (authHeader && authHeader.startsWith('Bearer ')) {
-        token = authHeader.substring(7);
+        // Standard JWT auth
+        try {
+          const decoded = fastify.jwt.verify(authHeader.substring(7));
+          userEmpresaId = decoded.empresa_id;
+          userRole = decoded.role;
+        } catch (err) {
+          return reply.code(401).send({ error: 'Invalid or expired token' });
+        }
+      } else if (request.query.mt) {
+        // Short-lived media token (preferred for <img>/<audio>/<video>)
+        const tokenData = await redis.get(`media_token:${request.query.mt}`);
+        if (!tokenData) {
+          return reply.code(401).send({ error: 'Invalid or expired media token' });
+        }
+        const parsed = JSON.parse(tokenData);
+        userEmpresaId = parsed.empresa_id;
+        userRole = parsed.role;
       } else if (request.query.token) {
-        token = request.query.token;
-      }
-
-      if (!token) {
+        // Legacy: JWT in query param (deprecated, kept for backward compatibility)
+        try {
+          const decoded = fastify.jwt.verify(request.query.token);
+          userEmpresaId = decoded.empresa_id;
+          userRole = decoded.role;
+        } catch (err) {
+          return reply.code(401).send({ error: 'Invalid or expired token' });
+        }
+      } else {
         return reply.code(401).send({ error: 'Authentication required' });
-      }
-
-      let decoded;
-      try {
-        decoded = fastify.jwt.verify(token);
-      } catch (err) {
-        return reply.code(401).send({ error: 'Invalid or expired token' });
       }
 
       // --- Tenant isolation ---
       // User can only access media from their own company (or master can access all)
-      const userEmpresaId = decoded.empresa_id;
-      const userRole = decoded.role;
-
       if (userRole !== 'master' && userEmpresaId !== empresaId) {
         return reply.code(403).send({ error: 'Access denied' });
       }
@@ -108,7 +148,7 @@ export default async function mediaRoutes(fastify) {
       reply.header('Content-Length', stat.size);
       reply.header('Cache-Control', 'private, max-age=86400');
       reply.header('X-Content-Type-Options', 'nosniff');
-      reply.header('Access-Control-Allow-Origin', '*');
+      // CORS handled globally by @fastify/cors plugin
 
       // Documents: force download
       if (ATTACHMENT_TYPES.has(contentType)) {
@@ -158,7 +198,7 @@ export default async function mediaRoutes(fastify) {
       reply.header('Content-Type', mimeType || 'application/octet-stream');
       reply.header('Content-Length', stat.size);
       reply.header('Cache-Control', 'no-store');
-      reply.header('Access-Control-Allow-Origin', '*');
+      // CORS handled globally by @fastify/cors plugin
 
       const stream = getMediaStream(relativePath);
       return reply.send(stream);

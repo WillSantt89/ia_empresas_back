@@ -62,7 +62,12 @@ export const config = {
   GEMINI_API_ENDPOINT: 'https://generativelanguage.googleapis.com/v1beta/models',
 
   // Security Headers
-  CORS_ORIGIN: validateEnv('CORS_ORIGIN', '*', false),
+  CORS_ORIGIN: (() => {
+    const raw = validateEnv('CORS_ORIGIN', '*', false);
+    if (raw === '*') return raw;
+    // Support comma-separated origins: "https://foo.com,https://bar.com"
+    return raw.split(',').map(o => o.trim()).filter(Boolean);
+  })(),
   CORS_CREDENTIALS: validateEnv('CORS_CREDENTIALS', 'true', false) === 'true',
 
   // Session Configuration
@@ -82,7 +87,7 @@ if (config.isProduction) {
   }
 
   if (config.CORS_ORIGIN === '*') {
-    console.warn('WARNING: CORS_ORIGIN is set to "*" in production. Consider restricting it.');
+    throw new Error('CORS_ORIGIN must not be "*" in production. Set it to your frontend URL(s).');
   }
 }
 
