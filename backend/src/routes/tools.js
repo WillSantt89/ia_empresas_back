@@ -70,6 +70,8 @@ const toolsRoutes = async (fastify) => {
           t.ativo,
           t.is_global,
           t.timeout_ms,
+          t.tipo_tool,
+          t.agente_destino_id,
           t.criado_em,
           t.atualizado_em,
           CASE
@@ -81,7 +83,10 @@ const toolsRoutes = async (fastify) => {
             FROM agente_tools at2
             WHERE at2.tool_id = t.id
           ) as agent_count,
-          0 as usage_last_week
+          0 as usage_last_week,
+          (
+            SELECT a.nome FROM agentes a WHERE a.id = t.agente_destino_id
+          ) as agente_destino_nome
         FROM tools t
         WHERE (t.is_global = true OR t.empresa_id = $1)
       `;

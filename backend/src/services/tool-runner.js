@@ -1,10 +1,11 @@
 import fetch from 'node-fetch';
 import { logger } from '../config/logger.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
+import pool from '../config/database.js';
 
 /**
  * Tool Runner Service
- * Executes HTTP requests for AI agent tools
+ * Executes HTTP requests and internal tools for AI agents
  */
 
 const createLogger = logger.child({ module: 'tool-runner' });
@@ -157,6 +158,103 @@ export async function executeTool(tool, args) {
 }
 
 /**
+ * Execute an internal transfer tool
+ * Changes the agent and queue of a conversation in PostgreSQL
+ * @param {Object} tool - Tool configuration (must have tipo_tool='transferencia' and agente_destino_id)
+ * @param {Object} context - { conversa_id, empresa_id }
+ * @returns {Promise<Object>} Transfer result
+ */
+export async function executeTransferTool(tool, context) {
+  const startTime = Date.now();
+  const { conversa_id, empresa_id } = context;
+
+  try {
+    if (!tool.agente_destino_id) {
+      return { success: false, error: 'Tool de transferência sem agente destino configurado' };
+    }
+
+    // Buscar agente destino com sua fila
+    const agenteResult = await pool.query(`
+      SELECT a.id, a.nome, a.fila_id, a.ativo, f.nome as fila_nome
+      FROM agentes a
+      LEFT JOIN filas_atendimento f ON f.id = a.fila_id
+      WHERE a.id = $1 AND a.empresa_id = $2
+    `, [tool.agente_destino_id, empresa_id]);
+
+    if (agenteResult.rows.length === 0) {
+      return { success: false, error: 'Agente destino não encontrado' };
+    }
+
+    const destino = agenteResult.rows[0];
+
+    if (!destino.ativo) {
+      return { success: false, error: `Agente "${destino.nome}" está inativo` };
+    }
+
+    // Atualizar conversa: agente + fila (operação casada)
+    await pool.query(`
+      UPDATE conversas
+      SET agente_id = $1,
+          fila_id = $2,
+          controlado_por = 'ia',
+          atualizado_em = NOW()
+      WHERE id = $3 AND empresa_id = $4
+    `, [destino.id, destino.fila_id, conversa_id, empresa_id]);
+
+    // Registrar no histórico de agentes da conversa
+    await pool.query(`
+      UPDATE conversas
+      SET historico_agentes_json = COALESCE(historico_agentes_json, '[]'::jsonb) || $1::jsonb
+      WHERE id = $2
+    `, [
+      JSON.stringify([{
+        agente_id: destino.id,
+        agente_nome: destino.nome,
+        fila_id: destino.fila_id,
+        fila_nome: destino.fila_nome,
+        transferido_em: new Date().toISOString()
+      }]),
+      conversa_id
+    ]);
+
+    const duration = Date.now() - startTime;
+
+    createLogger.info('Transfer tool executed', {
+      conversa_id, empresa_id,
+      agente_destino: destino.nome,
+      fila_destino: destino.fila_nome,
+      duration_ms: duration
+    });
+
+    return {
+      success: true,
+      data: {
+        transferido_para: destino.nome,
+        fila: destino.fila_nome,
+        mensagem: `Atendimento transferido para ${destino.nome}`
+      },
+      duration_ms: duration
+    };
+
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    createLogger.error('Transfer tool failed', {
+      conversa_id, empresa_id,
+      agente_destino_id: tool.agente_destino_id,
+      error: error.message,
+      duration_ms: duration
+    });
+
+    return {
+      success: false,
+      error: 'Falha na transferência',
+      message: error.message,
+      duration_ms: duration
+    };
+  }
+}
+
+/**
  * Process template with variable substitution
  * @param {Object} template - Template object with {{variable}} placeholders
  * @param {Object} args - Arguments to substitute
@@ -222,20 +320,29 @@ export function validateTool(tool) {
     errors.push('Tool name is required');
   }
 
-  if (!tool.url) {
-    errors.push('Tool URL is required');
-  } else {
-    try {
-      new URL(tool.url);
-    } catch {
-      errors.push('Tool URL is invalid');
-    }
-  }
+  // Transfer tools don't need url/metodo
+  const isTransfer = tool.tipo_tool === 'transferencia';
 
-  if (!tool.metodo) {
-    errors.push('Tool method is required');
-  } else if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(tool.metodo)) {
-    errors.push('Tool method must be GET, POST, PUT, PATCH, or DELETE');
+  if (!isTransfer) {
+    if (!tool.url) {
+      errors.push('Tool URL is required');
+    } else {
+      try {
+        new URL(tool.url);
+      } catch {
+        errors.push('Tool URL is invalid');
+      }
+    }
+
+    if (!tool.metodo) {
+      errors.push('Tool method is required');
+    } else if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(tool.metodo)) {
+      errors.push('Tool method must be GET, POST, PUT, PATCH, or DELETE');
+    }
+  } else {
+    if (!tool.agente_destino_id) {
+      errors.push('Transfer tool requires agente_destino_id');
+    }
   }
 
   if (!tool.descricao_para_llm) {

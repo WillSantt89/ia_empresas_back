@@ -5,7 +5,7 @@ import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
 import { sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
 import { decrypt } from '../config/encryption.js';
 import { saveMedia } from '../services/media-storage.js';
-import { addToHistory } from '../services/memory.js';
+import { addToHistory, archiveConversation } from '../services/memory.js';
 import {
   emitConversaAtribuida, emitConversaAtualizada,
   emitNovaConversaNaFila, emitFilaStats, emitToUser,
@@ -631,8 +631,14 @@ export default async function conversasRoutes(fastify, opts) {
 
       logger.info(`Conversa ${id} finalized`);
 
-      // WebSocket: notificar fila
+      // Arquivar histórico Redis (move para archive com 30d TTL, limpa conv ativa)
       const conversa = conversaResult.rows[0];
+      const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+      archiveConversation(empresaId, conversationKey).catch(err => {
+        logger.error('Failed to archive Redis history on finalize', { conversa_id: id, error: err.message });
+      });
+
+      // WebSocket: notificar fila
       emitConversaAtualizada(id, conversa.fila_id, { id, status: 'finalizado' });
       if (conversa.fila_id) {
         const stats = await calcularStatsFila(conversa.fila_id);

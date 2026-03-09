@@ -105,7 +105,7 @@ const n8nWebhookRoutes = async (fastify) => {
                  cache_enabled, gemini_cache_id, cache_expires_at
           FROM agentes
           WHERE empresa_id = $1 AND ativo = true
-          ORDER BY criado_em ASC
+          ORDER BY is_triagem DESC NULLS LAST, criado_em ASC
           LIMIT 1
         `;
         agentParams = [empresa_id];

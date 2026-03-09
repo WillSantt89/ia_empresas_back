@@ -73,8 +73,11 @@ const agentesRoutes = async (fastify) => {
           a.gemini_cache_id,
           a.cache_expires_at,
           a.mensagem_midia_nao_suportada,
+          a.fila_id,
+          a.is_triagem,
           a.criado_em,
           a.atualizado_em,
+          (SELECT f.nome FROM filas_atendimento f WHERE f.id = a.fila_id) as fila_nome,
           (
             SELECT COUNT(*)
             FROM agente_tools at2
@@ -259,10 +262,47 @@ const agentesRoutes = async (fastify) => {
         [agent.id, defaultPrompt]
       );
 
+      // --- Auto-criar fila vinculada ao agente ---
+      let filaId = null;
+      try {
+        const filaResult = await pool.query(`
+          INSERT INTO filas_atendimento (empresa_id, nome, descricao, is_default, auto_assignment, cor, icone, ativo)
+          VALUES ($1, $2, $3, false, true, '#3B82F6', 'headset', true)
+          ON CONFLICT (empresa_id, nome) DO UPDATE SET atualizado_em = NOW()
+          RETURNING id
+        `, [empresa_id, agent.nome, `Fila do agente ${agent.nome}`]);
+        filaId = filaResult.rows[0]?.id;
+
+        if (filaId) {
+          await pool.query('UPDATE agentes SET fila_id = $1 WHERE id = $2', [filaId, agent.id]);
+          agent.fila_id = filaId;
+        }
+      } catch (filaErr) {
+        createLogger.warn('Failed to auto-create queue for agent', { agent_id: agent.id, error: filaErr.message });
+      }
+
+      // --- Auto-criar tool de transferência para este agente ---
+      try {
+        const toolNome = `transferir_para_${agent.nome.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+$/, '')}`;
+        await pool.query(`
+          INSERT INTO tools (empresa_id, nome, descricao_para_llm, tipo_tool, agente_destino_id, parametros_schema_json, ativo)
+          VALUES ($1, $2, $3, 'transferencia', $4, $5, true)
+        `, [
+          empresa_id,
+          toolNome,
+          `Transfere o atendimento para o agente ${agent.nome}. Use quando o cliente precisar de atendimento especializado de ${agent.nome}.`,
+          agent.id,
+          JSON.stringify({ type: 'object', properties: {}, required: [] })
+        ]);
+      } catch (toolErr) {
+        createLogger.warn('Failed to auto-create transfer tool for agent', { agent_id: agent.id, error: toolErr.message });
+      }
+
       createLogger.info('Agent created', {
         empresa_id,
         agent_id: agent.id,
-        model: agent.modelo
+        model: agent.modelo,
+        fila_id: filaId
       });
 
       return {

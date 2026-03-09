@@ -526,6 +526,16 @@ const empresasRoutes = async (fastify) => {
         `, [filaResult.rows[0].id, createdUser.id]);
       }
 
+      // Auto-criar agente de triagem vinculado à fila default
+      const filaId = filaResult.rows[0]?.id;
+      if (filaId) {
+        await client.query(`
+          INSERT INTO agentes (empresa_id, nome, descricao, tipo, is_triagem, modelo, prompt_ativo, temperatura, max_tokens, fila_id, ativo)
+          VALUES ($1, 'Triagem', 'Agente de triagem automático. Configure o prompt e menu de opções.', 'triagem', true,
+                  'gemini-2.5-flash', 'Configure o prompt deste agente com o menu de opções de atendimento da sua empresa.', 0.3, 2048, $2, true)
+        `, [empresa.id, filaId]);
+      }
+
       await client.query('COMMIT');
 
       createLogger.info('Company created by master', {

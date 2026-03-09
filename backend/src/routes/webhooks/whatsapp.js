@@ -5,7 +5,7 @@ import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
-import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { executeTool, executeTransferTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { parseMetaMessage, buildGeminiParts } from '../../services/media-handler.js';
 import { saveMedia } from '../../services/media-storage.js';
 import { sendTextMessage, markAsRead } from '../../services/whatsapp-sender.js';
@@ -214,13 +214,13 @@ const whatsappWebhookRoutes = async (fastify) => {
       mediaSaved: !!mediaSaved,
     });
 
-    // --- Resolve agent ---
+    // --- Resolve default agent (triagem first, then oldest active) ---
     const agentResult = await pool.query(`
       SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
              cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
       FROM agentes
       WHERE empresa_id = $1 AND ativo = true
-      ORDER BY criado_em ASC
+      ORDER BY is_triagem DESC NULLS LAST, criado_em ASC
       LIMIT 1
     `, [empresa_id]);
 
@@ -229,8 +229,8 @@ const whatsappWebhookRoutes = async (fastify) => {
       return;
     }
 
-    const agent = agentResult.rows[0];
-    const { agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent;
+    let agent = agentResult.rows[0];
+    let { agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent;
 
     // --- Get API keys with failover ---
     const availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
@@ -262,7 +262,7 @@ const whatsappWebhookRoutes = async (fastify) => {
     let conversa_id;
 
     const conversaResult = await pool.query(`
-      SELECT id, controlado_por, humano_nome, fila_id FROM conversas
+      SELECT id, controlado_por, humano_nome, fila_id, agente_id as conversa_agente_id FROM conversas
       WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
       ORDER BY criado_em DESC LIMIT 1
     `, [empresa_id, phone]);
@@ -376,6 +376,25 @@ const whatsappWebhookRoutes = async (fastify) => {
       }
     }
 
+    // --- Override agent if conversation already has one (respects transfers) ---
+    if (conversaResult.rows.length > 0 && conversaResult.rows[0].conversa_agente_id) {
+      const conversaAgenteId = conversaResult.rows[0].conversa_agente_id;
+      if (conversaAgenteId !== agente_id) {
+        const overrideResult = await pool.query(`
+          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+                 cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
+          FROM agentes
+          WHERE id = $1 AND empresa_id = $2 AND ativo = true
+        `, [conversaAgenteId, empresa_id]);
+
+        if (overrideResult.rows.length > 0) {
+          agent = overrideResult.rows[0];
+          ({ agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent);
+          createLogger.info('Agent overridden from conversation', { conversa_id, agente_id, agente_nome });
+        }
+      }
+    }
+
     // --- Daily limit check ---
     await pool.query(`
       INSERT INTO uso_diario_agente (empresa_id, agente_id, data, total_atendimentos, limite_diario)
@@ -413,10 +432,11 @@ const whatsappWebhookRoutes = async (fastify) => {
       }
     }
 
-    // --- Get agent tools ---
+    // --- Get agent tools (including transfer tools) ---
     const toolsResult = await pool.query(`
       SELECT t.id, t.nome, t.descricao_para_llm, t.url, t.metodo,
-             t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms
+             t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms,
+             t.tipo_tool, t.agente_destino_id
       FROM tools t
       INNER JOIN agente_tools at2 ON t.id = at2.tool_id
       WHERE at2.agente_id = $1 AND t.ativo = true
@@ -499,7 +519,13 @@ const whatsappWebhookRoutes = async (fastify) => {
     const toolExecutor = async (tool, args) => {
       const toolConfig = tools.find(t => t.nome.toLowerCase() === tool.nome.toLowerCase());
       if (!toolConfig) throw new Error(`Tool ${tool.nome} not found`);
-      const result = await executeTool(toolConfig, args);
+
+      let result;
+      if (toolConfig.tipo_tool === 'transferencia') {
+        result = await executeTransferTool(toolConfig, { conversa_id, empresa_id });
+      } else {
+        result = await executeTool(toolConfig, args);
+      }
       return transformResultForLLM(result, 2000);
     };
 
