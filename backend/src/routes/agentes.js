@@ -585,9 +585,9 @@ const agentesRoutes = async (fastify) => {
         });
       }
 
-      // Revoke all API keys for this agent
+      // Deactivate all API keys for this agent
       await client.query(`UPDATE api_keys
-         SET status = 'revogado', atualizado_em = CURRENT_TIMESTAMP
+         SET status = 'desativada', atualizado_em = CURRENT_TIMESTAMP
          WHERE empresa_id = $1 AND agente_id = $2`,
         [empresa_id, id]
       );
