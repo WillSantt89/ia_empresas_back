@@ -255,7 +255,7 @@ export default async function filasRoutes(fastify) {
   });
 
   // ============================================
-  // DELETE /api/filas/:id — Desativar fila
+  // DELETE /api/filas/:id — Excluir fila permanentemente
   // ============================================
   fastify.delete('/:id', {
     preHandler: [
@@ -267,25 +267,74 @@ export default async function filasRoutes(fastify) {
     const { id } = request.params;
     const { empresaId } = request;
 
-    // Verificar se tem conversas ativas
-    const activeConversas = await pool.query(
-      `SELECT COUNT(*) as total FROM conversas WHERE fila_id = $1 AND status = 'ativo'`,
-      [id]
-    );
-    if (parseInt(activeConversas.rows[0].total) > 0) {
-      return reply.status(400).send({
+    try {
+      // Verificar se a fila existe
+      const filaResult = await pool.query(
+        `SELECT id, nome, is_default FROM filas_atendimento WHERE id = $1 AND empresa_id = $2`,
+        [id, empresaId]
+      );
+      if (filaResult.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: { message: 'Fila nao encontrada' } });
+      }
+
+      const fila = filaResult.rows[0];
+
+      // Nao permitir excluir fila default
+      if (fila.is_default) {
+        return reply.status(400).send({
+          success: false,
+          error: { message: 'Nao e possivel excluir a fila padrao. Defina outra fila como padrao primeiro.' },
+        });
+      }
+
+      // Verificar se tem agentes ativos vinculados
+      const agentesVinculados = await pool.query(
+        `SELECT id, nome FROM agentes WHERE fila_id = $1 AND ativo = true`,
+        [id]
+      );
+      if (agentesVinculados.rows.length > 0) {
+        const nomes = agentesVinculados.rows.map(a => a.nome).join(', ');
+        return reply.status(400).send({
+          success: false,
+          error: { message: `Fila vinculada a agentes ativos: ${nomes}. Desvincule ou exclua os agentes primeiro.` },
+        });
+      }
+
+      // Verificar se tem conversas ativas
+      const activeConversas = await pool.query(
+        `SELECT COUNT(*) as total FROM conversas WHERE fila_id = $1 AND status = 'ativo'`,
+        [id]
+      );
+      if (parseInt(activeConversas.rows[0].total) > 0) {
+        return reply.status(400).send({
+          success: false,
+          error: { message: `Fila tem ${activeConversas.rows[0].total} conversas ativas. Transfira ou finalize antes de excluir.` },
+        });
+      }
+
+      // Desvincular conversas finalizadas/timeout
+      await pool.query(
+        `UPDATE conversas SET fila_id = NULL WHERE fila_id = $1 AND empresa_id = $2`,
+        [id, empresaId]
+      );
+
+      // fila_membros: CASCADE automatico
+      // agentes.fila_id: SET NULL automatico
+      // Excluir permanentemente
+      await pool.query(
+        `DELETE FROM filas_atendimento WHERE id = $1 AND empresa_id = $2`,
+        [id, empresaId]
+      );
+
+      logger.info(`Fila excluida permanentemente: ${fila.nome} (${id})`);
+      reply.status(204).send();
+    } catch (error) {
+      logger.error(`Erro ao excluir fila ${id}:`, error);
+      return reply.status(500).send({
         success: false,
-        error: { message: `Fila tem ${activeConversas.rows[0].total} conversas ativas. Transfira antes de desativar.` },
+        error: { message: 'Erro ao excluir fila' },
       });
     }
-
-    await pool.query(
-      `UPDATE filas_atendimento SET ativo = false, atualizado_em = NOW()
-       WHERE id = $1 AND empresa_id = $2`,
-      [id, empresaId]
-    );
-
-    reply.status(204).send();
   });
 
   // ============================================

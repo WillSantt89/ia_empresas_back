@@ -32,7 +32,8 @@ const agentesRoutes = async (fastify) => {
       max_tokens: { type: 'integer', minimum: 100, maximum: 8192, default: DEFAULT_LIMITS.MAX_TOKENS },
       config_json: { type: 'object' },
       ativo: { type: 'boolean' },
-      mensagem_midia_nao_suportada: { type: ['string', 'null'], maxLength: 1000 }
+      mensagem_midia_nao_suportada: { type: ['string', 'null'], maxLength: 1000 },
+      fila_id: { type: ['string', 'null'], format: 'uuid' }
     }
   };
 
@@ -262,23 +263,39 @@ const agentesRoutes = async (fastify) => {
         [agent.id, defaultPrompt]
       );
 
-      // --- Auto-criar fila vinculada ao agente ---
+      // --- Vincular ou auto-criar fila ---
       let filaId = null;
       try {
-        const filaResult = await pool.query(`
-          INSERT INTO filas_atendimento (empresa_id, nome, descricao, is_default, auto_assignment, cor, icone, ativo)
-          VALUES ($1, $2, $3, false, true, '#3B82F6', 'headset', true)
-          ON CONFLICT (empresa_id, nome) DO UPDATE SET atualizado_em = NOW()
-          RETURNING id
-        `, [empresa_id, agent.nome, `Fila do agente ${agent.nome}`]);
-        filaId = filaResult.rows[0]?.id;
+        if (agentData.fila_id) {
+          // Vincular a fila existente
+          const filaCheck = await pool.query(
+            'SELECT id FROM filas_atendimento WHERE id = $1 AND empresa_id = $2 AND ativo = true',
+            [agentData.fila_id, empresa_id]
+          );
+          if (filaCheck.rows.length > 0) {
+            filaId = agentData.fila_id;
+          } else {
+            createLogger.warn('Fila ID provided but not found, will auto-create', { fila_id: agentData.fila_id });
+          }
+        }
+
+        if (!filaId) {
+          // Auto-criar fila com nome do agente
+          const filaResult = await pool.query(`
+            INSERT INTO filas_atendimento (empresa_id, nome, descricao, is_default, auto_assignment, cor, icone, ativo)
+            VALUES ($1, $2, $3, false, true, '#3B82F6', 'headset', true)
+            ON CONFLICT (empresa_id, nome) DO UPDATE SET atualizado_em = NOW()
+            RETURNING id
+          `, [empresa_id, agent.nome, `Fila do agente ${agent.nome}`]);
+          filaId = filaResult.rows[0]?.id;
+        }
 
         if (filaId) {
           await pool.query('UPDATE agentes SET fila_id = $1 WHERE id = $2', [filaId, agent.id]);
           agent.fila_id = filaId;
         }
       } catch (filaErr) {
-        createLogger.warn('Failed to auto-create queue for agent', { agent_id: agent.id, error: filaErr.message });
+        createLogger.warn('Failed to link/create queue for agent', { agent_id: agent.id, error: filaErr.message });
       }
 
       // --- Auto-criar tool de transferência para este agente ---
