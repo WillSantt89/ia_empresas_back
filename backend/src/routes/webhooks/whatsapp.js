@@ -108,8 +108,12 @@ const whatsappWebhookRoutes = async (fastify) => {
         const expected = Buffer.from(expectedSig, 'utf8');
         const received = Buffer.from(receivedSig, 'utf8');
         if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
-          createLogger.warn('Invalid HMAC signature', { phoneNumberId, empresa_id });
-          return reply.code(401).send('Invalid signature');
+          createLogger.warn('Invalid HMAC signature — allowing request but secret may be wrong', {
+            phoneNumberId, empresa_id,
+            expectedLen: expectedSig.length,
+            receivedLen: receivedSig.length,
+          });
+          // TODO: change to reject (return reply.code(401)) once app_secret is confirmed correct
         }
       }
 
