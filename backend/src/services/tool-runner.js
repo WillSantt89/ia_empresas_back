@@ -1,7 +1,7 @@
 import fetch from 'node-fetch';
 import { logger } from '../config/logger.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
-import pool from '../config/database.js';
+import { pool } from '../config/database.js';
 
 /**
  * Tool Runner Service
