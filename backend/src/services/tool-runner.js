@@ -159,8 +159,8 @@ export async function executeTool(tool, args) {
 
 /**
  * Execute an internal transfer tool
- * Changes the agent and queue of a conversation in PostgreSQL
- * @param {Object} tool - Tool configuration (must have tipo_tool='transferencia' and agente_destino_id)
+ * Transfers to an agent (agente_destino_id) or directly to a queue (fila_destino_id)
+ * @param {Object} tool - Tool configuration with agente_destino_id OR fila_destino_id
  * @param {Object} context - { conversa_id, empresa_id }
  * @returns {Promise<Object>} Transfer result
  */
@@ -169,8 +169,72 @@ export async function executeTransferTool(tool, context) {
   const { conversa_id, empresa_id } = context;
 
   try {
+    // --- Transfer to queue (no agent) ---
+    if (tool.fila_destino_id) {
+      const filaResult = await pool.query(`
+        SELECT id, nome, ativo FROM filas_atendimento
+        WHERE id = $1 AND empresa_id = $2
+      `, [tool.fila_destino_id, empresa_id]);
+
+      if (filaResult.rows.length === 0) {
+        return { success: false, error: 'Fila destino não encontrada' };
+      }
+
+      const fila = filaResult.rows[0];
+
+      if (!fila.ativo) {
+        return { success: false, error: `Fila "${fila.nome}" está inativa` };
+      }
+
+      await pool.query(`
+        UPDATE conversas
+        SET agente_id = NULL,
+            fila_id = $1,
+            controlado_por = 'fila',
+            atualizado_em = NOW()
+        WHERE id = $2 AND empresa_id = $3
+      `, [fila.id, conversa_id, empresa_id]);
+
+      // Registrar no histórico
+      await pool.query(`
+        UPDATE conversas
+        SET historico_agentes_json = COALESCE(historico_agentes_json, '[]'::jsonb) || $1::jsonb
+        WHERE id = $2
+      `, [
+        JSON.stringify([{
+          agente_id: null,
+          agente_nome: null,
+          fila_id: fila.id,
+          fila_nome: fila.nome,
+          tipo: 'fila',
+          transferido_em: new Date().toISOString()
+        }]),
+        conversa_id
+      ]);
+
+      const duration = Date.now() - startTime;
+
+      createLogger.info('Transfer to queue executed', {
+        conversa_id, empresa_id,
+        fila_destino: fila.nome,
+        duration_ms: duration
+      });
+
+      return {
+        success: true,
+        data: {
+          transferido_para: fila.nome,
+          fila: fila.nome,
+          tipo: 'fila',
+          mensagem: `Atendimento transferido para a fila ${fila.nome}. Um atendente humano irá continuar o atendimento.`
+        },
+        duration_ms: duration
+      };
+    }
+
+    // --- Transfer to agent ---
     if (!tool.agente_destino_id) {
-      return { success: false, error: 'Tool de transferência sem agente destino configurado' };
+      return { success: false, error: 'Tool de transferência sem destino configurado' };
     }
 
     // Buscar agente destino com sua fila
@@ -241,6 +305,7 @@ export async function executeTransferTool(tool, context) {
     createLogger.error('Transfer tool failed', {
       conversa_id, empresa_id,
       agente_destino_id: tool.agente_destino_id,
+      fila_destino_id: tool.fila_destino_id,
       error: error.message,
       duration_ms: duration
     });
@@ -340,8 +405,8 @@ export function validateTool(tool) {
       errors.push('Tool method must be GET, POST, PUT, PATCH, or DELETE');
     }
   } else {
-    if (!tool.agente_destino_id) {
-      errors.push('Transfer tool requires agente_destino_id');
+    if (!tool.agente_destino_id && !tool.fila_destino_id) {
+      errors.push('Transfer tool requires agente_destino_id or fila_destino_id');
     }
   }
 

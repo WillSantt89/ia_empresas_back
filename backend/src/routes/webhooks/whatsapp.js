@@ -436,7 +436,7 @@ const whatsappWebhookRoutes = async (fastify) => {
     const toolsResult = await pool.query(`
       SELECT t.id, t.nome, t.descricao_para_llm, t.url, t.metodo,
              t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms,
-             t.tipo_tool, t.agente_destino_id
+             t.tipo_tool, t.agente_destino_id, t.fila_destino_id
       FROM tools t
       INNER JOIN agente_tools at2 ON t.id = at2.tool_id
       WHERE at2.agente_id = $1 AND t.ativo = true

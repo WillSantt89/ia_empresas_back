@@ -4,7 +4,7 @@ import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, archiveConversation } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
-import { executeTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { executeTool, executeTransferTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { sendTextMessage } from '../../services/whatsapp-sender.js';
 import { atribuirConversaAutomatica } from '../../services/fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats } from '../../services/websocket.js';
@@ -360,7 +360,8 @@ const n8nWebhookRoutes = async (fastify) => {
       const toolsResult = await pool.query(`
         SELECT
           t.id, t.nome, t.descricao_para_llm, t.url, t.metodo,
-          t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms
+          t.headers_json, t.body_template_json, t.parametros_schema_json, t.timeout_ms,
+          t.tipo_tool, t.agente_destino_id, t.fila_destino_id
         FROM tools t
         INNER JOIN agente_tools at2 ON t.id = at2.tool_id
         WHERE at2.agente_id = $1 AND t.ativo = true
@@ -404,7 +405,13 @@ const n8nWebhookRoutes = async (fastify) => {
         if (!toolConfig) {
           throw new Error(`Tool ${tool.nome} not found`);
         }
-        const result = await executeTool(toolConfig, args);
+
+        let result;
+        if (toolConfig.tipo_tool === 'transferencia') {
+          result = await executeTransferTool(toolConfig, { conversa_id, empresa_id });
+        } else {
+          result = await executeTool(toolConfig, args);
+        }
         return transformResultForLLM(result, 2000);
       };
 

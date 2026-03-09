@@ -137,6 +137,23 @@ export default async function filasRoutes(fastify) {
       }
     }
 
+    // Auto-criar tool de transferência para esta fila
+    try {
+      const toolNome = `transferir_para_fila_${fila.nome.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+$/, '')}`;
+      await pool.query(`
+        INSERT INTO tools (empresa_id, nome, descricao_para_llm, tipo_tool, fila_destino_id, parametros_schema_json, ativo)
+        VALUES ($1, $2, $3, 'transferencia', $4, $5, true)
+      `, [
+        empresaId,
+        toolNome,
+        `Transfere o atendimento para a fila ${fila.nome}. O cliente sera atendido por um operador humano desta fila.`,
+        fila.id,
+        JSON.stringify({ type: 'object', properties: {}, required: [] })
+      ]);
+    } catch (toolErr) {
+      logger.warn(`Falha ao criar tool de transferencia para fila ${fila.nome}: ${toolErr.message}`);
+    }
+
     logger.info(`Fila criada: ${fila.nome} (${fila.id})`);
     reply.status(201).send({ success: true, data: fila });
   });
@@ -316,6 +333,17 @@ export default async function filasRoutes(fastify) {
       await pool.query(
         `UPDATE conversas SET fila_id = NULL WHERE fila_id = $1 AND empresa_id = $2`,
         [id, empresaId]
+      );
+
+      // Remover tools de transferência que apontam para esta fila
+      // Primeiro remove agente_tools, depois a tool em si
+      await pool.query(
+        `DELETE FROM agente_tools WHERE tool_id IN (SELECT id FROM tools WHERE fila_destino_id = $1)`,
+        [id]
+      );
+      await pool.query(
+        `DELETE FROM tools WHERE fila_destino_id = $1`,
+        [id]
       );
 
       // fila_membros: CASCADE automatico
