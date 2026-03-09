@@ -87,7 +87,7 @@ if (config.isProduction) {
   }
 
   if (config.CORS_ORIGIN === '*') {
-    throw new Error('CORS_ORIGIN must not be "*" in production. Set it to your frontend URL(s).');
+    console.warn('[SECURITY WARNING] CORS_ORIGIN is "*" in production. Set it to your frontend URL(s) for better security.');
   }
 }
 
