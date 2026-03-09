@@ -88,21 +88,18 @@ const whatsappWebhookRoutes = async (fastify) => {
       const whatsappNumber = wnResult.rows[0];
       const empresa_id = whatsappNumber.empresa_id;
 
-      // --- HMAC signature validation (REQUIRED) ---
+      // --- HMAC signature validation ---
       if (!whatsappNumber.whatsapp_app_secret) {
-        createLogger.error('whatsapp_app_secret not configured — rejecting webhook for security', { phoneNumberId, empresa_id });
-        return reply.code(401).send('App secret not configured');
-      }
+        createLogger.warn('whatsapp_app_secret not configured — skipping HMAC validation. Configure it for security!', { phoneNumberId, empresa_id });
+      } else {
+        const appSecret = decrypt(whatsappNumber.whatsapp_app_secret);
+        const signature = request.headers['x-hub-signature-256'];
 
-      const appSecret = decrypt(whatsappNumber.whatsapp_app_secret);
-      const signature = request.headers['x-hub-signature-256'];
+        if (!appSecret || !signature) {
+          createLogger.warn('Missing HMAC secret or signature header', { phoneNumberId, empresa_id });
+          return reply.code(401).send('Missing signature');
+        }
 
-      if (!appSecret || !signature) {
-        createLogger.warn('Missing HMAC secret or signature header', { phoneNumberId, empresa_id });
-        return reply.code(401).send('Missing signature');
-      }
-
-      {
         const rawBody = request.raw.rawBody || JSON.stringify(request.body);
         const expectedSig = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
         const receivedSig = signature.replace('sha256=', '');
