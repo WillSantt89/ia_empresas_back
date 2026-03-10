@@ -2,6 +2,7 @@ import fetch from 'node-fetch';
 import { logger } from '../config/logger.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
 import { pool } from '../config/database.js';
+import { validarValorCampo } from '../routes/campos-personalizados.js';
 
 /**
  * Tool Runner Service
@@ -316,6 +317,132 @@ export async function executeTransferTool(tool, context) {
       message: error.message,
       duration_ms: duration
     };
+  }
+}
+
+/**
+ * Execute an attribute tool — saves contact or conversation attributes
+ * Called by the AI during function calling loop
+ * @param {Object} context - { conversa_id, empresa_id, contato_id, tipo_atributo: 'contato'|'atendimento' }
+ * @param {Object} args - Key-value pairs from the LLM
+ * @returns {Promise<Object>} Result
+ */
+export async function executeAtributoTool(context, args) {
+  const startTime = Date.now();
+  const { conversa_id, empresa_id, contato_id, tipo_atributo } = context;
+
+  try {
+    if (!args || Object.keys(args).length === 0) {
+      return { success: false, error: 'Nenhum atributo fornecido' };
+    }
+
+    // Buscar campos definidos
+    const camposResult = await pool.query(
+      `SELECT * FROM campos_personalizados WHERE empresa_id = $1 AND contexto = $2 AND ativo = true`,
+      [empresa_id, tipo_atributo]
+    );
+    const camposMap = {};
+    for (const c of camposResult.rows) {
+      camposMap[c.chave] = c;
+    }
+
+    const salvos = {};
+    const erros = [];
+
+    if (tipo_atributo === 'contato' && contato_id) {
+      // Buscar dados atuais do contato
+      const contato = await pool.query(
+        `SELECT dados_json FROM contatos WHERE id = $1 AND empresa_id = $2`,
+        [contato_id, empresa_id]
+      );
+      if (contato.rows.length === 0) {
+        return { success: false, error: 'Contato nao encontrado' };
+      }
+
+      const dadosAtuais = contato.rows[0].dados_json || {};
+
+      for (const [chave, valor] of Object.entries(args)) {
+        const campo = camposMap[chave];
+        if (campo) {
+          const validacao = validarValorCampo(campo, valor);
+          if (validacao.valido) {
+            dadosAtuais[chave] = validacao.valor;
+            salvos[chave] = validacao.valor;
+          } else {
+            erros.push(validacao.erro);
+          }
+        } else {
+          // Campo não definido pelo admin — salva como legado
+          dadosAtuais[chave] = String(valor);
+          salvos[chave] = String(valor);
+        }
+      }
+
+      await pool.query(
+        `UPDATE contatos SET dados_json = $1, atualizado_em = NOW() WHERE id = $2`,
+        [JSON.stringify(dadosAtuais), contato_id]
+      );
+    } else if (tipo_atributo === 'atendimento') {
+      // Buscar dados atuais da conversa
+      const conv = await pool.query(
+        `SELECT dados_json FROM conversas WHERE id = $1 AND empresa_id = $2`,
+        [conversa_id, empresa_id]
+      );
+      if (conv.rows.length === 0) {
+        return { success: false, error: 'Conversa nao encontrada' };
+      }
+
+      const dadosAtuais = conv.rows[0].dados_json || {};
+
+      for (const [chave, valor] of Object.entries(args)) {
+        const campo = camposMap[chave];
+        if (campo) {
+          const validacao = validarValorCampo(campo, valor);
+          if (validacao.valido) {
+            dadosAtuais[chave] = validacao.valor;
+            salvos[chave] = validacao.valor;
+          } else {
+            erros.push(validacao.erro);
+          }
+        } else {
+          dadosAtuais[chave] = String(valor);
+          salvos[chave] = String(valor);
+        }
+      }
+
+      await pool.query(
+        `UPDATE conversas SET dados_json = $1, atualizado_em = NOW() WHERE id = $2`,
+        [JSON.stringify(dadosAtuais), conversa_id]
+      );
+    } else {
+      return { success: false, error: `Tipo de atributo invalido ou contato nao vinculado` };
+    }
+
+    const duration = Date.now() - startTime;
+
+    createLogger.info('Attribute tool executed', {
+      conversa_id, empresa_id, contato_id,
+      tipo_atributo,
+      campos_salvos: Object.keys(salvos),
+      duration_ms: duration,
+    });
+
+    return {
+      success: true,
+      data: {
+        salvos,
+        erros: erros.length > 0 ? erros : undefined,
+        mensagem: `Atributos salvos: ${Object.entries(salvos).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+      },
+      duration_ms: duration,
+    };
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    createLogger.error('Attribute tool failed', {
+      conversa_id, empresa_id, tipo_atributo,
+      error: error.message, duration_ms: duration,
+    });
+    return { success: false, error: error.message, duration_ms: duration };
   }
 }
 

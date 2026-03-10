@@ -5,7 +5,7 @@ import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
-import { executeTool, executeTransferTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { executeTool, executeTransferTool, executeAtributoTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { parseMetaMessage, buildGeminiParts } from '../../services/media-handler.js';
 import { saveMedia } from '../../services/media-storage.js';
 import { sendTextMessage, markAsRead } from '../../services/whatsapp-sender.js';
@@ -445,6 +445,54 @@ const whatsappWebhookRoutes = async (fastify) => {
 
     const tools = toolsResult.rows;
 
+    // --- Inject attribute tools from campos_personalizados ---
+    const camposResult = await pool.query(
+      `SELECT chave, display_name, tipo, contexto, descricao, opcoes FROM campos_personalizados WHERE empresa_id = $1 AND ativo = true ORDER BY contexto, ordem`,
+      [empresa_id]
+    );
+    if (camposResult.rows.length > 0) {
+      const contatoCampos = camposResult.rows.filter(c => c.contexto === 'contato');
+      const atendimentoCampos = camposResult.rows.filter(c => c.contexto === 'atendimento');
+
+      if (contatoCampos.length > 0) {
+        const properties = {};
+        for (const c of contatoCampos) {
+          const prop = { description: c.descricao || c.display_name };
+          if (c.tipo === 'number') prop.type = 'number';
+          else if (c.tipo === 'checkbox') { prop.type = 'string'; prop.enum = ['true', 'false']; }
+          else if (c.tipo === 'list' && c.opcoes?.length > 0) { prop.type = 'string'; prop.enum = c.opcoes; }
+          else prop.type = 'string';
+          properties[c.chave] = prop;
+        }
+        tools.push({
+          nome: 'salvar_atributo_contato',
+          descricao_para_llm: `Salva informacoes do contato/cliente. Use quando o cliente informar dados pessoais como ${contatoCampos.map(c => c.display_name).join(', ')}. Pode salvar um ou mais campos de uma vez.`,
+          parametros_schema_json: { type: 'object', properties, required: [] },
+          tipo_tool: 'atributo',
+          _atributo_contexto: 'contato',
+        });
+      }
+
+      if (atendimentoCampos.length > 0) {
+        const properties = {};
+        for (const c of atendimentoCampos) {
+          const prop = { description: c.descricao || c.display_name };
+          if (c.tipo === 'number') prop.type = 'number';
+          else if (c.tipo === 'checkbox') { prop.type = 'string'; prop.enum = ['true', 'false']; }
+          else if (c.tipo === 'list' && c.opcoes?.length > 0) { prop.type = 'string'; prop.enum = c.opcoes; }
+          else prop.type = 'string';
+          properties[c.chave] = prop;
+        }
+        tools.push({
+          nome: 'salvar_atributo_atendimento',
+          descricao_para_llm: `Salva informacoes especificas deste atendimento. Use para registrar ${atendimentoCampos.map(c => c.display_name).join(', ')}. Pode salvar um ou mais campos de uma vez.`,
+          parametros_schema_json: { type: 'object', properties, required: [] },
+          tipo_tool: 'atributo',
+          _atributo_contexto: 'atendimento',
+        });
+      }
+    }
+
     // --- Redis history ---
     const history = await getHistory(empresa_id, conversationKey);
 
@@ -523,6 +571,11 @@ const whatsappWebhookRoutes = async (fastify) => {
       let result;
       if (toolConfig.tipo_tool === 'transferencia') {
         result = await executeTransferTool(toolConfig, { conversa_id, empresa_id });
+      } else if (toolConfig.tipo_tool === 'atributo') {
+        result = await executeAtributoTool(
+          { conversa_id, empresa_id, contato_id, tipo_atributo: toolConfig._atributo_contexto },
+          args
+        );
       } else {
         result = await executeTool(toolConfig, args);
       }
