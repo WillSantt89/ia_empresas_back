@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { logger } from '../config/logger.js';
 import { config } from '../config/env.js';
-import { DEFAULT_MODELS, DEFAULT_LIMITS } from '../config/constants.js';
+import { DEFAULT_MODELS, DEFAULT_LIMITS, DEPRECATED_MODEL_FALLBACK } from '../config/constants.js';
 
 /**
  * Gemini API Service with Function Calling
@@ -27,7 +27,7 @@ const createLogger = logger.child({ module: 'gemini-service' });
 export async function processMessage(options) {
   const {
     apiKey,
-    model = DEFAULT_MODELS.GEMINI_FLASH,
+    model: requestedModel = DEFAULT_MODELS.GEMINI_FLASH,
     systemPrompt,
     tools = [],
     history = [],
@@ -36,6 +36,12 @@ export async function processMessage(options) {
     temperature = DEFAULT_LIMITS.TEMPERATURE,
     maxTokens = DEFAULT_LIMITS.MAX_TOKENS,
   } = options;
+
+  // Auto-migrate deprecated models
+  const model = DEPRECATED_MODEL_FALLBACK[requestedModel] || requestedModel;
+  if (model !== requestedModel) {
+    createLogger.warn('Auto-migrating deprecated model', { from: requestedModel, to: model });
+  }
 
   const startTime = Date.now();
   const toolsCalled = [];
@@ -383,7 +389,8 @@ export function validateResponse(response) {
  * @param {number} params.ttlSeconds - Cache TTL in seconds (default 24h)
  * @returns {Promise<Object>} Created cache { name, expireTime, ... }
  */
-export async function createContextCache({ apiKey, model, systemPrompt, tools, ttlSeconds = 86400 }) {
+export async function createContextCache({ apiKey, model: requestedModel, systemPrompt, tools, ttlSeconds = 86400 }) {
+  const model = DEPRECATED_MODEL_FALLBACK[requestedModel] || requestedModel;
   const ai = new GoogleGenAI({ apiKey });
   const cacheConfig = {
     displayName: `agent-cache-${Date.now()}`,
@@ -429,7 +436,7 @@ export async function deleteContextCache(apiKey, cacheName) {
 export async function processMessageWithTools(options, toolExecutor) {
   const {
     apiKey,
-    model = DEFAULT_MODELS.GEMINI_FLASH,
+    model: requestedModel = DEFAULT_MODELS.GEMINI_FLASH,
     systemPrompt,
     tools = [],
     history = [],
@@ -439,6 +446,12 @@ export async function processMessageWithTools(options, toolExecutor) {
     maxTokens = DEFAULT_LIMITS.MAX_TOKENS,
     cachedContentName,
   } = options;
+
+  // Auto-migrate deprecated models
+  const model = DEPRECATED_MODEL_FALLBACK[requestedModel] || requestedModel;
+  if (model !== requestedModel) {
+    createLogger.warn('Auto-migrating deprecated model', { from: requestedModel, to: model });
+  }
 
   const startTime = Date.now();
   const executedTools = [];

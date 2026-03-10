@@ -129,29 +129,39 @@ export const AI_PROVIDERS = {
 // Models per provider (ordered: newest first)
 export const PROVIDER_MODELS = {
   google: [
-    // Gemini 3 series
+    // Gemini 3.1 series
     'gemini-3.1-pro-preview',
-    'gemini-3-pro-preview',
+    'gemini-3.1-flash-lite-preview',
+    // Gemini 3 series
     'gemini-3-flash-preview',
-    // Gemini 2.5 series
+    // Gemini 2.5 series (stable)
     'gemini-2.5-pro',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
-    // Gemini 2.0 series
-    'gemini-2.0-pro-001',
+    // Gemini 2.0 series (deprecated — retira em 01/06/2026)
     'gemini-2.0-flash-001',
     'gemini-2.0-flash-lite',
-    // Gemini 1.5 series (legacy)
-    'gemini-1.5-pro',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-8b',
   ],
   // claude: [],  // futuro
   // grok: [],    // futuro
 };
 
-// All allowed model values (flat list for validation)
-export const ALL_MODELS = Object.values(PROVIDER_MODELS).flat();
+// Models that were removed but may exist in DB — auto-migrate to fallback
+export const DEPRECATED_MODEL_FALLBACK = {
+  'gemini-3-pro-preview': 'gemini-3.1-pro-preview',
+  'gemini-2.0-pro-001': 'gemini-2.5-pro',
+  'gemini-1.5-pro': 'gemini-2.5-pro',
+  'gemini-1.5-flash': 'gemini-2.5-flash',
+  'gemini-1.5-flash-8b': 'gemini-2.5-flash-lite',
+  'gemini-2.5-flash-preview': 'gemini-2.5-flash',
+  'gemini-2.0-flash': 'gemini-2.0-flash-001',
+};
+
+// All allowed model values (flat list for validation — includes deprecated for backward compat)
+export const ALL_MODELS = [
+  ...Object.values(PROVIDER_MODELS).flat(),
+  ...Object.keys(DEPRECATED_MODEL_FALLBACK),
+];
 
 // Default Models (backward compat)
 export const DEFAULT_MODELS = {
