@@ -610,6 +610,45 @@ export default async function conversasRoutes(fastify, opts) {
         });
       }
 
+      const conversa = conversaResult.rows[0];
+
+      // Verificar campos obrigatórios na resolução
+      const camposObrigatorios = await client.query(
+        `SELECT display_name, chave, contexto FROM campos_personalizados
+         WHERE empresa_id = $1 AND obrigatorio_resolucao = true AND ativo = true`,
+        [empresaId]
+      );
+
+      if (camposObrigatorios.rows.length > 0) {
+        const conversaDados = conversa.dados_json || {};
+        let contatoDados = {};
+        if (conversa.contato_id) {
+          const contatoRes = await client.query('SELECT dados_json FROM contatos WHERE id = $1', [conversa.contato_id]);
+          if (contatoRes.rows.length > 0) contatoDados = contatoRes.rows[0].dados_json || {};
+        }
+
+        const faltantes = [];
+        for (const campo of camposObrigatorios.rows) {
+          const dados = campo.contexto === 'contato' ? contatoDados : conversaDados;
+          const valor = dados[campo.chave];
+          if (!valor || (typeof valor === 'string' && valor.trim() === '')) {
+            faltantes.push({ display_name: campo.display_name, chave: campo.chave, contexto: campo.contexto });
+          }
+        }
+
+        if (faltantes.length > 0) {
+          await client.query('ROLLBACK');
+          return reply.code(400).send({
+            success: false,
+            error: {
+              code: 'CAMPOS_OBRIGATORIOS_FALTANTES',
+              message: `Preencha os campos obrigatorios antes de finalizar: ${faltantes.map(f => f.display_name).join(', ')}`,
+              details: { campos_faltantes: faltantes },
+            }
+          });
+        }
+      }
+
       // Finalizar conversa
       await client.query(`
         UPDATE conversas
