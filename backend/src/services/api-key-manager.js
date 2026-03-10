@@ -12,7 +12,10 @@ import { redis, setWithExpiry, getJSON } from '../config/redis.js';
  *   id, empresa_id, provedor, nome_exibicao, api_key_encrypted, status,
  *   prioridade, total_requests_hoje, total_tokens_hoje, ultimo_uso,
  *   ultimo_erro, retry_apos, ultimo_erro_msg, tentativas_erro,
- *   criado_por, criado_em, atualizado_em, agente_id
+ *   criado_por, criado_em, atualizado_em, agente_id (legacy), todos_agentes
+ *
+ * api_key_agentes (tabela ponte N:N):
+ *   api_key_id, agente_id
  */
 
 const createLogger = logger.child({ module: 'api-key-manager' });
@@ -22,10 +25,18 @@ const API_KEY_CACHE_PREFIX = 'apikey:';
 const API_KEY_CACHE_TTL = 300; // 5 minutes
 
 /**
- * Create a new API key for an agent
+ * Create a new API key for one or more agents (or all)
+ * @param {Object} options
+ * @param {string} options.empresaId
+ * @param {string} [options.agenteId] - Legacy single agent (still supported)
+ * @param {string[]} [options.agenteIds] - Multiple agents
+ * @param {boolean} [options.todosAgentes] - Apply to all agents
+ * @param {string} options.geminiApiKey
+ * @param {string} options.nome
+ * @param {string} options.createdBy
  */
 export async function createApiKey(options) {
-  const { empresaId, agenteId, geminiApiKey, nome, createdBy } = options;
+  const { empresaId, agenteId, agenteIds, todosAgentes, geminiApiKey, nome, createdBy } = options;
   const client = await pool.connect();
 
   try {
@@ -40,6 +51,7 @@ export async function createApiKey(options) {
       INSERT INTO api_keys (
         empresa_id,
         agente_id,
+        todos_agentes,
         provedor,
         nome_exibicao,
         api_key_encrypted,
@@ -47,7 +59,7 @@ export async function createApiKey(options) {
         status,
         prioridade,
         criado_por
-      ) VALUES ($1, $2, 'gemini', $3, $4, $5, 'ativa', 1, $6)
+      ) VALUES ($1, $2, $3, 'gemini', $4, $5, $6, 'ativa', 1, $7)
       RETURNING
         id,
         nome_exibicao,
@@ -55,17 +67,32 @@ export async function createApiKey(options) {
         criado_em
     `;
 
-    const result = await client.query(query,
-      [empresaId, agenteId, nome, encryptedKey, keyHash, createdBy]
-    );
+    // Legacy: single agenteId for backwards compat (first agent or null)
+    const ids = agenteIds || (agenteId ? [agenteId] : []);
+    const legacyAgenteId = ids.length === 1 && !todosAgentes ? ids[0] : null;
 
-    await client.query('COMMIT');
+    const result = await client.query(query,
+      [empresaId, legacyAgenteId, !!todosAgentes, nome, encryptedKey, keyHash, createdBy]
+    );
 
     const created = result.rows[0];
 
+    // Insert into api_key_agentes pivot table (when not todos_agentes)
+    if (!todosAgentes && ids.length > 0) {
+      for (const agId of ids) {
+        await client.query(
+          'INSERT INTO api_key_agentes (api_key_id, agente_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [created.id, agId]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
     createLogger.info('API key created', {
       empresa_id: empresaId,
-      agente_id: agenteId,
+      todos_agentes: !!todosAgentes,
+      agente_ids: ids,
       key_id: created.id,
       created_by: createdBy
     });
@@ -82,7 +109,6 @@ export async function createApiKey(options) {
     await client.query('ROLLBACK');
     createLogger.error('Failed to create API key', {
       empresa_id: empresaId,
-      agente_id: agenteId,
       error: error.message
     });
     throw error;
@@ -225,6 +251,7 @@ export async function listApiKeys(empresaId, agenteId = null) {
         ak.id,
         ak.nome_exibicao as nome,
         ak.agente_id,
+        ak.todos_agentes,
         ak.provedor,
         ak.status,
         ak.prioridade,
@@ -235,10 +262,8 @@ export async function listApiKeys(empresaId, agenteId = null) {
         ak.ultimo_erro,
         ak.ultimo_erro_msg,
         ak.total_requests_hoje,
-        a.nome as agente_nome,
         u.nome as created_by_nome
       FROM api_keys ak
-      LEFT JOIN agentes a ON ak.agente_id = a.id
       LEFT JOIN usuarios u ON ak.criado_por = u.id
       WHERE ak.empresa_id = $1
     `;
@@ -246,7 +271,7 @@ export async function listApiKeys(empresaId, agenteId = null) {
     const params = [empresaId];
 
     if (agenteId) {
-      query += ' AND ak.agente_id = $2';
+      query += ` AND (ak.todos_agentes = true OR ak.id IN (SELECT api_key_id FROM api_key_agentes WHERE agente_id = $2))`;
       params.push(agenteId);
     }
 
@@ -254,16 +279,33 @@ export async function listApiKeys(empresaId, agenteId = null) {
 
     const result = await pool.query(query, params);
 
+    // Fetch agentes for each key from pivot table
+    const keyIds = result.rows.map(r => r.id);
+    let agentesMap = {};
+    if (keyIds.length > 0) {
+      const agentesResult = await pool.query(`
+        SELECT aka.api_key_id, a.id, a.nome
+        FROM api_key_agentes aka
+        INNER JOIN agentes a ON aka.agente_id = a.id
+        WHERE aka.api_key_id = ANY($1)
+        ORDER BY a.nome
+      `, [keyIds]);
+      for (const row of agentesResult.rows) {
+        if (!agentesMap[row.api_key_id]) agentesMap[row.api_key_id] = [];
+        agentesMap[row.api_key_id].push({ id: row.id, nome: row.nome });
+      }
+    }
+
     return result.rows.map(key => ({
       id: key.id,
       nome: key.nome,
       provedor: key.provedor,
       status: key.status,
       prioridade: key.prioridade,
-      agente: key.agente_id ? {
-        id: key.agente_id,
-        nome: key.agente_nome
-      } : null,
+      todos_agentes: key.todos_agentes || false,
+      agentes: key.todos_agentes ? [] : (agentesMap[key.id] || []),
+      // Legacy compat
+      agente: key.agente_id ? { id: key.agente_id } : null,
       created_at: key.criado_em,
       created_by: key.created_by_nome,
       last_used_at: key.ultimo_uso,
@@ -332,7 +374,7 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
 
     // Get current key details
     const currentQuery = `
-      SELECT agente_id, nome_exibicao as nome
+      SELECT agente_id, todos_agentes, nome_exibicao as nome
       FROM api_keys
       WHERE empresa_id = $1 AND id = $2 AND status = 'ativa'
     `;
@@ -343,12 +385,20 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
       throw new Error('API key not found or already revoked');
     }
 
-    const { agente_id, nome } = currentResult.rows[0];
+    const { agente_id, todos_agentes, nome } = currentResult.rows[0];
 
-    // Create new key
+    // Get associated agents from pivot table
+    const agentesResult = await client.query(
+      'SELECT agente_id FROM api_key_agentes WHERE api_key_id = $1',
+      [oldKeyId]
+    );
+    const agenteIds = agentesResult.rows.map(r => r.agente_id);
+
+    // Create new key preserving associations
     const newKey = await createApiKey({
       empresaId,
-      agenteId: agente_id,
+      agenteIds: agenteIds.length > 0 ? agenteIds : (agente_id ? [agente_id] : []),
+      todosAgentes: todos_agentes,
       geminiApiKey,
       nome: `${nome} (Rotated)`,
       createdBy: rotatedBy
@@ -382,10 +432,13 @@ export async function rotateApiKey(empresaId, oldKeyId, geminiApiKey, rotatedBy)
 }
 
 /**
- * Update API key metadata (name, priority, and optionally the Gemini key)
+ * Update API key metadata (name, priority, agents, and optionally the Gemini key)
  */
 export async function updateApiKeyInfo(empresaId, keyId, updates) {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+
     const setClauses = ['atualizado_em = CURRENT_TIMESTAMP'];
     const params = [empresaId, keyId];
     let paramIdx = 3;
@@ -408,19 +461,44 @@ export async function updateApiKeyInfo(empresaId, keyId, updates) {
       setClauses.push(`status = $${paramIdx++}`);
       params.push(updates.status);
     }
+    if (updates.todos_agentes !== undefined) {
+      setClauses.push(`todos_agentes = $${paramIdx++}`);
+      params.push(updates.todos_agentes);
+    }
 
     const query = `
       UPDATE api_keys
       SET ${setClauses.join(', ')}
       WHERE empresa_id = $1 AND id = $2
-      RETURNING id, nome_exibicao as nome, prioridade, status, atualizado_em
+      RETURNING id, nome_exibicao as nome, prioridade, status, todos_agentes, atualizado_em
     `;
 
-    const result = await pool.query(query, params);
+    const result = await client.query(query, params);
 
     if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
       return null;
     }
+
+    // Update agent associations if provided
+    if (updates.agente_ids !== undefined) {
+      // Remove all existing associations
+      await client.query('DELETE FROM api_key_agentes WHERE api_key_id = $1', [keyId]);
+      // Insert new ones
+      if (!updates.todos_agentes && updates.agente_ids.length > 0) {
+        for (const agId of updates.agente_ids) {
+          await client.query(
+            'INSERT INTO api_key_agentes (api_key_id, agente_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+            [keyId, agId]
+          );
+        }
+      }
+      // Update legacy agente_id column
+      const legacyId = updates.agente_ids.length === 1 && !updates.todos_agentes ? updates.agente_ids[0] : null;
+      await client.query('UPDATE api_keys SET agente_id = $1 WHERE id = $2', [legacyId, keyId]);
+    }
+
+    await client.query('COMMIT');
 
     createLogger.info('API key info updated', {
       empresa_id: empresaId,
@@ -431,12 +509,15 @@ export async function updateApiKeyInfo(empresaId, keyId, updates) {
     return result.rows[0];
 
   } catch (error) {
+    await client.query('ROLLBACK');
     createLogger.error('Failed to update API key info', {
       empresa_id: empresaId,
       key_id: keyId,
       error: error.message
     });
     throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -480,6 +561,7 @@ export async function updateGeminiKey(empresaId, keyId, newGeminiKey) {
 /**
  * Get all active API keys for an agent, ordered by priority
  * Used for failover: when one key fails, try the next
+ * Supports: todos_agentes=true, pivot table api_key_agentes, and legacy agente_id
  */
 export async function getActiveKeysForAgent(empresaId, agenteId) {
   try {
@@ -493,9 +575,13 @@ export async function getActiveKeysForAgent(empresaId, agenteId) {
         retry_apos
       FROM api_keys
       WHERE empresa_id = $1
-        AND agente_id = $2
         AND status = 'ativa'
         AND (retry_apos IS NULL OR retry_apos < CURRENT_TIMESTAMP)
+        AND (
+          todos_agentes = true
+          OR id IN (SELECT api_key_id FROM api_key_agentes WHERE agente_id = $2)
+          OR agente_id = $2
+        )
       ORDER BY prioridade ASC, tentativas_erro ASC, criado_em ASC
     `;
 

@@ -66,21 +66,36 @@ const apiKeysRoutes = async (fastify) => {
         type: 'object',
         properties: {
           agente_id: { type: 'string', format: 'uuid' },
+          agente_ids: { type: 'array', items: { type: 'string', format: 'uuid' } },
+          todos_agentes: { type: 'boolean' },
           nome: { type: 'string', minLength: 2, maxLength: 100 },
           gemini_api_key: { type: 'string', minLength: 20 },
           expires_at: { type: 'string', format: 'date-time' }
         },
-        required: ['agente_id', 'nome', 'gemini_api_key']
+        required: ['nome', 'gemini_api_key']
       }
     }
   }, async (request, reply) => {
     const { empresa_id, id: userId } = request.user;
-    const { agente_id, nome, gemini_api_key } = request.body;
+    const { agente_id, agente_ids, todos_agentes, nome, gemini_api_key } = request.body;
+
+    // Validate: must have todos_agentes OR at least one agent
+    if (!todos_agentes && !agente_id && (!agente_ids || agente_ids.length === 0)) {
+      return reply.code(400).send({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Selecione pelo menos um agente ou marque "Todos os agentes"'
+        }
+      });
+    }
 
     try {
       const apiKey = await createApiKey({
         empresaId: empresa_id,
         agenteId: agente_id,
+        agenteIds: agente_ids,
+        todosAgentes: todos_agentes,
         geminiApiKey: gemini_api_key,
         nome,
         createdBy: userId
@@ -88,7 +103,7 @@ const apiKeysRoutes = async (fastify) => {
 
       createLogger.info('API key created', {
         empresa_id,
-        agente_id,
+        todos_agentes,
         key_id: apiKey.id
       });
 
@@ -102,7 +117,6 @@ const apiKeysRoutes = async (fastify) => {
     } catch (error) {
       createLogger.error('Failed to create API key', {
         empresa_id,
-        agente_id,
         error: error.message
       });
       throw error;
@@ -128,7 +142,9 @@ const apiKeysRoutes = async (fastify) => {
           nome: { type: 'string', minLength: 2, maxLength: 100 },
           prioridade: { type: 'integer', minimum: 1, maximum: 100 },
           gemini_api_key: { type: 'string', minLength: 20 },
-          status: { type: 'string', enum: ['ativa', 'standby', 'desativada'] }
+          status: { type: 'string', enum: ['ativa', 'standby', 'desativada'] },
+          todos_agentes: { type: 'boolean' },
+          agente_ids: { type: 'array', items: { type: 'string', format: 'uuid' } }
         }
       }
     }
