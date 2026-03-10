@@ -231,11 +231,55 @@ export default async function filasRoutes(fastify) {
 
     // Verificar existencia
     const existing = await pool.query(
-      `SELECT id FROM filas_atendimento WHERE id = $1 AND empresa_id = $2`,
+      `SELECT id, ativo, is_default FROM filas_atendimento WHERE id = $1 AND empresa_id = $2`,
       [id, empresaId]
     );
     if (existing.rows.length === 0) {
       return reply.status(404).send({ success: false, error: { message: 'Fila nao encontrada' } });
+    }
+
+    // Bloquear desativacao se tem conversas ativas na fila
+    if (body.ativo === false && existing.rows[0].ativo === true) {
+      if (existing.rows[0].is_default) {
+        return reply.status(400).send({
+          success: false,
+          error: { message: 'Nao e possivel desativar a fila padrao. Defina outra fila como padrao primeiro.' },
+        });
+      }
+
+      const activeConversas = await pool.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE controlado_por = 'humano') as em_atendimento,
+           COUNT(*) FILTER (WHERE controlado_por = 'fila') as aguardando,
+           COUNT(*) FILTER (WHERE controlado_por = 'ia') as com_ia,
+           COUNT(*) as total
+         FROM conversas
+         WHERE fila_id = $1 AND status = 'ativo'`,
+        [id]
+      );
+      const stats = activeConversas.rows[0];
+      const total = parseInt(stats.total);
+
+      if (total > 0) {
+        const detalhes = [];
+        if (parseInt(stats.em_atendimento) > 0) detalhes.push(`${stats.em_atendimento} em atendimento humano`);
+        if (parseInt(stats.aguardando) > 0) detalhes.push(`${stats.aguardando} aguardando na fila`);
+        if (parseInt(stats.com_ia) > 0) detalhes.push(`${stats.com_ia} com IA`);
+
+        return reply.status(400).send({
+          success: false,
+          error: {
+            message: `Nao e possivel desativar: ${total} conversa(s) ativa(s) nesta fila (${detalhes.join(', ')}). Finalize ou transfira todas antes de desativar.`,
+            code: 'FILA_TEM_CONVERSAS_ATIVAS',
+            conversas_ativas: {
+              total,
+              em_atendimento: parseInt(stats.em_atendimento),
+              aguardando: parseInt(stats.aguardando),
+              com_ia: parseInt(stats.com_ia),
+            },
+          },
+        });
+      }
     }
 
     const fields = [];
@@ -319,15 +363,38 @@ export default async function filasRoutes(fastify) {
         });
       }
 
-      // Verificar se tem conversas ativas
+      // Verificar se tem conversas ativas (qualquer controlado_por)
       const activeConversas = await pool.query(
-        `SELECT COUNT(*) as total FROM conversas WHERE fila_id = $1 AND status = 'ativo'`,
+        `SELECT
+           COUNT(*) FILTER (WHERE controlado_por = 'humano') as em_atendimento,
+           COUNT(*) FILTER (WHERE controlado_por = 'fila') as aguardando,
+           COUNT(*) FILTER (WHERE controlado_por = 'ia') as com_ia,
+           COUNT(*) as total
+         FROM conversas
+         WHERE fila_id = $1 AND status = 'ativo'`,
         [id]
       );
-      if (parseInt(activeConversas.rows[0].total) > 0) {
+      const stats = activeConversas.rows[0];
+      const total = parseInt(stats.total);
+
+      if (total > 0) {
+        const detalhes = [];
+        if (parseInt(stats.em_atendimento) > 0) detalhes.push(`${stats.em_atendimento} em atendimento humano`);
+        if (parseInt(stats.aguardando) > 0) detalhes.push(`${stats.aguardando} aguardando na fila`);
+        if (parseInt(stats.com_ia) > 0) detalhes.push(`${stats.com_ia} com IA`);
+
         return reply.status(400).send({
           success: false,
-          error: { message: `Fila tem ${activeConversas.rows[0].total} conversas ativas. Transfira ou finalize antes de excluir.` },
+          error: {
+            message: `Nao e possivel excluir: ${total} conversa(s) ativa(s) nesta fila (${detalhes.join(', ')}). Finalize ou transfira todas antes de excluir.`,
+            code: 'FILA_TEM_CONVERSAS_ATIVAS',
+            conversas_ativas: {
+              total,
+              em_atendimento: parseInt(stats.em_atendimento),
+              aguardando: parseInt(stats.aguardando),
+              com_ia: parseInt(stats.com_ia),
+            },
+          },
         });
       }
 
