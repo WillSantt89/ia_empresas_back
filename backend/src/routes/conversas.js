@@ -672,7 +672,6 @@ export default async function conversasRoutes(fastify, opts) {
       logger.info(`Conversa ${id} finalized`);
 
       // Arquivar histórico Redis (move para archive com 30d TTL, limpa conv ativa)
-      const conversa = conversaResult.rows[0];
       const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
       archiveConversation(empresaId, conversationKey).catch(err => {
         logger.error('Failed to archive Redis history on finalize', { conversa_id: id, error: err.message });
