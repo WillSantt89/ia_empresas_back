@@ -21,14 +21,16 @@ export default async function filasRoutes(fastify) {
   }, async (request, reply) => {
     const { empresaId, user } = request;
     const isOperador = user.role === 'operador';
-    const { todas } = request.query || {};
+    const { todas, incluir_inativas } = request.query || {};
 
     let filas;
     if (isOperador && !todas) {
       filas = await getFilasDoUsuario(user.id, empresaId);
     } else {
+      // Master/admin podem ver filas inativas se pedirem
+      const showInativas = incluir_inativas === 'true' && (user.role === 'master' || user.role === 'admin');
       const result = await pool.query(
-        `SELECT * FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY nome`,
+        `SELECT * FROM filas_atendimento WHERE empresa_id = $1 ${showInativas ? '' : 'AND ativo = true'} ORDER BY ativo DESC, nome`,
         [empresaId]
       );
       filas = result.rows;
