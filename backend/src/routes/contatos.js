@@ -4,6 +4,7 @@ import { decrypt } from '../config/encryption.js';
 import { checkPermission } from '../middleware/permission.js';
 import { emitNovaConversaNaFila, emitNovaMensagem } from '../services/websocket.js';
 import { sendTemplateMessage } from '../services/whatsapp-sender.js';
+import { validarValorCampo } from './campos-personalizados.js';
 
 const createLogger = logger.child({ module: 'contatos-routes' });
 
@@ -696,6 +697,90 @@ const contatosRoutes = async (fastify) => {
       };
     } catch (error) {
       createLogger.error('Failed to delete contato', { empresa_id, contato_id: id, error: error.message });
+      throw error;
+    }
+  });
+
+  /**
+   * PUT /api/contatos/:id/atributos
+   * Salvar/atualizar atributos personalizados do contato
+   * Valida contra campos_personalizados definidos pelo admin
+   * Body: { cpf: "123...", nome_completo: "Joao", ... }
+   */
+  fastify.put('/:id/atributos', {
+    preHandler: [fastify.authenticate],
+    schema: {
+      params: {
+        type: 'object',
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: { type: 'object' }
+    }
+  }, async (request, reply) => {
+    const { empresa_id } = request.user;
+    const { id } = request.params;
+    const atributos = request.body;
+
+    try {
+      // Buscar contato
+      const contato = await pool.query(
+        `SELECT id, dados_json FROM contatos WHERE id = $1 AND empresa_id = $2`,
+        [id, empresa_id]
+      );
+      if (contato.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Contato nao encontrado' } });
+      }
+
+      // Buscar campos definidos para contato
+      const camposResult = await pool.query(
+        `SELECT * FROM campos_personalizados WHERE empresa_id = $1 AND contexto = 'contato' AND ativo = true`,
+        [empresa_id]
+      );
+      const camposMap = {};
+      for (const c of camposResult.rows) {
+        camposMap[c.chave] = c;
+      }
+
+      // Validar e montar dados
+      const dadosAtuais = contato.rows[0].dados_json || {};
+      const erros = [];
+
+      for (const [chave, valor] of Object.entries(atributos)) {
+        const campo = camposMap[chave];
+        if (!campo) {
+          // Campo não definido pelo admin — ignora silenciosamente (ou aceita se for legado)
+          dadosAtuais[chave] = valor;
+          continue;
+        }
+
+        const validacao = validarValorCampo(campo, valor);
+        if (!validacao.valido) {
+          erros.push(validacao.erro);
+          continue;
+        }
+
+        dadosAtuais[chave] = validacao.valor;
+      }
+
+      if (erros.length > 0) {
+        return reply.code(400).send({
+          success: false,
+          error: { message: erros.join('; '), details: erros }
+        });
+      }
+
+      // Salvar
+      const result = await pool.query(
+        `UPDATE contatos SET dados_json = $1, atualizado_em = NOW()
+         WHERE id = $2 AND empresa_id = $3 RETURNING *`,
+        [JSON.stringify(dadosAtuais), id, empresa_id]
+      );
+
+      createLogger.info('Atributos contato atualizados', { empresa_id, contato_id: id, chaves: Object.keys(atributos) });
+
+      return { success: true, data: result.rows[0] };
+    } catch (error) {
+      createLogger.error('Erro ao atualizar atributos contato', { empresa_id, contato_id: id, error: error.message });
       throw error;
     }
   });

@@ -11,6 +11,7 @@ import {
   emitNovaConversaNaFila, emitFilaStats, emitToUser,
   emitNovaMensagem,
 } from '../services/websocket.js';
+import { validarValorCampo } from './campos-personalizados.js';
 
 
 export default async function conversasRoutes(fastify, opts) {
@@ -1156,6 +1157,142 @@ export default async function conversasRoutes(fastify, opts) {
     );
 
     reply.status(201).send({ success: true, data: result.rows[0] });
+  });
+
+  // ============================================
+  // GET /:id/atributos — Obter definicoes + valores preenchidos
+  // ============================================
+  fastify.get('/:id/atributos', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'read'),
+    ],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const { empresaId } = request;
+
+    // Buscar conversa
+    const conv = await pool.query(
+      `SELECT id, contato_id, dados_json FROM conversas WHERE id = $1 AND empresa_id = $2`,
+      [id, empresaId]
+    );
+    if (conv.rows.length === 0) {
+      return reply.status(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+    }
+
+    const conversa = conv.rows[0];
+
+    // Buscar dados do contato (se vinculado)
+    let contatoDados = {};
+    if (conversa.contato_id) {
+      const contato = await pool.query(
+        `SELECT dados_json FROM contatos WHERE id = $1`,
+        [conversa.contato_id]
+      );
+      if (contato.rows.length > 0) {
+        contatoDados = contato.rows[0].dados_json || {};
+      }
+    }
+
+    // Buscar campos definidos
+    const campos = await pool.query(
+      `SELECT id, display_name, chave, tipo, contexto, descricao, opcoes, regex_pattern, regex_mensagem, valor_padrao, obrigatorio_resolucao, ordem
+       FROM campos_personalizados WHERE empresa_id = $1 AND ativo = true ORDER BY contexto, ordem, display_name`,
+      [empresaId]
+    );
+
+    const conversaDados = conversa.dados_json || {};
+
+    // Montar resposta agrupada
+    const resultado = {
+      contato: campos.rows
+        .filter(c => c.contexto === 'contato')
+        .map(c => ({
+          ...c,
+          valor: contatoDados[c.chave] !== undefined ? contatoDados[c.chave] : (c.valor_padrao || ''),
+        })),
+      atendimento: campos.rows
+        .filter(c => c.contexto === 'atendimento')
+        .map(c => ({
+          ...c,
+          valor: conversaDados[c.chave] !== undefined ? conversaDados[c.chave] : (c.valor_padrao || ''),
+        })),
+    };
+
+    reply.send({ success: true, data: resultado });
+  });
+
+  // ============================================
+  // PUT /:id/atributos — Salvar atributos do atendimento
+  // ============================================
+  fastify.put('/:id/atributos', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write'),
+    ],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const { empresaId } = request;
+    const atributos = request.body;
+
+    // Buscar conversa
+    const conv = await pool.query(
+      `SELECT id, dados_json FROM conversas WHERE id = $1 AND empresa_id = $2`,
+      [id, empresaId]
+    );
+    if (conv.rows.length === 0) {
+      return reply.status(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+    }
+
+    // Buscar campos definidos para atendimento
+    const camposResult = await pool.query(
+      `SELECT * FROM campos_personalizados WHERE empresa_id = $1 AND contexto = 'atendimento' AND ativo = true`,
+      [empresaId]
+    );
+    const camposMap = {};
+    for (const c of camposResult.rows) {
+      camposMap[c.chave] = c;
+    }
+
+    // Validar e montar dados
+    const dadosAtuais = conv.rows[0].dados_json || {};
+    const erros = [];
+
+    for (const [chave, valor] of Object.entries(atributos)) {
+      const campo = camposMap[chave];
+      if (!campo) {
+        dadosAtuais[chave] = valor;
+        continue;
+      }
+
+      const validacao = validarValorCampo(campo, valor);
+      if (!validacao.valido) {
+        erros.push(validacao.erro);
+        continue;
+      }
+
+      dadosAtuais[chave] = validacao.valor;
+    }
+
+    if (erros.length > 0) {
+      return reply.status(400).send({
+        success: false,
+        error: { message: erros.join('; '), details: erros }
+      });
+    }
+
+    // Salvar
+    const result = await pool.query(
+      `UPDATE conversas SET dados_json = $1, atualizado_em = NOW()
+       WHERE id = $2 AND empresa_id = $3 RETURNING id, dados_json`,
+      [JSON.stringify(dadosAtuais), id, empresaId]
+    );
+
+    logger.info(`Atributos atendimento atualizados`, { empresa_id: empresaId, conversa_id: id, chaves: Object.keys(atributos) });
+
+    reply.send({ success: true, data: result.rows[0] });
   });
 
   // ============================================

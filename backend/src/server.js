@@ -46,6 +46,7 @@ import filasRoutes from './routes/filas.js';
 import labelsRoutes from './routes/labels.js';
 import contatosRoutes from './routes/contatos.js';
 import mediaRoutes from './routes/media.js';
+import camposPersonalizadosRoutes from './routes/campos-personalizados.js';
 
 // Import WebSocket
 import { initializeWebSocket } from './services/websocket.js';
@@ -273,6 +274,7 @@ async function start() {
     await fastify.register(labelsRoutes, { prefix: '/api/labels' });
     await fastify.register(contatosRoutes, { prefix: '/api/contatos' });
     await fastify.register(mediaRoutes, { prefix: '/api/media' });
+    await fastify.register(camposPersonalizadosRoutes, { prefix: '/api/campos-personalizados' });
 
     // Start listening
     await fastify.listen({
