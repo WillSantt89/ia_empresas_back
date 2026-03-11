@@ -296,14 +296,21 @@ async function start() {
     await fastify.register(async (instance) => {
       instance.addHook('onRequest', async (request, reply) => {
         try {
-          // Accept token via header or query param (browser access)
-          const authHeader = request.headers.authorization;
+          // Accept token via: query param → cookie → Authorization header
           const queryToken = request.query.token;
-          if (queryToken) {
-            request.headers.authorization = `Bearer ${queryToken}`;
-          } else if (!authHeader || !authHeader.startsWith('Bearer ')) {
+          const cookieToken = request.headers.cookie?.split(';')
+            .map(c => c.trim())
+            .find(c => c.startsWith('bull_token='))
+            ?.split('=')[1];
+          const authHeader = request.headers.authorization;
+
+          const token = queryToken || cookieToken || (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null);
+
+          if (!token) {
             return reply.code(401).send({ error: 'Acesso negado. Use ?token=SEU_JWT_TOKEN na URL' });
           }
+
+          request.headers.authorization = `Bearer ${token}`;
           const decoded = await request.jwtVerify();
           const { rows } = await query(
             'SELECT role FROM usuarios WHERE id = $1 AND ativo = true',
@@ -312,7 +319,14 @@ async function start() {
           if (!rows.length || rows[0].role !== 'master') {
             return reply.code(403).send({ error: 'Acesso restrito a master' });
           }
+
+          // Set session cookie so Bull Board AJAX calls work
+          if (queryToken && !cookieToken) {
+            reply.header('Set-Cookie', `bull_token=${token}; Path=/admin/queues; HttpOnly; SameSite=Strict; Max-Age=86400`);
+          }
         } catch (err) {
+          // Clear invalid cookie
+          reply.header('Set-Cookie', 'bull_token=; Path=/admin/queues; Max-Age=0');
           return reply.code(401).send({ error: 'Token inválido ou expirado' });
         }
       });
