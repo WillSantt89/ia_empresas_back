@@ -720,6 +720,16 @@ async function processAIResponse({
   ).catch(() => ({ rows: [] }));
   const logContato = convDataForLog.rows[0] || {};
 
+  // Injetar dados do contato no system prompt para o agente poder usar em tools
+  let promptComContexto = prompt_ativo;
+  if (logContato.contato_whatsapp || logContato.contato_nome) {
+    const dadosContato = [
+      logContato.contato_whatsapp ? `- Telefone/WhatsApp: ${logContato.contato_whatsapp}` : '',
+      logContato.contato_nome ? `- Nome do contato: ${logContato.contato_nome}` : '',
+    ].filter(Boolean).join('\n');
+    promptComContexto += `\n\n[Dados do contato atual]\n${dadosContato}\nUse estes dados automaticamente quando precisar preencher telefone ou nome em tools, sem perguntar ao cliente.`;
+  }
+
   const toolExecutor = async (tool, args) => {
     const toolName = tool.name || tool.nome;
     const toolConfig = tools.find(t => t.nome.toLowerCase() === toolName.toLowerCase());
@@ -780,7 +790,7 @@ async function processAIResponse({
         {
           apiKey: currentKey.gemini_api_key,
           model: modelo,
-          systemPrompt: prompt_ativo,
+          systemPrompt: promptComContexto,
           tools: toolDeclarations,
           history: formatHistoryForGemini(history),
           message: messageText,
