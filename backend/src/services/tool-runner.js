@@ -3,6 +3,8 @@ import { logger } from '../config/logger.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
 import { pool } from '../config/database.js';
 import { validarValorCampo } from '../routes/campos-personalizados.js';
+import { emitConversaAtualizada, emitNovaConversaNaFila, emitFilaStats } from './websocket.js';
+import { calcularStatsFila } from './fila-manager.js';
 
 /**
  * Tool Runner Service
@@ -215,11 +217,39 @@ export async function executeTransferTool(tool, context) {
 
       const duration = Date.now() - startTime;
 
-      createLogger.info('Transfer to queue executed', {
-        conversa_id, empresa_id,
-        fila_destino: fila.nome,
-        duration_ms: duration
-      });
+      createLogger.info({ conversa_id, empresa_id, fila_destino: fila.nome, duration_ms: duration }, 'Transfer to queue executed');
+
+      // Buscar dados da conversa para emitir WebSocket
+      const conversaData = await pool.query(
+        `SELECT id, contato_whatsapp, contato_nome, status, controlado_por, fila_id, numero_ticket, criado_em
+         FROM conversas WHERE id = $1`, [conversa_id]
+      );
+      const conv = conversaData.rows[0];
+
+      if (conv) {
+        // Emitir conversa atualizada (sai da fila antiga)
+        emitConversaAtualizada(conversa_id, null, {
+          id: conversa_id,
+          fila_id: fila.id,
+          controlado_por: 'fila',
+          agente_id: null,
+        });
+
+        // Emitir nova conversa na fila destino
+        emitNovaConversaNaFila(fila.id, {
+          id: conv.id,
+          contato_whatsapp: conv.contato_whatsapp,
+          contato_nome: conv.contato_nome,
+          status: conv.status,
+          controlado_por: 'fila',
+          fila_id: fila.id,
+          numero_ticket: conv.numero_ticket,
+          criado_em: conv.criado_em,
+        });
+
+        // Atualizar stats da fila destino
+        calcularStatsFila(fila.id).then(stats => emitFilaStats(fila.id, stats)).catch(() => {});
+      }
 
       return {
         success: true,
@@ -284,12 +314,20 @@ export async function executeTransferTool(tool, context) {
 
     const duration = Date.now() - startTime;
 
-    createLogger.info('Transfer tool executed', {
-      conversa_id, empresa_id,
-      agente_destino: destino.nome,
-      fila_destino: destino.fila_nome,
-      duration_ms: duration
+    createLogger.info({ conversa_id, empresa_id, agente_destino: destino.nome, fila_destino: destino.fila_nome, duration_ms: duration }, 'Transfer tool executed');
+
+    // Emitir WebSocket: conversa atualizada na fila destino
+    emitConversaAtualizada(conversa_id, destino.fila_id, {
+      id: conversa_id,
+      fila_id: destino.fila_id,
+      controlado_por: 'ia',
+      agente_id: destino.id,
+      agente_nome: destino.nome,
     });
+
+    if (destino.fila_id) {
+      calcularStatsFila(destino.fila_id).then(stats => emitFilaStats(destino.fila_id, stats)).catch(() => {});
+    }
 
     return {
       success: true,
@@ -303,13 +341,7 @@ export async function executeTransferTool(tool, context) {
 
   } catch (error) {
     const duration = Date.now() - startTime;
-    createLogger.error('Transfer tool failed', {
-      conversa_id, empresa_id,
-      agente_destino_id: tool.agente_destino_id,
-      fila_destino_id: tool.fila_destino_id,
-      error: error.message,
-      duration_ms: duration
-    });
+    createLogger.error({ err: error, conversa_id, empresa_id, agente_destino_id: tool.agente_destino_id, fila_destino_id: tool.fila_destino_id, duration_ms: duration }, 'Transfer tool failed');
 
     return {
       success: false,
