@@ -114,8 +114,8 @@ export async function calcularStatsFilas(empresaId, filaIds = null) {
     `SELECT
        fa.id as fila_id,
        fa.nome,
-       COUNT(c.id) FILTER (WHERE c.status = 'ativo' AND c.operador_id IS NULL AND c.controlado_por = 'fila') as aguardando,
-       COUNT(c.id) FILTER (WHERE c.status = 'ativo' AND c.operador_id IS NOT NULL) as em_atendimento,
+       COUNT(c.id) FILTER (WHERE c.status = 'ativo' AND c.operador_id IS NULL) as aguardando,
+       COUNT(c.id) FILTER (WHERE c.status = 'ativo' AND c.operador_id IS NOT NULL AND c.controlado_por = 'humano') as em_atendimento,
        COUNT(DISTINCT c.operador_id) FILTER (WHERE c.status = 'ativo') as operadores_atendendo,
        (SELECT COUNT(*) FROM fila_membros fm2
         JOIN usuarios u2 ON fm2.usuario_id = u2.id
@@ -145,7 +145,7 @@ export async function calcularStatsFilas(empresaId, filaIds = null) {
 export async function calcularStatsFila(filaId) {
   const result = await pool.query(
     `SELECT
-       COUNT(c.id) FILTER (WHERE c.operador_id IS NULL AND c.controlado_por = 'fila') as aguardando,
+       COUNT(c.id) FILTER (WHERE c.operador_id IS NULL) as aguardando,
        COUNT(c.id) FILTER (WHERE c.operador_id IS NOT NULL AND c.controlado_por = 'humano') as em_atendimento,
        (SELECT COUNT(*) FROM fila_membros fm
         JOIN usuarios u ON fm.usuario_id = u.id
