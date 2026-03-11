@@ -823,7 +823,8 @@ export default async function conversasRoutes(fastify, opts) {
         `UPDATE conversas SET
            operador_id = $1, operador_nome = $2, operador_atribuido_em = NOW(),
            controlado_por = 'humano', humano_id = $1, humano_nome = $2,
-           humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW()
+           humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW(),
+           lida = true, lida_em = NOW(), lida_por = $1
          WHERE id = $3`,
         [operadorId, operadorNome, id]
       );
@@ -881,7 +882,8 @@ export default async function conversasRoutes(fastify, opts) {
       await pool.query(
         `UPDATE conversas SET
            operador_id = NULL, operador_nome = NULL,
-           controlado_por = $1, atualizado_em = NOW()
+           controlado_por = $1, atualizado_em = NOW(),
+           lida = false, lida_em = NULL, lida_por = NULL
          WHERE id = $2`,
         [novoControlador, id]
       );
@@ -965,7 +967,8 @@ export default async function conversasRoutes(fastify, opts) {
         `UPDATE conversas SET
            fila_id = $1, fila_entrada_em = NOW(),
            operador_id = NULL, operador_nome = NULL,
-           controlado_por = 'fila', atualizado_em = NOW()
+           controlado_por = 'fila', atualizado_em = NOW(),
+           lida = false, lida_em = NULL, lida_por = NULL
          WHERE id = $2`,
         [fila_id, id]
       );
@@ -1066,7 +1069,8 @@ export default async function conversasRoutes(fastify, opts) {
         `UPDATE conversas SET
            operador_id = $1, operador_nome = $2, operador_atribuido_em = NOW(),
            controlado_por = 'humano', humano_id = $1, humano_nome = $2,
-           humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW()
+           humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW(),
+           lida = false, lida_em = NULL, lida_por = NULL
          WHERE id = $3`,
         [operador_id, destOperador.nome, id]
       );
@@ -1096,6 +1100,46 @@ export default async function conversasRoutes(fastify, opts) {
     } catch (error) {
       logger.error('Erro ao transferir conversa para operador:', { error: error.message, stack: error.stack, params: request.params, body: request.body });
       reply.code(500).send({ success: false, error: { message: 'Erro ao transferir conversa', detail: error.message } });
+    }
+  });
+
+  // ============================================
+  // POST /:id/marcar-lida — Marcar conversa como lida/não lida
+  // ============================================
+  fastify.post('/:id/marcar-lida', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    try {
+      const { id } = request.params;
+      const { empresaId, user } = request;
+      const { lida } = request.body || {};
+
+      if (typeof lida !== 'boolean') {
+        return reply.code(400).send({ success: false, error: { message: 'Campo lida (boolean) e obrigatorio' } });
+      }
+
+      const result = await pool.query(
+        `UPDATE conversas SET lida = $1, lida_em = $2, lida_por = $3, atualizado_em = NOW()
+         WHERE id = $4 AND empresa_id = $5 AND status IN ('ativo', 'pendente')
+         RETURNING id, fila_id`,
+        [lida, lida ? new Date() : null, lida ? user.id : null, id, empresaId]
+      );
+
+      if (result.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Conversa ativa nao encontrada' } });
+      }
+
+      // WebSocket notification
+      emitConversaAtualizada(id, result.rows[0].fila_id, { id, lida });
+
+      reply.send({ success: true, data: { lida } });
+    } catch (error) {
+      logger.error('Erro ao marcar conversa como lida:', { error: error.message });
+      reply.code(500).send({ success: false, error: { message: 'Erro ao marcar lida', detail: error.message } });
     }
   });
 

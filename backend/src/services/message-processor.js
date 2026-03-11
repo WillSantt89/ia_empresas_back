@@ -201,7 +201,7 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
         });
       }
 
-      pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW() WHERE id = $1`, [conversa_id]).catch(() => {});
+      pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
 
       return {
         response: null,
@@ -436,7 +436,7 @@ async function processMessageCommon({
         });
       }
 
-      pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW() WHERE id = $1`, [conversa_id]).catch(() => {});
+      pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
       return;
     }
   } else {
