@@ -383,15 +383,18 @@ export async function executeTransferTool(tool, context) {
     // Emitir para TODA a empresa
     emitToEmpresa(empresa_id, 'fila:stats-updated', { fila_destino: destino.fila_id, fila_origem: filaOrigemAgId });
 
-    // Disparar novo agente proativamente (async, não bloqueia o retorno da tool)
-    // Import dinâmico para evitar dependência circular (tool-runner ↔ message-processor)
-    import('./message-processor.js').then(({ triggerNewAgentResponse }) => {
-      triggerNewAgentResponse({ conversa_id, empresa_id }).catch(err => {
-        createLogger.error({ err, conversa_id }, 'Failed to trigger new agent after transfer');
+    // Disparar novo agente proativamente após delay (garante que a mensagem de
+    // despedida do agente atual seja enviada antes do novo agente responder)
+    const TRANSFER_DELAY_MS = 8000;
+    setTimeout(() => {
+      import('./message-processor.js').then(({ triggerNewAgentResponse }) => {
+        triggerNewAgentResponse({ conversa_id, empresa_id }).catch(err => {
+          createLogger.error({ err, conversa_id }, 'Failed to trigger new agent after transfer');
+        });
+      }).catch(err => {
+        createLogger.error({ err, conversa_id }, 'Failed to import message-processor for trigger');
       });
-    }).catch(err => {
-      createLogger.error({ err, conversa_id }, 'Failed to import message-processor for trigger');
-    });
+    }, TRANSFER_DELAY_MS);
 
     return {
       success: true,
