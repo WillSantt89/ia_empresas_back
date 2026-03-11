@@ -55,6 +55,12 @@ import { initializeWebSocket } from './services/websocket.js';
 import timeoutChecker from './jobs/timeout-checker.js';
 import dailyReset from './jobs/daily-reset.js';
 
+// Import Bull Board (queue dashboard)
+import { createBullBoard } from '@bull-board/api';
+import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
+import { FastifyAdapter } from '@bull-board/fastify';
+import { whatsappQueue, n8nQueue, deadLetterQueue } from './queues/queues.js';
+
 // Create Fastify instance
 const fastify = Fastify({
   logger: logger,
@@ -275,6 +281,20 @@ async function start() {
     await fastify.register(contatosRoutes, { prefix: '/api/contatos' });
     await fastify.register(mediaRoutes, { prefix: '/api/media' });
     await fastify.register(camposPersonalizadosRoutes, { prefix: '/api/campos-personalizados' });
+
+    // Bull Board dashboard (queue monitoring)
+    const serverAdapter = new FastifyAdapter();
+    createBullBoard({
+      queues: [
+        new BullMQAdapter(whatsappQueue),
+        new BullMQAdapter(n8nQueue),
+        new BullMQAdapter(deadLetterQueue),
+      ],
+      serverAdapter,
+    });
+    serverAdapter.setBasePath('/admin/queues');
+    await fastify.register(serverAdapter.registerPlugin(), { prefix: '/admin/queues' });
+    logger.info('Bull Board dashboard registered at /admin/queues');
 
     // Start listening
     await fastify.listen({

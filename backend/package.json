@@ -16,9 +16,13 @@
     "diagnose": "node scripts/diagnose.js",
     "test": "node --test",
     "lint": "eslint src/",
-    "format": "prettier --write \"src/**/*.js\""
+    "format": "prettier --write \"src/**/*.js\"",
+    "worker": "node src/worker.js",
+    "worker:dev": "node --watch src/worker.js"
   },
   "dependencies": {
+    "@bull-board/api": "^6.20.3",
+    "@bull-board/fastify": "^6.20.3",
     "@fastify/cors": "^9.0.1",
     "@fastify/helmet": "^11.1.1",
     "@fastify/jwt": "^8.0.0",
@@ -29,7 +33,9 @@
     "@fastify/swagger-ui": "^2.1.0",
     "@google/genai": "^1.0.0",
     "@socket.io/redis-adapter": "^8.3.0",
+    "@socket.io/redis-emitter": "^5.1.0",
     "bcrypt": "^5.1.1",
+    "bullmq": "^5.70.4",
     "dotenv": "^16.4.5",
     "fastify": "^4.26.1",
     "ioredis": "^5.3.2",

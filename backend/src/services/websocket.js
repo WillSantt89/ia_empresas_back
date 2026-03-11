@@ -7,6 +7,7 @@ import { pool } from '../config/database.js';
 import jwt from 'jsonwebtoken';
 
 let io = null;
+let emitter = null; // For worker processes (no HTTP server)
 
 /**
  * Inicializa o Socket.IO no servidor Fastify
@@ -260,14 +261,31 @@ export function getIO() {
   return io;
 }
 
+/**
+ * Configura o emitter para processos worker (sem servidor HTTP).
+ * Usa @socket.io/redis-emitter para emitir eventos via Redis pub/sub.
+ */
+export function setEmitter(emitterInstance) {
+  emitter = emitterInstance;
+  logger.info('Socket.IO Redis emitter configured (worker mode)');
+}
+
+/**
+ * Retorna io (server) ou emitter (worker) — o que estiver disponivel
+ */
+function getBroadcaster() {
+  return io || emitter;
+}
+
 // === HELPERS DE EMISSAO ===
 
 /**
  * Emite evento para uma conversa especifica
  */
 export function emitToConversa(conversaId, evento, dados) {
-  if (io) {
-    io.to(`conversa:${conversaId}`).emit(evento, dados);
+  const bc = getBroadcaster();
+  if (bc) {
+    bc.to(`conversa:${conversaId}`).emit(evento, dados);
   }
 }
 
@@ -275,8 +293,9 @@ export function emitToConversa(conversaId, evento, dados) {
  * Emite evento para uma fila
  */
 export function emitToFila(filaId, evento, dados) {
-  if (io) {
-    io.to(`fila:${filaId}`).emit(evento, dados);
+  const bc = getBroadcaster();
+  if (bc) {
+    bc.to(`fila:${filaId}`).emit(evento, dados);
   }
 }
 
@@ -284,8 +303,9 @@ export function emitToFila(filaId, evento, dados) {
  * Emite evento para um usuario especifico
  */
 export function emitToUser(userId, evento, dados) {
-  if (io) {
-    io.to(`usuario:${userId}`).emit(evento, dados);
+  const bc = getBroadcaster();
+  if (bc) {
+    bc.to(`usuario:${userId}`).emit(evento, dados);
   }
 }
 
@@ -293,8 +313,9 @@ export function emitToUser(userId, evento, dados) {
  * Emite evento para toda a empresa
  */
 export function emitToEmpresa(empresaId, evento, dados) {
-  if (io) {
-    io.to(`empresa:${empresaId}`).emit(evento, dados);
+  const bc = getBroadcaster();
+  if (bc) {
+    bc.to(`empresa:${empresaId}`).emit(evento, dados);
   }
 }
 

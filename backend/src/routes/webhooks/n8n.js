@@ -1,3 +1,6 @@
+// NOTE: n8n webhook keeps synchronous processing because n8n expects
+// the AI response in the HTTP reply. The WhatsApp direct webhook uses
+// BullMQ workers for async processing (see whatsapp.js).
 import { logger } from '../../config/logger.js';
 import { pool } from '../../config/database.js';
 import { decrypt } from '../../config/encryption.js';
