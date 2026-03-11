@@ -238,7 +238,7 @@ const n8nWebhookRoutes = async (fastify) => {
       } else {
         // Check if empresa has a default fila
         const filaResult = await pool.query(
-          `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND is_default = true AND ativo = true LIMIT 1`,
+          `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY is_default DESC, criado_em ASC LIMIT 1`,
           [empresa_id]
         );
         const defaultFilaId = filaResult.rows[0]?.id || null;

@@ -213,7 +213,7 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
   } else {
     // New conversation
     const filaResult = await pool.query(
-      `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND is_default = true AND ativo = true LIMIT 1`,
+      `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY is_default DESC, criado_em ASC LIMIT 1`,
       [empresa_id]
     );
     const defaultFilaId = filaResult.rows[0]?.id || null;
@@ -442,7 +442,7 @@ async function processMessageCommon({
   } else {
     // New conversation
     const filaResult = await pool.query(
-      `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND is_default = true AND ativo = true LIMIT 1`,
+      `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY is_default DESC, criado_em ASC LIMIT 1`,
       [empresa_id]
     );
     const defaultFilaId = filaResult.rows[0]?.id || null;
