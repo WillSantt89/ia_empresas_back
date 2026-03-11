@@ -57,7 +57,7 @@ import dailyReset from './jobs/daily-reset.js';
 
 // Import Bull Board (queue dashboard)
 import { createBullBoard } from '@bull-board/api';
-import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
+import { BullMQAdapter } from '@bull-board/api/bullMQAdapter.js';
 import { FastifyAdapter } from '@bull-board/fastify';
 import { whatsappQueue, n8nQueue, deadLetterQueue } from './queues/queues.js';
 
