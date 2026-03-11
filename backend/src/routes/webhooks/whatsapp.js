@@ -134,10 +134,10 @@ const whatsappWebhookRoutes = async (fastify) => {
             wnId: whatsappNumber.wn_id,
           }, {
             // Deduplicate: Meta may re-send webhooks
-            jobId: `wa:${message.id}`,
+            jobId: `wa-${message.id}`,
           });
 
-          createLogger.info({ empresa_id, phone: message.from, type: message.type, jobId: `wa:${message.id}` }, 'WhatsApp message enqueued');
+          createLogger.info({ empresa_id, phone: message.from, type: message.type, jobId: `wa-${message.id}` }, 'WhatsApp message enqueued');
         } catch (err) {
           // If jobId already exists, BullMQ rejects — that's ok (dedup)
           if (err.message?.includes('Job already exists')) {
