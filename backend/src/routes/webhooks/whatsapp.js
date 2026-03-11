@@ -150,6 +150,8 @@ const whatsappWebhookRoutes = async (fastify) => {
           } else {
             createLogger.error('Failed to enqueue WhatsApp message', {
               error: err.message,
+              stack: err.stack,
+              code: err.code,
               empresa_id,
               messageId: message.id,
             });

@@ -59,7 +59,7 @@ import dailyReset from './jobs/daily-reset.js';
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter.js';
 import { FastifyAdapter } from '@bull-board/fastify';
-import { whatsappQueue, n8nQueue, deadLetterQueue } from './queues/queues.js';
+import { whatsappQueue, n8nQueue, deadLetterQueue, waitForQueues } from './queues/queues.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -250,6 +250,12 @@ async function start() {
 
     if (!dbConnected || !redisConnected) {
       throw new Error('Failed to connect to required services');
+    }
+
+    // Test BullMQ queue connections
+    const queuesReady = await waitForQueues();
+    if (!queuesReady) {
+      throw new Error('Failed to connect BullMQ queues to Redis');
     }
 
     // Register routes
