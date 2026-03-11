@@ -3,7 +3,7 @@ import { logger } from '../config/logger.js';
 import { DEFAULT_LIMITS } from '../config/constants.js';
 import { pool } from '../config/database.js';
 import { validarValorCampo } from '../routes/campos-personalizados.js';
-import { emitConversaAtualizada, emitNovaConversaNaFila, emitFilaStats } from './websocket.js';
+import { emitConversaAtualizada, emitNovaConversaNaFila, emitFilaStats, emitToEmpresa } from './websocket.js';
 import { calcularStatsFila } from './fila-manager.js';
 
 /**
@@ -189,6 +189,13 @@ export async function executeTransferTool(tool, context) {
         return { success: false, error: `Fila "${fila.nome}" está inativa` };
       }
 
+      // Buscar fila de origem ANTES de atualizar
+      const origemResult = await pool.query(
+        `SELECT fila_id FROM conversas WHERE id = $1 AND empresa_id = $2`,
+        [conversa_id, empresa_id]
+      );
+      const filaOrigemId = origemResult.rows[0]?.fila_id;
+
       await pool.query(`
         UPDATE conversas
         SET agente_id = NULL,
@@ -217,7 +224,7 @@ export async function executeTransferTool(tool, context) {
 
       const duration = Date.now() - startTime;
 
-      createLogger.info({ conversa_id, empresa_id, fila_destino: fila.nome, duration_ms: duration }, 'Transfer to queue executed');
+      createLogger.info({ conversa_id, empresa_id, fila_origem: filaOrigemId, fila_destino: fila.nome, duration_ms: duration }, 'Transfer to queue executed');
 
       // Buscar dados da conversa para emitir WebSocket
       const conversaData = await pool.query(
@@ -227,13 +234,17 @@ export async function executeTransferTool(tool, context) {
       const conv = conversaData.rows[0];
 
       if (conv) {
-        // Emitir conversa atualizada (sai da fila antiga)
-        emitConversaAtualizada(conversa_id, null, {
+        // Emitir conversa atualizada para fila destino E fila origem
+        const updateData = {
           id: conversa_id,
           fila_id: fila.id,
           controlado_por: 'fila',
           agente_id: null,
-        });
+        };
+        emitConversaAtualizada(conversa_id, fila.id, updateData);
+        if (filaOrigemId && filaOrigemId !== fila.id) {
+          emitConversaAtualizada(conversa_id, filaOrigemId, updateData);
+        }
 
         // Emitir nova conversa na fila destino
         emitNovaConversaNaFila(fila.id, {
@@ -247,8 +258,14 @@ export async function executeTransferTool(tool, context) {
           criado_em: conv.criado_em,
         });
 
-        // Atualizar stats da fila destino
+        // Atualizar stats da fila destino E origem
         calcularStatsFila(fila.id).then(stats => emitFilaStats(fila.id, stats)).catch(() => {});
+        if (filaOrigemId && filaOrigemId !== fila.id) {
+          calcularStatsFila(filaOrigemId).then(stats => emitFilaStats(filaOrigemId, stats)).catch(() => {});
+        }
+
+        // Emitir para TODA a empresa — garante que todos os operadores vejam a atualização
+        emitToEmpresa(empresa_id, 'fila:stats-updated', { fila_destino: fila.id, fila_origem: filaOrigemId });
       }
 
       return {
@@ -267,6 +284,13 @@ export async function executeTransferTool(tool, context) {
     if (!tool.agente_destino_id) {
       return { success: false, error: 'Tool de transferência sem destino configurado' };
     }
+
+    // Buscar fila de origem ANTES de atualizar
+    const origemAgResult = await pool.query(
+      `SELECT fila_id FROM conversas WHERE id = $1 AND empresa_id = $2`,
+      [conversa_id, empresa_id]
+    );
+    const filaOrigemAgId = origemAgResult.rows[0]?.fila_id;
 
     // Buscar agente destino com sua fila
     const agenteResult = await pool.query(`
@@ -314,20 +338,30 @@ export async function executeTransferTool(tool, context) {
 
     const duration = Date.now() - startTime;
 
-    createLogger.info({ conversa_id, empresa_id, agente_destino: destino.nome, fila_destino: destino.fila_nome, duration_ms: duration }, 'Transfer tool executed');
+    createLogger.info({ conversa_id, empresa_id, agente_destino: destino.nome, fila_origem: filaOrigemAgId, fila_destino: destino.fila_nome, duration_ms: duration }, 'Transfer tool executed');
 
     // Emitir WebSocket: conversa atualizada na fila destino
-    emitConversaAtualizada(conversa_id, destino.fila_id, {
+    const agUpdateData = {
       id: conversa_id,
       fila_id: destino.fila_id,
       controlado_por: 'ia',
       agente_id: destino.id,
       agente_nome: destino.nome,
-    });
+    };
+    emitConversaAtualizada(conversa_id, destino.fila_id, agUpdateData);
+    if (filaOrigemAgId && filaOrigemAgId !== destino.fila_id) {
+      emitConversaAtualizada(conversa_id, filaOrigemAgId, agUpdateData);
+    }
 
     if (destino.fila_id) {
       calcularStatsFila(destino.fila_id).then(stats => emitFilaStats(destino.fila_id, stats)).catch(() => {});
     }
+    if (filaOrigemAgId && filaOrigemAgId !== destino.fila_id) {
+      calcularStatsFila(filaOrigemAgId).then(stats => emitFilaStats(filaOrigemAgId, stats)).catch(() => {});
+    }
+
+    // Emitir para TODA a empresa
+    emitToEmpresa(empresa_id, 'fila:stats-updated', { fila_destino: destino.fila_id, fila_origem: filaOrigemAgId });
 
     return {
       success: true,
