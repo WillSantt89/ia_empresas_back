@@ -2,6 +2,8 @@
 -- Problema: migration 035 adicionou is_default com DEFAULT false mas nao atualizou filas existentes
 -- Resultado: conversas criadas com fila_id = NULL nao aparecem no frontend
 
+-- UP
+
 -- 1. Para cada empresa que NAO tem fila default, marcar a primeira fila ativa (por criado_em) como default
 UPDATE filas_atendimento
 SET is_default = true

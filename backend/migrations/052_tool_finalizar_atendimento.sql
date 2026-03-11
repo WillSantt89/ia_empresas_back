@@ -1,6 +1,8 @@
 -- Migration 052: Criar tool de encerramento de atendimento para todas as empresas
 -- tipo_tool = 'encerramento' — tool interna que finaliza a conversa
 
+-- UP
+
 INSERT INTO tools (empresa_id, nome, descricao_para_llm, tipo_tool, parametros_schema_json, ativo)
 SELECT
   e.id,
