@@ -714,8 +714,9 @@ async function processAIResponse({
   const toolDeclarations = buildToolDeclarations(tools);
 
   const toolExecutor = async (tool, args) => {
-    const toolConfig = tools.find(t => t.nome.toLowerCase() === tool.nome.toLowerCase());
-    if (!toolConfig) throw new Error(`Tool ${tool.nome} not found`);
+    const toolName = tool.name || tool.nome;
+    const toolConfig = tools.find(t => t.nome.toLowerCase() === toolName.toLowerCase());
+    if (!toolConfig) throw new Error(`Tool ${toolName} not found`);
 
     let result;
     if (toolConfig.tipo_tool === 'transferencia') {
