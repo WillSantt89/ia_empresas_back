@@ -15,6 +15,25 @@ import { archiveConversation } from './memory.js';
 const createLogger = logger.child({ module: 'tool-runner' });
 
 /**
+ * Log a tool execution to the tool_executions table (non-blocking)
+ */
+export function logToolExecution({ empresa_id, tool_id, tool_nome, tipo_tool, agente_id, agente_nome, conversa_id, contato_whatsapp, contato_nome, parametros, resultado, sucesso, erro, tempo_ms }) {
+  pool.query(`
+    INSERT INTO tool_executions (empresa_id, tool_id, tool_nome, tipo_tool, agente_id, agente_nome, conversa_id, contato_whatsapp, contato_nome, parametros_json, resultado_json, sucesso, erro, tempo_processamento_ms)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+  `, [
+    empresa_id, tool_id || null, tool_nome, tipo_tool || 'http',
+    agente_id || null, agente_nome || null,
+    conversa_id || null, contato_whatsapp || null, contato_nome || null,
+    parametros ? JSON.stringify(parametros) : null,
+    resultado ? JSON.stringify(resultado) : null,
+    sucesso, erro || null, tempo_ms || null
+  ]).catch(err => {
+    createLogger.warn({ err: err.message, tool_nome }, 'Failed to log tool execution');
+  });
+}
+
+/**
  * Execute a tool by making an HTTP request
  * @param {Object} tool - Tool configuration from database
  * @param {Object} args - Arguments provided by the LLM

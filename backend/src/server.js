@@ -30,6 +30,7 @@ import empresasRoutes from './routes/empresas.js';
 import usuariosRoutes from './routes/usuarios.js';
 import agentesRoutes from './routes/agentes.js';
 import toolsRoutes from './routes/tools.js';
+import toolExecutionsRoutes from './routes/tool-executions.js';
 import apiKeysRoutes from './routes/api-keys.js';
 import analyticsRoutes from './routes/analytics.js';
 import planosRoutes from './routes/planos.js';
@@ -317,6 +318,7 @@ async function start() {
     await fastify.register(usuariosRoutes, { prefix: '/api/usuarios' });
     await fastify.register(agentesRoutes, { prefix: '/api/agentes' });
     await fastify.register(toolsRoutes, { prefix: '/api/tools' });
+    await fastify.register(toolExecutionsRoutes, { prefix: '/api/tool-executions' });
     await fastify.register(apiKeysRoutes, { prefix: '/api/api-keys' });
     await fastify.register(analyticsRoutes, { prefix: '/api/analytics' });
     await fastify.register(planosRoutes, { prefix: '/api/planos' });

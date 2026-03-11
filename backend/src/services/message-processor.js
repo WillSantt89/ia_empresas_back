@@ -10,7 +10,7 @@ import { decrypt } from '../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from './api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from './memory.js';
 import { processMessageWithTools, buildToolDeclarations } from './gemini.js';
-import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM } from './tool-runner.js';
+import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM, logToolExecution } from './tool-runner.js';
 import { parseMetaMessage, buildGeminiParts } from './media-handler.js';
 import { saveMedia } from './media-storage.js';
 import { sendTextMessage, markAsRead } from './whatsapp-sender.js';
@@ -713,6 +713,13 @@ async function processAIResponse({
   // --- Process with Gemini (failover) ---
   const toolDeclarations = buildToolDeclarations(tools);
 
+  // Buscar dados do contato para log de execução
+  const convDataForLog = await pool.query(
+    `SELECT contato_whatsapp, contato_nome FROM conversas WHERE id = $1`,
+    [conversa_id]
+  ).catch(() => ({ rows: [] }));
+  const logContato = convDataForLog.rows[0] || {};
+
   const toolExecutor = async (tool, args) => {
     const toolName = tool.name || tool.nome;
     const toolConfig = tools.find(t => t.nome.toLowerCase() === toolName.toLowerCase());
@@ -731,6 +738,25 @@ async function processAIResponse({
     } else {
       result = await executeTool(toolConfig, args);
     }
+
+    // Log da execução (non-blocking)
+    logToolExecution({
+      empresa_id,
+      tool_id: toolConfig.id,
+      tool_nome: toolConfig.nome,
+      tipo_tool: toolConfig.tipo_tool || 'http',
+      agente_id,
+      agente_nome: agent.agente_nome,
+      conversa_id,
+      contato_whatsapp: logContato.contato_whatsapp,
+      contato_nome: logContato.contato_nome,
+      parametros: args,
+      resultado: result?.data || result?.error,
+      sucesso: result?.success ?? false,
+      erro: result?.success ? null : (result?.error || result?.message),
+      tempo_ms: result?.duration_ms,
+    });
+
     return transformResultForLLM(result, 2000);
   };
 

@@ -7,7 +7,7 @@ import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, archiveConversation } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
-import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM, logToolExecution } from '../../services/tool-runner.js';
 import { sendTextMessage } from '../../services/whatsapp-sender.js';
 import { atribuirConversaAutomatica } from '../../services/fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats } from '../../services/websocket.js';
@@ -470,6 +470,25 @@ const n8nWebhookRoutes = async (fastify) => {
         } else {
           result = await executeTool(toolConfig, args);
         }
+
+        // Log da execução (non-blocking)
+        logToolExecution({
+          empresa_id,
+          tool_id: toolConfig.id,
+          tool_nome: toolConfig.nome,
+          tipo_tool: toolConfig.tipo_tool || 'http',
+          agente_id: agent.agente_id,
+          agente_nome: agent.agente_nome,
+          conversa_id,
+          contato_whatsapp: phone,
+          contato_nome: name || null,
+          parametros: args,
+          resultado: result?.data || result?.error,
+          sucesso: result?.success ?? false,
+          erro: result?.success ? null : (result?.error || result?.message),
+          tempo_ms: result?.duration_ms,
+        });
+
         return transformResultForLLM(result, 2000);
       };
 
