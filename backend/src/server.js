@@ -296,9 +296,13 @@ async function start() {
     await fastify.register(async (instance) => {
       instance.addHook('onRequest', async (request, reply) => {
         try {
+          // Accept token via header or query param (browser access)
           const authHeader = request.headers.authorization;
-          if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return reply.code(401).send({ error: 'Token necessário' });
+          const queryToken = request.query.token;
+          if (queryToken) {
+            request.headers.authorization = `Bearer ${queryToken}`;
+          } else if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return reply.code(401).send({ error: 'Acesso negado. Use ?token=SEU_JWT_TOKEN na URL' });
           }
           const decoded = await request.jwtVerify();
           const { rows } = await query(
@@ -309,7 +313,7 @@ async function start() {
             return reply.code(403).send({ error: 'Acesso restrito a master' });
           }
         } catch (err) {
-          return reply.code(401).send({ error: 'Token inválido' });
+          return reply.code(401).send({ error: 'Token inválido ou expirado' });
         }
       });
       await instance.register(serverAdapter.registerPlugin());
