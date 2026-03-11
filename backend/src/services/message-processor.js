@@ -900,6 +900,145 @@ function injectAtributoTools(tools, campos) {
 /**
  * Handle WhatsApp status updates (delivered, read, failed)
  */
+/**
+ * Trigger the new agent to respond proactively after a transfer.
+ * Injects a system context message into Redis history, calls Gemini,
+ * and sends the response to the client via WhatsApp.
+ */
+export async function triggerNewAgentResponse({ conversa_id, empresa_id }) {
+  const triggerLogger = createLogger.child({ fn: 'triggerNewAgentResponse' });
+
+  try {
+    // 1. Get conversation details
+    const convResult = await pool.query(
+      `SELECT c.id, c.contato_whatsapp, c.contato_nome, c.contato_id, c.agente_id, c.fila_id,
+              c.whatsapp_number_id, c.controlado_por
+       FROM conversas c
+       WHERE c.id = $1 AND c.empresa_id = $2 AND c.status = 'ativo'`,
+      [conversa_id, empresa_id]
+    );
+
+    if (convResult.rows.length === 0) {
+      triggerLogger.warn({ conversa_id }, 'Conversa not found for trigger');
+      return;
+    }
+
+    const conv = convResult.rows[0];
+
+    if (!conv.agente_id) {
+      triggerLogger.warn({ conversa_id }, 'No agent assigned, skip trigger');
+      return;
+    }
+
+    // 2. Get new agent config
+    const agentResult = await pool.query(
+      `SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+              cache_enabled, gemini_cache_id, cache_expires_at
+       FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+      [conv.agente_id, empresa_id]
+    );
+
+    if (agentResult.rows.length === 0) {
+      triggerLogger.warn({ conversa_id, agente_id: conv.agente_id }, 'New agent not found');
+      return;
+    }
+
+    const agent = agentResult.rows[0];
+
+    // 3. Get API keys
+    const availableKeys = await getActiveKeysForAgent(empresa_id, agent.agente_id);
+    if (availableKeys.length === 0) {
+      triggerLogger.warn({ conversa_id, agente_id: agent.agente_id }, 'No API keys for new agent');
+      return;
+    }
+
+    // 4. Get WhatsApp number credentials
+    const wnResult = await pool.query(
+      `SELECT wn.phone_number_id, wn.token_graph_api
+       FROM whatsapp_numbers wn
+       WHERE wn.id = $1 AND wn.empresa_id = $2 AND wn.ativo = true`,
+      [conv.whatsapp_number_id, empresa_id]
+    );
+
+    if (wnResult.rows.length === 0) {
+      triggerLogger.warn({ conversa_id }, 'WhatsApp number not found for trigger');
+      return;
+    }
+
+    const phoneNumberId = wnResult.rows[0].phone_number_id;
+    const graphToken = decrypt(wnResult.rows[0].token_graph_api);
+    if (!graphToken) {
+      triggerLogger.warn({ conversa_id }, 'No Graph API token for trigger');
+      return;
+    }
+
+    // 5. Inject transfer context into Redis history
+    const conversationKey = `whatsapp:${conv.contato_whatsapp}`;
+    const transferContextMsg = '[Sistema] Cliente transferido para você. Inicie o atendimento de acordo com suas instruções. Apresente-se e pergunte como pode ajudar.';
+    await addToHistory(empresa_id, conversationKey, 'user', transferContextMsg);
+
+    // 6. Call Gemini via processAIResponse
+    const startTime = Date.now();
+    const result = await processAIResponse({
+      empresa_id,
+      conversa_id,
+      contato_id: conv.contato_id,
+      agente_id: agent.agente_id,
+      agent,
+      availableKeys,
+      conversationKey,
+      messageText: transferContextMsg,
+      parts: [{ text: transferContextMsg }],
+      startTime,
+    });
+
+    if (!result || !result.text) {
+      triggerLogger.warn({ conversa_id }, 'New agent produced no response');
+      return;
+    }
+
+    // 7. Send response to WhatsApp
+    const sendResult = await sendTextMessage(phoneNumberId, graphToken, conv.contato_whatsapp, result.text);
+
+    // 8. Log outgoing message
+    const outMsgResult = await pool.query(`
+      INSERT INTO mensagens_log (
+        conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem,
+        tokens_input, tokens_output, modelo_usado, api_key_usada_id, latencia_ms,
+        whatsapp_message_id, status_entrega, criado_em
+      ) VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, $5, $6, $7, $8, $9, $10, NOW())
+      RETURNING id, criado_em
+    `, [
+      conversa_id, empresa_id, result.text,
+      result.tokensInput, result.tokensOutput,
+      result.modelo, result.usedKeyId, result.processingTime,
+      sendResult.wamid, sendResult.success ? 'sent' : 'failed',
+    ]);
+
+    // 9. Emit WebSocket
+    if (outMsgResult.rows[0]) {
+      emitNovaMensagem(conversa_id, conv.fila_id, {
+        id: outMsgResult.rows[0].id,
+        conversa_id,
+        conteudo: result.text,
+        direcao: 'saida',
+        remetente_tipo: 'ia',
+        remetente_nome: agent.agente_nome,
+        tipo_mensagem: 'text',
+        criado_em: outMsgResult.rows[0].criado_em,
+      });
+    }
+
+    triggerLogger.info({
+      conversa_id, agente: agent.agente_nome,
+      duration_ms: Date.now() - startTime,
+    }, 'New agent triggered successfully after transfer');
+
+  } catch (error) {
+    triggerLogger.error({ err: error, conversa_id, empresa_id }, 'Failed to trigger new agent after transfer');
+  }
+}
+
 export async function handleStatusUpdates(statuses, empresa_id) {
   for (const status of statuses) {
     const wamid = status.id;
