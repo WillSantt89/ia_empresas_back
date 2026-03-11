@@ -7,7 +7,7 @@ import sensible from '@fastify/sensible';
 import multipart from '@fastify/multipart';
 import { config } from './config/env.js';
 import { logger } from './config/logger.js';
-import { testConnection, closePool } from './config/database.js';
+import { testConnection, closePool, query } from './config/database.js';
 import { testRedisConnection, closeRedis } from './config/redis.js';
 
 // Import middlewares
@@ -282,7 +282,7 @@ async function start() {
     await fastify.register(mediaRoutes, { prefix: '/api/media' });
     await fastify.register(camposPersonalizadosRoutes, { prefix: '/api/campos-personalizados' });
 
-    // Bull Board dashboard (queue monitoring)
+    // Bull Board dashboard (queue monitoring) — master only
     const serverAdapter = new FastifyAdapter();
     createBullBoard({
       queues: [
@@ -293,8 +293,28 @@ async function start() {
       serverAdapter,
     });
     serverAdapter.setBasePath('/admin/queues');
-    await fastify.register(serverAdapter.registerPlugin(), { prefix: '/admin/queues' });
-    logger.info('Bull Board dashboard registered at /admin/queues');
+    await fastify.register(async (instance) => {
+      instance.addHook('onRequest', async (request, reply) => {
+        try {
+          const authHeader = request.headers.authorization;
+          if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return reply.code(401).send({ error: 'Token necessário' });
+          }
+          const decoded = await request.jwtVerify();
+          const { rows } = await query(
+            'SELECT role FROM usuarios WHERE id = $1 AND ativo = true',
+            [decoded.id]
+          );
+          if (!rows.length || rows[0].role !== 'master') {
+            return reply.code(403).send({ error: 'Acesso restrito a master' });
+          }
+        } catch (err) {
+          return reply.code(401).send({ error: 'Token inválido' });
+        }
+      });
+      await instance.register(serverAdapter.registerPlugin());
+    }, { prefix: '/admin/queues' });
+    logger.info('Bull Board dashboard registered at /admin/queues (master only)');
 
     // Start listening
     await fastify.listen({
