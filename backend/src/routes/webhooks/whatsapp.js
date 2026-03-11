@@ -137,24 +137,13 @@ const whatsappWebhookRoutes = async (fastify) => {
             jobId: `wa:${message.id}`,
           });
 
-          createLogger.info('WhatsApp message enqueued', {
-            empresa_id,
-            phone: message.from,
-            type: message.type,
-            jobId: `wa:${message.id}`,
-          });
+          createLogger.info({ empresa_id, phone: message.from, type: message.type, jobId: `wa:${message.id}` }, 'WhatsApp message enqueued');
         } catch (err) {
           // If jobId already exists, BullMQ rejects — that's ok (dedup)
           if (err.message?.includes('Job already exists')) {
-            createLogger.debug('Duplicate message ignored', { messageId: message.id });
+            createLogger.debug({ messageId: message.id }, 'Duplicate message ignored');
           } else {
-            createLogger.error('Failed to enqueue WhatsApp message', {
-              error: err.message,
-              stack: err.stack,
-              code: err.code,
-              empresa_id,
-              messageId: message.id,
-            });
+            createLogger.error({ err, empresa_id, messageId: message.id }, 'Failed to enqueue WhatsApp message');
           }
         }
       }
@@ -162,7 +151,7 @@ const whatsappWebhookRoutes = async (fastify) => {
       return reply.code(200).send('OK');
 
     } catch (error) {
-      createLogger.error('WhatsApp webhook error', { error: error.message, stack: error.stack });
+      createLogger.error({ err: error }, 'WhatsApp webhook error');
       return reply.code(200).send('OK');
     }
   });
