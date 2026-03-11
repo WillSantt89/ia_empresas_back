@@ -996,6 +996,110 @@ export default async function conversasRoutes(fastify, opts) {
   });
 
   // ============================================
+  // POST /:id/transferir-operador — Transferir para outro operador
+  // ============================================
+  fastify.post('/:id/transferir-operador', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    try {
+      const { id } = request.params;
+      const { empresaId, user } = request;
+      const { operador_id, motivo } = request.body || {};
+
+      if (!operador_id) {
+        return reply.code(400).send({ success: false, error: { message: 'operador_id e obrigatorio' } });
+      }
+
+      if (operador_id === user.id) {
+        return reply.code(400).send({ success: false, error: { message: 'Nao pode transferir para si mesmo' } });
+      }
+
+      // Buscar conversa ativa
+      const conversaResult = await pool.query(
+        `SELECT * FROM conversas WHERE id = $1 AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+        [id, empresaId]
+      );
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Conversa ativa nao encontrada' } });
+      }
+      const conversa = conversaResult.rows[0];
+
+      // Operador so pode transferir se for o atribuido atual ou membro da fila
+      if (user.role === 'operador') {
+        const isAtribuido = conversa.operador_id === user.id;
+        const isMembroOrigem = conversa.fila_id ? await isMembroDaFila(user.id, conversa.fila_id) : false;
+        if (!isAtribuido && !isMembroOrigem) {
+          return reply.code(403).send({ success: false, error: { message: 'Sem permissao para transferir esta conversa' } });
+        }
+      }
+
+      // Validar operador destino existe e esta ativo na mesma empresa
+      const destResult = await pool.query(
+        `SELECT id, nome, role FROM usuarios WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+        [operador_id, empresaId]
+      );
+      if (destResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Operador destino nao encontrado' } });
+      }
+      const destOperador = destResult.rows[0];
+
+      // Se a conversa tem fila, verificar se operador destino e membro
+      if (conversa.fila_id) {
+        const isMembroDest = await isMembroDaFila(operador_id, conversa.fila_id);
+        if (!isMembroDest) {
+          return reply.code(400).send({ success: false, error: { message: `${destOperador.nome} nao pertence a fila desta conversa` } });
+        }
+      }
+
+      // Verificar capacidade do operador destino
+      const temCapacidade = await verificarCapacidadeOperador(operador_id);
+      if (!temCapacidade) {
+        return reply.code(400).send({ success: false, error: { message: `${destOperador.nome} atingiu o limite de conversas simultaneas` } });
+      }
+
+      // Transferir
+      await pool.query(
+        `UPDATE conversas SET
+           operador_id = $1, operador_nome = $2, operador_atribuido_em = NOW(),
+           controlado_por = 'humano', humano_id = $1, humano_nome = $2,
+           humano_assumiu_em = NOW(), humano_ultima_msg_em = NOW(), atualizado_em = NOW()
+         WHERE id = $3`,
+        [operador_id, destOperador.nome, id]
+      );
+
+      // Registrar historico
+      await pool.query(
+        `INSERT INTO controle_historico
+           (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+         VALUES ($1, $2, 'transferencia_operador', 'humano', 'humano', $3, $4, $5)`,
+        [id, empresaId, operador_id, destOperador.nome, motivo || `Transferido de ${user.nome} para ${destOperador.nome}`]
+      );
+
+      // WebSocket: notificar operador anterior e novo
+      const dados = { id, operador_id, operador_nome: destOperador.nome, controlado_por: 'humano' };
+      emitConversaAtribuida(id, conversa.fila_id, operador_id, dados);
+      // Notificar operador anterior que a conversa foi removida
+      if (conversa.operador_id && conversa.operador_id !== operador_id) {
+        emitToUser(conversa.operador_id, 'conversa:transferida', { conversa_id: id, para_operador: destOperador.nome });
+      }
+      if (conversa.fila_id) {
+        const stats = await calcularStatsFila(conversa.fila_id);
+        emitFilaStats(conversa.fila_id, stats);
+      }
+
+      logger.info(`Conversa ${id} transferida de ${user.nome} para ${destOperador.nome}`);
+      reply.send({ success: true, data: { message: `Transferida para ${destOperador.nome}`, operador_nome: destOperador.nome } });
+    } catch (error) {
+      logger.error('Erro ao transferir conversa para operador:', { error: error.message, stack: error.stack, params: request.params, body: request.body });
+      reply.code(500).send({ success: false, error: { message: 'Erro ao transferir conversa', detail: error.message } });
+    }
+  });
+
+  // ============================================
   // POST /:id/prioridade — Alterar prioridade
   // ============================================
   fastify.post('/:id/prioridade', {
