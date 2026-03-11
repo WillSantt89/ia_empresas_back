@@ -145,6 +145,18 @@ const toolExecutionsRoutes = async (fastify) => {
         }
       };
     } catch (error) {
+      // If table doesn't exist yet (migration 054 not run), return empty data
+      if (error.message?.includes('tool_executions') && error.message?.includes('does not exist')) {
+        createLogger.warn('Table tool_executions does not exist yet — returning empty data');
+        return {
+          success: true,
+          data: {
+            executions: [],
+            stats: { total: 0, total_sucesso: 0, total_falha: 0, tempo_medio_ms: 0 },
+            pagination: { page, limit, total: 0, pages: 0 }
+          }
+        };
+      }
       createLogger.error('Failed to list tool executions', { empresa_id, error: error.message });
       throw error;
     }
