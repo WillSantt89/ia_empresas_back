@@ -7,8 +7,11 @@ import sensible from '@fastify/sensible';
 import multipart from '@fastify/multipart';
 import { config } from './config/env.js';
 import { logger } from './config/logger.js';
-import { testConnection, closePool, query } from './config/database.js';
+import { testConnection, closePool, query, pool } from './config/database.js';
 import { testRedisConnection, closeRedis } from './config/redis.js';
+import { readdir, readFile } from 'fs/promises';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
 // Import middlewares
 import { authMiddleware, webhookAuthMiddleware } from './middleware/auth.js';
@@ -250,6 +253,49 @@ async function start() {
 
     if (!dbConnected || !redisConnected) {
       throw new Error('Failed to connect to required services');
+    }
+
+    // Auto-run pending migrations on startup
+    try {
+      const __filename_s = fileURLToPath(import.meta.url);
+      const __dirname_s = dirname(__filename_s);
+      const migrationsDir = join(__dirname_s, '../migrations');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS _migrations (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL UNIQUE,
+            executed_at TIMESTAMPTZ DEFAULT NOW()
+          )
+        `);
+        const files = (await readdir(migrationsDir)).filter(f => f.endsWith('.sql')).sort();
+        const { rows: executedMigrations } = await client.query('SELECT name FROM _migrations');
+        const executed = new Set(executedMigrations.map(m => m.name));
+        let migrationsRun = 0;
+        for (const file of files) {
+          if (!executed.has(file)) {
+            logger.info(`Running migration: ${file}`);
+            const sql = await readFile(join(migrationsDir, file), 'utf-8');
+            await client.query(sql);
+            await client.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
+            logger.info(`Migration ${file} completed`);
+            migrationsRun++;
+          }
+        }
+        await client.query('COMMIT');
+        if (migrationsRun > 0) {
+          logger.info(`Auto-migrate: ${migrationsRun} migration(s) applied`);
+        }
+      } catch (migErr) {
+        await client.query('ROLLBACK');
+        logger.error({ err: migErr }, 'Auto-migrate failed — continuing startup');
+      } finally {
+        client.release();
+      }
+    } catch (migOuter) {
+      logger.error({ err: migOuter }, 'Auto-migrate setup error — continuing startup');
     }
 
     // Test BullMQ queue connections
