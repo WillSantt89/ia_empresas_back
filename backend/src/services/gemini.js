@@ -236,12 +236,7 @@ export async function processMessage(options) {
   } catch (error) {
     const duration = Date.now() - startTime;
 
-    createLogger.error('Gemini API error', {
-      error: error.message,
-      code: error.code,
-      model,
-      duration_ms: duration
-    });
+    createLogger.error({ err: error, model, duration_ms: duration }, 'Gemini API error');
 
     throw error;
   }
@@ -566,10 +561,7 @@ export async function processMessageWithTools(options, toolExecutor) {
             });
 
           } catch (error) {
-            createLogger.error('Tool execution failed', {
-              tool: functionCall.name,
-              error: error.message
-            });
+            createLogger.error({ err: error, tool: functionCall.name }, 'Tool execution failed');
 
             functionResponses.push({
               functionResponse: {
@@ -659,13 +651,7 @@ export async function processMessageWithTools(options, toolExecutor) {
   } catch (error) {
     const duration = Date.now() - startTime;
 
-    createLogger.error('Message processing failed', {
-      error: error.message,
-      code: error.code,
-      model,
-      iterations: iteracoes,
-      duration_ms: duration
-    });
+    createLogger.error({ err: error, model, iterations: iteracoes, duration_ms: duration }, 'Message processing failed');
 
     // Return error with partial results
     const enrichedError = new Error(error.message || 'Gemini API error');
