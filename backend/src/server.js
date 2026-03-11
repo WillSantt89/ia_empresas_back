@@ -262,7 +262,6 @@ async function start() {
       const migrationsDir = join(__dirname_s, '../migrations');
       const client = await pool.connect();
       try {
-        await client.query('BEGIN');
         await client.query(`
           CREATE TABLE IF NOT EXISTS _migrations (
             id SERIAL PRIMARY KEY,
@@ -276,20 +275,25 @@ async function start() {
         let migrationsRun = 0;
         for (const file of files) {
           if (!executed.has(file)) {
-            logger.info(`Running migration: ${file}`);
-            const sql = await readFile(join(migrationsDir, file), 'utf-8');
-            await client.query(sql);
-            await client.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
-            logger.info(`Migration ${file} completed`);
-            migrationsRun++;
+            try {
+              await client.query('BEGIN');
+              logger.info(`Running migration: ${file}`);
+              const sql = await readFile(join(migrationsDir, file), 'utf-8');
+              await client.query(sql);
+              await client.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
+              await client.query('COMMIT');
+              logger.info(`Migration ${file} completed`);
+              migrationsRun++;
+            } catch (migErr) {
+              await client.query('ROLLBACK');
+              logger.error({ err: migErr, file }, `Auto-migrate: migration ${file} failed — skipping`);
+            }
           }
         }
-        await client.query('COMMIT');
         if (migrationsRun > 0) {
           logger.info(`Auto-migrate: ${migrationsRun} migration(s) applied`);
         }
       } catch (migErr) {
-        await client.query('ROLLBACK');
         logger.error({ err: migErr }, 'Auto-migrate failed — continuing startup');
       } finally {
         client.release();
