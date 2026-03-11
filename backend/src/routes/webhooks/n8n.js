@@ -7,7 +7,7 @@ import { decrypt } from '../../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from '../../services/api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, archiveConversation } from '../../services/memory.js';
 import { processMessageWithTools, buildToolDeclarations } from '../../services/gemini.js';
-import { executeTool, executeTransferTool, executeAtributoTool, transformResultForLLM } from '../../services/tool-runner.js';
+import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM } from '../../services/tool-runner.js';
 import { sendTextMessage } from '../../services/whatsapp-sender.js';
 import { atribuirConversaAutomatica } from '../../services/fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats } from '../../services/websocket.js';
@@ -460,6 +460,8 @@ const n8nWebhookRoutes = async (fastify) => {
         let result;
         if (toolConfig.tipo_tool === 'transferencia') {
           result = await executeTransferTool(toolConfig, { conversa_id, empresa_id });
+        } else if (toolConfig.tipo_tool === 'encerramento') {
+          result = await executeFinalizarTool({ conversa_id, empresa_id });
         } else if (toolConfig.tipo_tool === 'atributo') {
           result = await executeAtributoTool(
             { conversa_id, empresa_id, contato_id, tipo_atributo: toolConfig._atributo_contexto },

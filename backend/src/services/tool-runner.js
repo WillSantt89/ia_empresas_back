@@ -5,6 +5,7 @@ import { pool } from '../config/database.js';
 import { validarValorCampo } from '../routes/campos-personalizados.js';
 import { emitConversaAtualizada, emitNovaConversaNaFila, emitFilaStats, emitToEmpresa } from './websocket.js';
 import { calcularStatsFila } from './fila-manager.js';
+import { archiveConversation } from './memory.js';
 
 /**
  * Tool Runner Service
@@ -397,6 +398,73 @@ export async function executeTransferTool(tool, context) {
 }
 
 /**
+ * Execute a finalize tool — ends the conversation
+ * @param {Object} context - { conversa_id, empresa_id }
+ * @returns {Promise<Object>} Result
+ */
+export async function executeFinalizarTool(context) {
+  const startTime = Date.now();
+  const { conversa_id, empresa_id } = context;
+
+  try {
+    // Get conversation data
+    const convResult = await pool.query(
+      `SELECT id, contato_whatsapp, fila_id, status FROM conversas WHERE id = $1 AND empresa_id = $2`,
+      [conversa_id, empresa_id]
+    );
+
+    if (convResult.rows.length === 0) {
+      return { success: false, error: 'Conversa não encontrada' };
+    }
+
+    const conversa = convResult.rows[0];
+
+    if (conversa.status !== 'ativo') {
+      return { success: false, error: 'Conversa já está finalizada' };
+    }
+
+    // Finalizar conversa
+    await pool.query(
+      `UPDATE conversas SET status = 'finalizado', atualizado_em = NOW() WHERE id = $1`,
+      [conversa_id]
+    );
+
+    // Finalizar atendimento ativo se houver
+    await pool.query(
+      `UPDATE atendimentos SET status = 'finalizado', finalizado_em = NOW() WHERE conversa_id = $1 AND status = 'ativo'`,
+      [conversa_id]
+    );
+
+    const duration = Date.now() - startTime;
+
+    createLogger.info({ conversa_id, empresa_id, duration_ms: duration }, 'Finalize tool executed');
+
+    // Arquivar histórico Redis
+    const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+    archiveConversation(empresa_id, conversationKey).catch(() => {});
+
+    // WebSocket: notificar
+    emitConversaAtualizada(conversa_id, conversa.fila_id, { id: conversa_id, status: 'finalizado' });
+    if (conversa.fila_id) {
+      calcularStatsFila(conversa.fila_id).then(stats => emitFilaStats(conversa.fila_id, stats)).catch(() => {});
+    }
+    emitToEmpresa(empresa_id, 'fila:stats-updated', { fila_origem: conversa.fila_id });
+
+    return {
+      success: true,
+      data: {
+        mensagem: 'Atendimento finalizado com sucesso.',
+      },
+      duration_ms: duration,
+    };
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    createLogger.error({ err: error, conversa_id, empresa_id, duration_ms: duration }, 'Finalize tool failed');
+    return { success: false, error: error.message, duration_ms: duration };
+  }
+}
+
+/**
  * Execute an attribute tool — saves contact or conversation attributes
  * Called by the AI during function calling loop
  * @param {Object} context - { conversa_id, empresa_id, contato_id, tipo_atributo: 'contato'|'atendimento' }
@@ -588,10 +656,10 @@ export function validateTool(tool) {
     errors.push('Tool name is required');
   }
 
-  // Transfer tools don't need url/metodo
-  const isTransfer = tool.tipo_tool === 'transferencia';
+  // Internal tools don't need url/metodo
+  const isInternal = tool.tipo_tool === 'transferencia' || tool.tipo_tool === 'encerramento';
 
-  if (!isTransfer) {
+  if (!isInternal) {
     if (!tool.url) {
       errors.push('Tool URL is required');
     } else {
@@ -607,7 +675,7 @@ export function validateTool(tool) {
     } else if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(tool.metodo)) {
       errors.push('Tool method must be GET, POST, PUT, PATCH, or DELETE');
     }
-  } else {
+  } else if (tool.tipo_tool === 'transferencia') {
     if (!tool.agente_destino_id && !tool.fila_destino_id) {
       errors.push('Transfer tool requires agente_destino_id or fila_destino_id');
     }

@@ -10,7 +10,7 @@ import { decrypt } from '../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from './api-key-manager.js';
 import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from './memory.js';
 import { processMessageWithTools, buildToolDeclarations } from './gemini.js';
-import { executeTool, executeTransferTool, executeAtributoTool, transformResultForLLM } from './tool-runner.js';
+import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM } from './tool-runner.js';
 import { parseMetaMessage, buildGeminiParts } from './media-handler.js';
 import { saveMedia } from './media-storage.js';
 import { sendTextMessage, markAsRead } from './whatsapp-sender.js';
@@ -721,6 +721,8 @@ async function processAIResponse({
     let result;
     if (toolConfig.tipo_tool === 'transferencia') {
       result = await executeTransferTool(toolConfig, { conversa_id, empresa_id });
+    } else if (toolConfig.tipo_tool === 'encerramento') {
+      result = await executeFinalizarTool({ conversa_id, empresa_id });
     } else if (toolConfig.tipo_tool === 'atributo') {
       result = await executeAtributoTool(
         { conversa_id, empresa_id, contato_id, tipo_atributo: toolConfig._atributo_contexto },

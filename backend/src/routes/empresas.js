@@ -526,6 +526,16 @@ const empresasRoutes = async (fastify) => {
         `, [filaResult.rows[0].id, createdUser.id]);
       }
 
+      // Auto-criar tool de encerramento de atendimento
+      await client.query(`
+        INSERT INTO tools (empresa_id, nome, descricao_para_llm, tipo_tool, parametros_schema_json, ativo)
+        VALUES ($1, 'finalizar_atendimento',
+                'Finaliza e encerra o atendimento atual. Use quando o cliente confirmar que não precisa de mais nada, quando o assunto foi resolvido, ou quando o cliente se despedir.',
+                'encerramento',
+                '{"type":"object","properties":{},"required":[]}',
+                true)
+      `, [empresa.id]);
+
       // Auto-criar agente de triagem vinculado à fila default
       const filaId = filaResult.rows[0]?.id;
       if (filaId) {
