@@ -32,7 +32,10 @@ const toolsRoutes = async (fastify) => {
         required: ['type', 'properties']
       },
       timeout_ms: { type: 'integer', minimum: 100, maximum: 30000, default: 5000 },
-      ativo: { type: 'boolean' }
+      ativo: { type: 'boolean' },
+      tipo_tool: { type: 'string', enum: ['http', 'transferencia', 'encerramento', 'atributo'] },
+      fila_destino_id: { type: 'string', format: 'uuid' },
+      agente_destino_id: { type: 'string', format: 'uuid' }
     }
   };
 
@@ -168,7 +171,7 @@ const toolsRoutes = async (fastify) => {
       body: {
         type: 'object',
         properties: toolSchema.properties,
-        required: ['nome', 'descricao_para_llm', 'url', 'metodo', 'parametros_schema_json']
+        required: ['nome', 'descricao_para_llm', 'parametros_schema_json']
       }
     }
   }, async (request, reply) => {
@@ -221,8 +224,11 @@ const toolsRoutes = async (fastify) => {
           parametros_schema_json,
           timeout_ms,
           ativo,
-          is_global
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false)
+          is_global,
+          tipo_tool,
+          fila_destino_id,
+          agente_destino_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false, $12, $13, $14)
         RETURNING *
       `;
 
@@ -232,13 +238,16 @@ const toolsRoutes = async (fastify) => {
           toolData.nome,
           toolData.descricao || null,
           toolData.descricao_para_llm,
-          toolData.url,
-          toolData.metodo,
+          toolData.url || null,
+          toolData.metodo || null,
           toolData.headers_json || {},
           toolData.body_template_json || {},
           toolData.parametros_schema_json,
           toolData.timeout_ms || 5000,
-          toolData.ativo !== false
+          toolData.ativo !== false,
+          toolData.tipo_tool || 'http',
+          toolData.fila_destino_id || null,
+          toolData.agente_destino_id || null
         ]
       );
 
