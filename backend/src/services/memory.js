@@ -151,9 +151,9 @@ export async function addToolCallToHistory(empresaId, conversationId, functionCa
       timestamp: new Date().toISOString()
     });
 
-    // Add function response
+    // Add function response (role 'user' for Gemini 3 compatibility)
     history.push({
-      role: 'function',
+      role: 'user',
       parts: [{
         functionResponse: {
           name: functionCall.name,
@@ -448,10 +448,33 @@ export function buildSystemMessage(agent) {
  * @returns {Array} Formatted history
  */
 export function formatHistoryForGemini(history) {
-  return history
+  // Filter valid roles and normalize 'function' role to 'user' (Gemini 3 compatibility)
+  const filtered = history
     .filter(msg => msg.role === 'user' || msg.role === 'model' || msg.role === 'function')
     .map(msg => ({
-      role: msg.role,
+      role: msg.role === 'function' ? 'user' : msg.role,
       parts: msg.parts
     }));
+
+  // Sanitize: ensure every model functionCall is followed by a user functionResponse.
+  // Remove orphan function calls that would cause Gemini to reject the request.
+  const sanitized = [];
+  for (let i = 0; i < filtered.length; i++) {
+    const msg = filtered[i];
+    const hasFunctionCall = msg.role === 'model' && msg.parts?.some(p => p.functionCall);
+
+    if (hasFunctionCall) {
+      // Check if next message is a function response
+      const next = filtered[i + 1];
+      const nextHasFunctionResponse = next && next.parts?.some(p => p.functionResponse);
+      if (!nextHasFunctionResponse) {
+        // Skip orphan function call — no matching response
+        continue;
+      }
+    }
+
+    sanitized.push(msg);
+  }
+
+  return sanitized;
 }
