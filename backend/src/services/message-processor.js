@@ -720,14 +720,20 @@ async function processAIResponse({
   ).catch(() => ({ rows: [] }));
   const logContato = convDataForLog.rows[0] || {};
 
-  // Injetar dados do contato no system prompt para o agente poder usar em tools
-  let promptComContexto = prompt_ativo;
+  // Injetar dados do contato na mensagem (funciona com e sem cache)
+  let messageWithContext = messageText;
+  let partsWithContext = parts;
   if (logContato.contato_whatsapp || logContato.contato_nome) {
     const dadosContato = [
-      logContato.contato_whatsapp ? `- Telefone/WhatsApp: ${logContato.contato_whatsapp}` : '',
-      logContato.contato_nome ? `- Nome do contato: ${logContato.contato_nome}` : '',
-    ].filter(Boolean).join('\n');
-    promptComContexto += `\n\n[Dados do contato atual]\n${dadosContato}\nUse estes dados automaticamente quando precisar preencher telefone ou nome em tools, sem perguntar ao cliente.`;
+      logContato.contato_whatsapp ? `Telefone/WhatsApp: ${logContato.contato_whatsapp}` : '',
+      logContato.contato_nome ? `Nome do contato: ${logContato.contato_nome}` : '',
+    ].filter(Boolean).join(', ');
+    const contextPrefix = `[Dados do contato: ${dadosContato}]\n`;
+    messageWithContext = contextPrefix + messageText;
+    // Se tem parts (mídia), injetar o contexto como primeiro part texto
+    if (parts && Array.isArray(parts)) {
+      partsWithContext = [{ text: contextPrefix }, ...parts];
+    }
   }
 
   const toolExecutor = async (tool, args) => {
@@ -790,11 +796,11 @@ async function processAIResponse({
         {
           apiKey: currentKey.gemini_api_key,
           model: modelo,
-          systemPrompt: promptComContexto,
+          systemPrompt: prompt_ativo,
           tools: toolDeclarations,
           history: formatHistoryForGemini(history),
-          message: messageText,
-          parts,
+          message: messageWithContext,
+          parts: partsWithContext,
           temperature: temperatura,
           maxTokens: max_tokens,
           cachedContentName,
