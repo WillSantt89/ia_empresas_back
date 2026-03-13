@@ -48,60 +48,41 @@ const usuariosRoutes = async (fastify) => {
     const offset = (page - 1) * limit;
 
     try {
-      let query = `
-        SELECT
-          id,
-          nome,
-          email,
-          telefone,
-          role,
-          ativo,
-          email_verified,
-          ultimo_login,
-          criado_em,
-          atualizado_em
-        FROM usuarios
-        WHERE empresa_id = $1
-      `;
-
       const params = [empresa_id];
       let paramIndex = 2;
+      let whereExtra = '';
 
       // Supervisor can only see operador and viewer
       if (request.user.role === 'supervisor') {
-        query += ` AND role IN ('operador', 'viewer')`;
+        whereExtra += ` AND role IN ('operador', 'viewer')`;
       }
 
       // Add filters
       if (search) {
-        query += ` AND (nome ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`;
+        whereExtra += ` AND (nome ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`;
         params.push(`%${search}%`);
         paramIndex++;
       }
 
       if (role) {
-        query += ` AND role = $${paramIndex}`;
+        whereExtra += ` AND role = $${paramIndex}`;
         params.push(role);
         paramIndex++;
       }
 
       if (ativo !== undefined) {
-        query += ` AND ativo = $${paramIndex}`;
+        whereExtra += ` AND ativo = $${paramIndex}`;
         params.push(ativo);
         paramIndex++;
       }
 
       // Get total count
-      const countQuery = query.replace(
-        'SELECT id, nome, email, telefone, role, ativo, email_verified, ultimo_login, criado_em, atualizado_em',
-        'SELECT COUNT(*) as total'
-      );
-
+      const countQuery = `SELECT COUNT(*) as total FROM usuarios WHERE empresa_id = $1${whereExtra}`;
       const countResult = await pool.query(countQuery, params);
       const total = parseInt(countResult.rows[0].total) || 0;
 
-      // Add pagination
-      query += ` ORDER BY criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      // Get paginated results
+      const query = `SELECT id, nome, email, telefone, role, ativo, email_verified, ultimo_login, criado_em, atualizado_em FROM usuarios WHERE empresa_id = $1${whereExtra} ORDER BY criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       params.push(limit, offset);
 
       const result = await pool.query(query, params);
