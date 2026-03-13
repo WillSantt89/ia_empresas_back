@@ -94,7 +94,7 @@ export default async function promptsRoutes(fastify, opts) {
         type: 'object',
         required: ['conteudo'],
         properties: {
-          conteudo: { type: 'string', minLength: 10, maxLength: 35000 },
+          conteudo: { type: 'string', minLength: 10, maxLength: 100000 },
           ativar_imediatamente: { type: 'boolean', default: false }
         }
       }
