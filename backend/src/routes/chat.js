@@ -311,7 +311,7 @@ const chatRoutes = async (fastify) => {
         }
 
         const result = await executeTool(toolConfig, args);
-        return transformResultForLLM(result, 2000); // Limit result size
+        return transformResultForLLM(result, 8000);
       };
 
       // Process message with Gemini (with failover across API keys)

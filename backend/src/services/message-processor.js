@@ -773,7 +773,7 @@ async function processAIResponse({
       tempo_ms: result?.duration_ms,
     });
 
-    return transformResultForLLM(result, 2000);
+    return transformResultForLLM(result, 8000);
   };
 
   // Check cache

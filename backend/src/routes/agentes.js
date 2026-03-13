@@ -862,7 +862,7 @@ const agentesRoutes = async (fastify) => {
         const toolConfig = tools.find(t => t.nome.toLowerCase() === tool.nome.toLowerCase());
         if (!toolConfig) throw new Error(`Tool ${tool.nome} nao encontrada`);
         const result = await executeTool(toolConfig, args);
-        return transformResultForLLM(result, 2000);
+        return transformResultForLLM(result, 8000);
       };
 
       // 6. Call Gemini with failover

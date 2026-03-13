@@ -489,7 +489,7 @@ const n8nWebhookRoutes = async (fastify) => {
           tempo_ms: result?.duration_ms,
         });
 
-        return transformResultForLLM(result, 2000);
+        return transformResultForLLM(result, 8000);
       };
 
       // Check if agent has active, non-expired cache

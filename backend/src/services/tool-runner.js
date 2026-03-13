@@ -811,7 +811,7 @@ export async function executeToolsParallel(toolExecutions) {
  * @param {number} maxLength - Maximum length for result (to avoid token limits)
  * @returns {Object} Transformed result
  */
-export function transformResultForLLM(result, maxLength = 1000) {
+export function transformResultForLLM(result, maxLength = 4000) {
   if (!result) {
     return { error: 'No result' };
   }
