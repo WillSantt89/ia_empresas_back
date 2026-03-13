@@ -19,7 +19,7 @@ const usuariosRoutes = async (fastify) => {
       email: { type: 'string', format: 'email' },
       senha: { type: 'string', minLength: 8 },
       telefone: { type: 'string', maxLength: 20 },
-      role: { type: 'string', enum: ['master', 'admin', 'operador', 'viewer'] },
+      role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
       ativo: { type: 'boolean' }
     }
   };
@@ -37,7 +37,7 @@ const usuariosRoutes = async (fastify) => {
           page: { type: 'integer', minimum: 1, default: 1 },
           limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           search: { type: 'string' },
-          role: { type: 'string', enum: ['master', 'admin', 'operador', 'viewer'] },
+          role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
           ativo: { type: 'boolean' }
         }
       }
@@ -66,6 +66,11 @@ const usuariosRoutes = async (fastify) => {
 
       const params = [empresa_id];
       let paramIndex = 2;
+
+      // Supervisor can only see operador and viewer
+      if (request.user.role === 'supervisor') {
+        query += ` AND role IN ('operador', 'viewer')`;
+      }
 
       // Add filters
       if (search) {
@@ -128,7 +133,7 @@ const usuariosRoutes = async (fastify) => {
    * Create a new user
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin', 'supervisor'])],
     schema: {
       body: {
         type: 'object',
@@ -148,6 +153,17 @@ const usuariosRoutes = async (fastify) => {
           error: {
             code: 'FORBIDDEN',
             message: 'Admin users cannot create master users'
+          }
+        });
+      }
+
+      // Supervisor can only create operador and viewer
+      if (userRole === 'supervisor' && !['operador', 'viewer'].includes(role)) {
+        return reply.code(403).send({
+          success: false,
+          error: {
+            code: 'FORBIDDEN',
+            message: 'Supervisor só pode criar usuários operador ou viewer'
           }
         });
       }
@@ -329,8 +345,8 @@ const usuariosRoutes = async (fastify) => {
     try {
       // Check permissions
       if (id !== currentUserId) {
-        // User can only update themselves unless they're admin/master
-        if (!['master', 'admin'].includes(currentUserRole)) {
+        // User can only update themselves unless they're admin/master/supervisor
+        if (!['master', 'admin', 'supervisor'].includes(currentUserRole)) {
           return reply.code(403).send({
             success: false,
             error: {
@@ -354,6 +370,44 @@ const usuariosRoutes = async (fastify) => {
               }
             });
           }
+        }
+
+        // Supervisor can only update operador/viewer
+        if (currentUserRole === 'supervisor') {
+          const targetUserQuery = 'SELECT role FROM usuarios WHERE empresa_id = $1 AND id = $2';
+          const targetUser = await pool.query(targetUserQuery, [empresa_id, id]);
+
+          if (targetUser.rows.length > 0 && !['operador', 'viewer'].includes(targetUser.rows[0].role)) {
+            return reply.code(403).send({
+              success: false,
+              error: {
+                code: 'FORBIDDEN',
+                message: 'Supervisor só pode editar usuários operador ou viewer'
+              }
+            });
+          }
+
+          // Supervisor cannot set role above operador
+          if (updates.role && !['operador', 'viewer'].includes(updates.role)) {
+            return reply.code(403).send({
+              success: false,
+              error: {
+                code: 'FORBIDDEN',
+                message: 'Supervisor só pode definir role operador ou viewer'
+              }
+            });
+          }
+        }
+      } else if (currentUserRole === 'supervisor') {
+        // Supervisor cannot change own password via PUT (must ask admin/master)
+        if (updates.senha) {
+          return reply.code(403).send({
+            success: false,
+            error: {
+              code: 'FORBIDDEN',
+              message: 'Supervisor não pode alterar a própria senha. Solicite a um admin ou master.'
+            }
+          });
         }
       }
 
@@ -543,10 +597,21 @@ const usuariosRoutes = async (fastify) => {
       }
     }
   }, async (request, reply) => {
-    const { empresa_id, id: userId } = request.user;
+    const { empresa_id, id: userId, role: userRole } = request.user;
     const { current_password, new_password } = request.body;
 
     try {
+      // Supervisor cannot change own password
+      if (userRole === 'supervisor') {
+        return reply.code(403).send({
+          success: false,
+          error: {
+            code: 'FORBIDDEN',
+            message: 'Supervisor não pode alterar a própria senha. Solicite a um admin ou master.'
+          }
+        });
+      }
+
       // Get current password hash
       const query = 'SELECT senha_hash FROM usuarios WHERE empresa_id = $1 AND id = $2';
       const result = await pool.query(query, [empresa_id, userId]);

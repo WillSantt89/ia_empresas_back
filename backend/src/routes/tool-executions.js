@@ -10,7 +10,7 @@ const toolExecutionsRoutes = async (fastify) => {
    * List tool executions with filters and pagination
    */
   fastify.get('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin', 'supervisor'])],
     schema: {
       querystring: {
         type: 'object',

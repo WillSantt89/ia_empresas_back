@@ -4,14 +4,16 @@
 export const USER_ROLES = {
   MASTER: 'master',
   ADMIN: 'admin',
+  SUPERVISOR: 'supervisor',
   OPERADOR: 'operador',
   VIEWER: 'viewer'
 };
 
 // Role hierarchy for permission checks
 export const ROLE_HIERARCHY = {
-  [USER_ROLES.MASTER]: 4,
-  [USER_ROLES.ADMIN]: 3,
+  [USER_ROLES.MASTER]: 5,
+  [USER_ROLES.ADMIN]: 4,
+  [USER_ROLES.SUPERVISOR]: 3,
   [USER_ROLES.OPERADOR]: 2,
   [USER_ROLES.VIEWER]: 1
 };

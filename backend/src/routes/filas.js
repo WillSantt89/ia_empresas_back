@@ -478,7 +478,7 @@ export default async function filasRoutes(fastify) {
     preHandler: [
       fastify.authenticate,
       fastify.addTenantFilter,
-      fastify.requirePermission('filas', 'write'),
+      fastify.requirePermission('filas', 'manage_members'),
     ],
   }, async (request, reply) => {
     const { id } = request.params;
@@ -521,7 +521,7 @@ export default async function filasRoutes(fastify) {
     preHandler: [
       fastify.authenticate,
       fastify.addTenantFilter,
-      fastify.requirePermission('filas', 'write'),
+      fastify.requirePermission('filas', 'manage_members'),
     ],
   }, async (request, reply) => {
     const { id, userId } = request.params;
@@ -541,7 +541,7 @@ export default async function filasRoutes(fastify) {
     preHandler: [
       fastify.authenticate,
       fastify.addTenantFilter,
-      fastify.requirePermission('filas', 'write'),
+      fastify.requirePermission('filas', 'manage_members'),
     ],
   }, async (request, reply) => {
     const { id } = request.params;
