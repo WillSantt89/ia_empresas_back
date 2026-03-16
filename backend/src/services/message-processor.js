@@ -225,6 +225,10 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
           `UPDATE conversas SET controlado_por = 'ia', operador_id = NULL, operador_nome = NULL, ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
           [conversa_id]
         );
+        pool.query(`
+          INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, motivo)
+          VALUES ($1, $2, 'humano_devolveu', 'humano', 'ia', 'Cliente respondeu template, IA ativada automaticamente')
+        `, [conversa_id, empresa_id]).catch(() => {});
         // Continua para processamento pela IA (não retorna)
       } else {
         createLogger.info('Message during human control (n8n), skipping AI', { empresa_id, phone, conversa_id });
@@ -473,6 +477,10 @@ async function processMessageCommon({
           `UPDATE conversas SET controlado_por = 'ia', operador_id = NULL, operador_nome = NULL, ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
           [conversa_id]
         );
+        pool.query(`
+          INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, motivo)
+          VALUES ($1, $2, 'humano_devolveu', 'humano', 'ia', 'Cliente respondeu template, IA ativada automaticamente')
+        `, [conversa_id, empresa_id]).catch(() => {});
         // Continua para processamento pela IA (não retorna)
       } else {
         createLogger.info('Message during human control, skipping AI', { empresa_id, phone, conversa_id });
@@ -958,8 +966,8 @@ async function checkTransferRules({ empresa_id, agente_id, conversa_id, messageT
           [rule.agente_destino_id, conversa_id]);
 
         pool.query(`
-          INSERT INTO controle_historico (empresa_id, conversa_id, acao, motivo)
-          VALUES ($1, $2, 'transferencia_agente', $3)
+          INSERT INTO controle_historico (empresa_id, conversa_id, acao, de_controlador, para_controlador, motivo)
+          VALUES ($1, $2, 'transferencia_agente', 'ia', 'ia', $3)
         `, [empresa_id, conversa_id, rule.trigger_tipo + ':' + rule.trigger_valor]).catch(() => {});
 
         break;

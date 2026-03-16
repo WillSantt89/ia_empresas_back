@@ -680,8 +680,8 @@ const n8nWebhookRoutes = async (fastify) => {
               `, [rule.agente_destino_id, conversa_id]);
 
               pool.query(`
-                INSERT INTO controle_historico (empresa_id, conversa_id, acao, motivo)
-                VALUES ($1, $2, 'transferencia_agente', $3)
+                INSERT INTO controle_historico (empresa_id, conversa_id, acao, de_controlador, para_controlador, motivo)
+                VALUES ($1, $2, 'transferencia_agente', 'ia', 'ia', $3)
               `, [empresa_id, conversa_id, rule.trigger_tipo + ':' + rule.trigger_valor])
                 .catch(err => createLogger.error('Failed to log transfer history', { error: err.message }));
 

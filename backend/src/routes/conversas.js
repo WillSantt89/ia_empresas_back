@@ -574,7 +574,7 @@ export default async function conversasRoutes(fastify, opts) {
         FROM controle_historico ch
         LEFT JOIN usuarios u ON u.id = ch.humano_id
         WHERE ch.conversa_id = $1
-        ORDER BY ch.criado_em DESC
+        ORDER BY ch.criado_em ASC
       `, [id]);
 
       return {
@@ -685,6 +685,13 @@ export default async function conversasRoutes(fastify, opts) {
         WHERE conversa_id = $1 AND status = 'ativo'
       `, [id]);
 
+      // Log no controle_historico
+      const user = request.user;
+      await client.query(`
+        INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+        VALUES ($1, $2, 'finalizado', $3, NULL, $4, $5, 'Finalizado via painel')
+      `, [id, empresaId, conversa.controlado_por, user.id, user.nome || user.email]);
+
       await client.query('COMMIT');
 
       logger.info(`Conversa ${id} finalized`);
@@ -715,6 +722,30 @@ export default async function conversasRoutes(fastify, opts) {
     } finally {
       client.release();
     }
+  });
+
+  // ============================================
+  // GET /:id/historico — Histórico de controle da conversa
+  // ============================================
+  fastify.get('/:id/historico', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'read')
+    ]
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const { empresaId } = request;
+
+    const result = await pool.query(`
+      SELECT ch.id, ch.acao, ch.de_controlador, ch.para_controlador,
+             ch.humano_id, ch.humano_nome, ch.motivo, ch.criado_em
+      FROM controle_historico ch
+      WHERE ch.conversa_id = $1 AND ch.empresa_id = $2
+      ORDER BY ch.criado_em ASC
+    `, [id, empresaId]);
+
+    reply.send({ success: true, data: result.rows });
   });
 
   // ============================================

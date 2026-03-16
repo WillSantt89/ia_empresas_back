@@ -483,8 +483,8 @@ const chatRoutes = async (fastify) => {
               // Log transfer in controle_historico
               pool.query(`
                 INSERT INTO controle_historico (
-                  empresa_id, conversa_id, acao, motivo
-                ) SELECT $1, c.id, 'transferencia_agente', $3
+                  empresa_id, conversa_id, acao, de_controlador, para_controlador, motivo
+                ) SELECT $1, c.id, 'transferencia_agente', 'ia', 'ia', $3
                 FROM conversas c
                 WHERE c.empresa_id = $1
                   AND c.id::text = $2::text

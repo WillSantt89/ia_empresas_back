@@ -451,6 +451,12 @@ export async function executeFinalizarTool(context) {
       [conversa_id]
     );
 
+    // Log no controle_historico
+    await pool.query(`
+      INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, motivo)
+      VALUES ($1, $2, 'finalizado', 'ia', NULL, 'Finalizado pela IA')
+    `, [conversa_id, empresa_id]);
+
     // Finalizar atendimento ativo se houver
     await pool.query(
       `UPDATE atendimentos SET status = 'finalizado', finalizado_em = NOW() WHERE conversa_id = $1 AND status = 'ativo'`,
