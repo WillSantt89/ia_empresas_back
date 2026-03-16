@@ -274,7 +274,7 @@ export default async function conversasRoutes(fastify, opts) {
         const wnIds = conversa.conexoes_whatsapp.map(c => c.wn_id).filter(Boolean);
         if (wnIds.length > 0) {
           const wnResult = await pool.query(
-            `SELECT id, numero, numero_formatado, nome, nome_exibicao FROM whatsapp_numbers WHERE id = ANY($1::uuid[])`,
+            `SELECT id, numero_formatado, nome_exibicao FROM whatsapp_numbers WHERE id = ANY($1::uuid[])`,
             [wnIds]
           );
           const wnMap = {};
@@ -1528,7 +1528,7 @@ export default async function conversasRoutes(fastify, opts) {
 
       // Verificar se o whatsapp_number_id pertence à empresa e está ativo
       const wnResult = await pool.query(
-        `SELECT id, numero, nome FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+        `SELECT id, numero_formatado, nome_exibicao FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
         [whatsapp_number_id, request.empresaId]
       );
       if (wnResult.rows.length === 0) {
@@ -1542,7 +1542,7 @@ export default async function conversasRoutes(fastify, opts) {
       );
 
       logger.info(`Conexao ativa alterada para conversa ${id}: ${whatsapp_number_id} por ${request.user.nome}`);
-      reply.send({ success: true, data: { conexao_ativa_id: whatsapp_number_id, numero: wnResult.rows[0].numero, nome: wnResult.rows[0].nome } });
+      reply.send({ success: true, data: { conexao_ativa_id: whatsapp_number_id, numero_formatado: wnResult.rows[0].numero_formatado, nome_exibicao: wnResult.rows[0].nome_exibicao } });
     } catch (error) {
       logger.error('Erro ao alterar conexao ativa:', error);
       reply.code(500).send({ success: false, error: { message: 'Erro interno' } });
