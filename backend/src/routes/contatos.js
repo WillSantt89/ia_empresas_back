@@ -344,7 +344,11 @@ const contatosRoutes = async (fastify) => {
    * Iniciar conversa a partir de um contato (retorna existente ativa ou cria nova)
    */
   fastify.post('/:id/iniciar-conversa', {
-    preHandler: [fastify.authenticate],
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('contatos', 'write')
+    ],
     schema: {
       params: {
         type: 'object',
@@ -355,14 +359,15 @@ const contatosRoutes = async (fastify) => {
       body: {
         type: 'object',
         properties: {
-          whatsapp_number_id: { type: 'string', format: 'uuid', nullable: true },
+          whatsapp_number_id: { type: 'string', format: 'uuid' },
           template_name: { type: 'string' },
           language_code: { type: 'string' }
         }
       }
     }
   }, async (request, reply) => {
-    const { empresa_id, id: userId, nome: userName, role } = request.user;
+    const { empresaId: empresa_id } = request;
+    const { id: userId, nome: userName, role } = request.user;
     const { id } = request.params;
     const { whatsapp_number_id, template_name, language_code = 'pt_BR' } = request.body || {};
 
