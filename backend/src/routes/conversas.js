@@ -745,35 +745,38 @@ export default async function conversasRoutes(fastify, opts) {
 
       const conversa = conversaResult.rows[0];
 
-      // Reabrir: status=ativo, controlado_por=fila (se tem fila) ou ia
-      const novoControlador = conversa.fila_id ? 'fila' : 'ia';
+      // Reabrir: atribuída ao operador que clicou em reabrir
+      const operadorId = user.id;
+      const operadorNome = user.nome || user.email;
 
       await pool.query(`
         UPDATE conversas SET
           status = 'ativo',
-          controlado_por = $1,
-          operador_id = NULL,
-          operador_nome = NULL,
-          humano_id = NULL,
-          humano_nome = NULL,
+          controlado_por = 'humano',
+          operador_id = $1,
+          operador_nome = $2,
+          operador_atribuido_em = NOW(),
+          humano_id = $1,
+          humano_nome = $2,
+          humano_assumiu_em = NOW(),
           snoozed_ate = NULL,
           atualizado_em = NOW()
-        WHERE id = $2
-      `, [novoControlador, id]);
+        WHERE id = $3
+      `, [operadorId, operadorNome, id]);
 
       // Registrar no histórico
       await pool.query(`
         INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
-        VALUES ($1, $2, 'reaberta', $3, $4, $5, $6, 'Reaberta via painel')
-      `, [id, empresaId, conversa.controlado_por || conversa.status, novoControlador, user.id, user.nome || user.email]);
+        VALUES ($1, $2, 'reaberta', $3, 'humano', $4, $5, 'Reaberta via painel')
+      `, [id, empresaId, conversa.controlado_por || conversa.status, operadorId, operadorNome]);
 
       // WebSocket
       emitConversaAtualizada(id, conversa.fila_id, {
         id,
         status: 'ativo',
-        controlado_por: novoControlador,
-        operador_id: null,
-        operador_nome: null,
+        controlado_por: 'humano',
+        operador_id: operadorId,
+        operador_nome: operadorNome,
       });
       if (conversa.fila_id) {
         const stats = await calcularStatsFila(conversa.fila_id);
