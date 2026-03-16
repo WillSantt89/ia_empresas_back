@@ -581,13 +581,13 @@ const n8nWebhookRoutes = async (fastify) => {
       // --- 12. Log response to mensagens_log ---
       const outgoingMsgResult = await pool.query(`
         INSERT INTO mensagens_log (
-          conversa_id, empresa_id, direcao, conteudo, remetente_tipo,
+          conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome,
           tokens_input, tokens_output, tools_invocadas_json,
           modelo_usado, api_key_usada_id, latencia_ms, criado_em
-        ) VALUES ($1, $2, 'saida', $3, 'ia', $4, $5, $6, $7, $8, $9, NOW())
+        ) VALUES ($1, $2, 'saida', $3, 'ia', $4, $5, $6, $7, $8, $9, $10, NOW())
         RETURNING id, criado_em
       `, [
-        conversa_id, empresa_id, result.text,
+        conversa_id, empresa_id, result.text, agente_nome,
         result.tokensInput, result.tokensOutput,
         result.toolsCalled.length > 0 ? JSON.stringify(result.toolsCalled.map(tc => tc.name)) : null,
         modelo, usedKeyId, processingTime

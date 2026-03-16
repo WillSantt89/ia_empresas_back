@@ -629,10 +629,10 @@ async function processMessageCommon({
 
     if (sendResult.wamid) {
       const rejectLogResult = await pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, criado_em)
-        VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, NOW())
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+        VALUES ($1, $2, 'saida', $3, 'ia', $4, 'text', $5, NOW())
         RETURNING id, criado_em
-      `, [conversa_id, empresa_id, rejectMsg, sendResult.wamid]);
+      `, [conversa_id, empresa_id, rejectMsg, agente_nome, sendResult.wamid]);
 
       if (rejectLogResult.rows[0]) {
         const conversaForFila3 = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
@@ -673,14 +673,14 @@ async function processMessageCommon({
   // --- Log outgoing message ---
   const outgoingMsgResult = await pool.query(`
     INSERT INTO mensagens_log (
-      conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem,
+      conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem,
       tokens_input, tokens_output, tools_invocadas_json,
       modelo_usado, api_key_usada_id, latencia_ms,
       whatsapp_message_id, status_entrega, criado_em
-    ) VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+    ) VALUES ($1, $2, 'saida', $3, 'ia', $4, 'text', $5, $6, $7, $8, $9, $10, $11, $12, NOW())
     RETURNING id, criado_em
   `, [
-    conversa_id, empresa_id, result.text,
+    conversa_id, empresa_id, result.text, agente_nome,
     result.tokensInput, result.tokensOutput,
     result.toolsCalled.length > 0 ? JSON.stringify(result.toolsCalled.map(tc => tc.name)) : null,
     result.modelo, result.usedKeyId, result.processingTime,
@@ -1130,13 +1130,13 @@ export async function triggerNewAgentResponse({ conversa_id, empresa_id }) {
     // 8. Log outgoing message
     const outMsgResult = await pool.query(`
       INSERT INTO mensagens_log (
-        conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem,
+        conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem,
         tokens_input, tokens_output, modelo_usado, api_key_usada_id, latencia_ms,
         whatsapp_message_id, status_entrega, criado_em
-      ) VALUES ($1, $2, 'saida', $3, 'ia', 'text', $4, $5, $6, $7, $8, $9, $10, NOW())
+      ) VALUES ($1, $2, 'saida', $3, 'ia', $4, 'text', $5, $6, $7, $8, $9, $10, $11, NOW())
       RETURNING id, criado_em
     `, [
-      conversa_id, empresa_id, result.text,
+      conversa_id, empresa_id, result.text, agent.agente_nome,
       result.tokensInput, result.tokensOutput,
       result.modelo, result.usedKeyId, result.processingTime,
       sendResult.wamid, sendResult.success ? 'sent' : 'failed',
