@@ -277,9 +277,9 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
 
     const insertConversa = await pool.query(`
       INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id, conexoes_whatsapp, conexao_ativa_id)
-      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10,
+      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10::uuid,
         CASE WHEN $10 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $10::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
-        $10)
+        $10::uuid)
       RETURNING id
     `, [
       empresa_id, phone, name || null, contato_id, agente_id,
@@ -530,9 +530,9 @@ async function processMessageCommon({
 
     const insertConversa = await pool.query(`
       INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id, conexoes_whatsapp, conexao_ativa_id)
-      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10,
+      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10::uuid,
         CASE WHEN $10 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $10::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
-        $10)
+        $10::uuid)
       RETURNING id
     `, [
       empresa_id, phone, contactName || null, contato_id, agente_id,
@@ -540,7 +540,7 @@ async function processMessageCommon({
       defaultFilaId,
       JSON.stringify({ name: contactName || null, source }),
       numero_ticket,
-      wnId
+      wnId || null
     ]);
 
     conversa_id = insertConversa.rows[0].id;
