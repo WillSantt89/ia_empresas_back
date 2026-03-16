@@ -116,6 +116,28 @@ export function parseMetaMessage(messageObj) {
       return { type: 'text', text: JSON.stringify(interactive) };
     }
 
+    case 'referral': {
+      const ref = messageObj.referral || {};
+      const body = messageObj.text?.body || '';
+      const adText = [body, ref.headline, ref.body].filter(Boolean).join(' | ');
+      return {
+        type: 'text',
+        text: adText || '[Cliente chegou via anúncio]',
+      };
+    }
+
+    case 'request_welcome':
+      return {
+        type: 'text',
+        text: messageObj.text?.body || '[Primeiro contato do cliente]',
+      };
+
+    case 'ephemeral':
+      return {
+        type: 'text',
+        text: messageObj.ephemeral?.text || messageObj.text?.body || '[Mensagem temporária recebida]',
+      };
+
     default:
       createLogger.warn('Unknown message type', { type });
       return {
