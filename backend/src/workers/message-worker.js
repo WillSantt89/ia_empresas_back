@@ -59,12 +59,7 @@ whatsappWorker.on('completed', (job) => {
 });
 
 whatsappWorker.on('failed', async (job, err) => {
-  createLogger.error('WhatsApp job failed', {
-    jobId: job?.id,
-    error: err.message,
-    attempt: job?.attemptsMade,
-    maxAttempts: job?.opts?.attempts,
-  });
+  createLogger.error(`WhatsApp job failed: ${err.message} | jobId=${job?.id} attempt=${job?.attemptsMade}/${job?.opts?.attempts || 3} | ${err.stack?.split('\n')[1]?.trim() || ''}`);
 
   // Move to dead letter queue after all retries exhausted
   if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
@@ -88,12 +83,7 @@ n8nWorker.on('completed', (job) => {
 });
 
 n8nWorker.on('failed', async (job, err) => {
-  createLogger.error('n8n job failed', {
-    jobId: job?.id,
-    error: err.message,
-    attempt: job?.attemptsMade,
-    maxAttempts: job?.opts?.attempts,
-  });
+  createLogger.error(`n8n job failed: ${err.message} | jobId=${job?.id} attempt=${job?.attemptsMade}/${job?.opts?.attempts || 3} | ${err.stack?.split('\n')[1]?.trim() || ''}`);
 
   if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
     try {
