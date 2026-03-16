@@ -1577,8 +1577,13 @@ export default async function conversasRoutes(fastify, opts) {
 
     const conversa = conversaResult.rows[0];
 
-    // Validar janela 24h do WhatsApp
-    if (conversa.ultima_msg_entrada_em) {
+    // Validar janela 24h do WhatsApp (null = cliente nunca respondeu)
+    if (!conversa.ultima_msg_entrada_em) {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'WINDOW_NOT_OPEN', message: 'Aguardando resposta do cliente. Envie um template para iniciar.' }
+      });
+    } else {
       const diffMs = Date.now() - new Date(conversa.ultima_msg_entrada_em).getTime();
       if (diffMs > 24 * 60 * 60 * 1000) {
         return reply.code(403).send({
@@ -1773,8 +1778,13 @@ export default async function conversasRoutes(fastify, opts) {
       return reply.code(400).send({ success: false, error: { message: 'Conversa sem contato WhatsApp' } });
     }
 
-    // Validar janela 24h do WhatsApp
-    if (conversa.ultima_msg_entrada_em) {
+    // Validar janela 24h do WhatsApp (null = cliente nunca respondeu)
+    if (!conversa.ultima_msg_entrada_em) {
+      return reply.code(403).send({
+        success: false,
+        error: { code: 'WINDOW_NOT_OPEN', message: 'Aguardando resposta do cliente. Envie um template para iniciar.' }
+      });
+    } else {
       const diffMs = Date.now() - new Date(conversa.ultima_msg_entrada_em).getTime();
       if (diffMs > 24 * 60 * 60 * 1000) {
         return reply.code(403).send({
