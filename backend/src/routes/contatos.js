@@ -457,7 +457,7 @@ const contatosRoutes = async (fastify) => {
 
       // 6. Registrar no controle_historico
       await pool.query(`
-        INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, usuario_id, usuario_nome)
+        INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome)
         VALUES ($1, $2, 'criada_manual', NULL, 'humano', $3, $4)
       `, [conversaId, empresa_id, userId, userName]);
 
