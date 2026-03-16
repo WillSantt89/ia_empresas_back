@@ -1635,6 +1635,22 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
 
+    // Registrar intervenção se admin/master/supervisor envia sem estar atribuído
+    // Só registra se não houver intervencao_admin deste user nos últimos 5 minutos (evita spam)
+    const isAtribuido = conversa.operador_id === user.id;
+    if (!isAtribuido && ['master', 'admin', 'supervisor'].includes(user.role)) {
+      pool.query(
+        `INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+         SELECT $1, $2, 'intervencao_admin', $3, $3, $4, $5, $6
+         WHERE NOT EXISTS (
+           SELECT 1 FROM controle_historico
+           WHERE conversa_id = $1 AND acao = 'intervencao_admin' AND humano_id = $4
+             AND criado_em > NOW() - INTERVAL '5 minutes'
+         )`,
+        [conversa_id, request.empresaId, conversa.controlado_por, user.id, user.nome || user.email, `${user.role} enviou mensagem sem estar atribuído`]
+      ).catch(err => logger.error('Erro ao registrar intervencao_admin:', { error: err.message }));
+    }
+
     try {
       const mensagem = await enviarMensagemWhatsApp(conversa_id, conteudo.trim(), {
         id: user.id,
