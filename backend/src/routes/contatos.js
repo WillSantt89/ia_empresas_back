@@ -463,15 +463,22 @@ const contatosRoutes = async (fastify) => {
 
       // 7. Se template_name fornecido, enviar template via WhatsApp
       let templateEnviado = false;
+      let templateErro = null;
       if (template_name && validatedWnId) {
         const wnResult = await pool.query(
           `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1`,
           [validatedWnId]
         );
-        if (wnResult.rows.length > 0) {
+        if (wnResult.rows.length === 0) {
+          templateErro = 'Número WhatsApp não encontrado para envio do template';
+          createLogger.error('Template send failed: WN not found', { validatedWnId });
+        } else {
           const wn = wnResult.rows[0];
           const token = decrypt(wn.token_graph_api);
-          if (token) {
+          if (!token) {
+            templateErro = 'Token Graph API não configurado ou inválido para esta conexão';
+            createLogger.error('Template send failed: no Graph API token', { validatedWnId, phone_number_id: wn.phone_number_id });
+          } else {
             try {
               const templateLabel = `[Template: ${template_name}]`;
               const msgResult = await pool.query(
@@ -494,11 +501,14 @@ const contatosRoutes = async (fastify) => {
                 );
                 mensagem.status_entrega = 'sent';
                 templateEnviado = true;
+                createLogger.info('Template sent successfully', { template_name, conversaId, phone: contato.whatsapp });
               } else {
+                templateErro = result.error || 'Falha ao enviar template';
                 await pool.query(
                   `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
                   [result.error, mensagem.id]
                 );
+                createLogger.error('Template send failed: Meta API error', { template_name, error: result.error });
               }
 
               emitNovaMensagem(conversaId, defaultFilaId, {
@@ -513,10 +523,14 @@ const contatosRoutes = async (fastify) => {
                 criado_em: mensagem.criado_em,
               });
             } catch (err) {
-              createLogger.error('Erro enviando template ao iniciar conversa', { error: err.message });
+              templateErro = err.message;
+              createLogger.error('Erro enviando template ao iniciar conversa', { error: err.message, stack: err.stack });
             }
           }
         }
+      } else if (template_name && !validatedWnId) {
+        templateErro = 'Conexão WhatsApp não selecionada para envio do template';
+        createLogger.warn('Template requested but no WN selected', { template_name });
       }
 
       // 8. Emitir WebSocket
@@ -548,6 +562,7 @@ const contatosRoutes = async (fastify) => {
           conversa_id: conversaId,
           existente: false,
           template_enviado: templateEnviado,
+          template_erro: templateErro || undefined,
           message: 'Conversa criada com sucesso'
         }
       };
