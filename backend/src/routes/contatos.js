@@ -392,11 +392,82 @@ const contatosRoutes = async (fastify) => {
         [id, empresa_id]
       );
       if (conversaExistente.rows.length > 0) {
+        const existingConversaId = conversaExistente.rows[0].id;
+
+        // Mesmo com conversa existente, enviar template se solicitado
+        let templateEnviado = false;
+        let templateErro = null;
+        if (template_name && whatsapp_number_id) {
+          const wnResult = await pool.query(
+            `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+            [whatsapp_number_id, empresa_id]
+          );
+          if (wnResult.rows.length > 0) {
+            const wn = wnResult.rows[0];
+            const token = decrypt(wn.token_graph_api);
+            if (token) {
+              try {
+                const templateLabel = `[Template: ${template_name}]`;
+                const msgResult = await pool.query(
+                  `INSERT INTO mensagens_log
+                     (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega)
+                   VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending')
+                   RETURNING *`,
+                  [existingConversaId, empresa_id, templateLabel, userId, userName]
+                );
+                const mensagem = msgResult.rows[0];
+                const result = await sendTemplateMessage(
+                  wn.phone_number_id, token, contato.whatsapp, template_name, language_code, []
+                );
+                if (result.success) {
+                  await pool.query(
+                    `UPDATE mensagens_log SET status_entrega = 'sent', whatsapp_message_id = $1 WHERE id = $2`,
+                    [result.wamid, mensagem.id]
+                  );
+                  templateEnviado = true;
+                  createLogger.info('Template sent to existing conversation', { template_name, conversaId: existingConversaId });
+                } else {
+                  templateErro = result.error || 'Falha ao enviar template';
+                  await pool.query(
+                    `UPDATE mensagens_log SET status_entrega = 'failed', erro = $1 WHERE id = $2`,
+                    [result.error, mensagem.id]
+                  );
+                  createLogger.error('Template send failed for existing conversation', { template_name, error: result.error });
+                }
+
+                // Buscar fila da conversa para WebSocket
+                const filaQuery = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [existingConversaId]);
+                const filaId = filaQuery.rows[0]?.fila_id || null;
+                emitNovaMensagem(existingConversaId, filaId, {
+                  id: mensagem.id,
+                  conversa_id: existingConversaId,
+                  conteudo: templateLabel,
+                  direcao: 'saida',
+                  remetente_tipo: 'operador',
+                  remetente_id: userId,
+                  remetente_nome: userName,
+                  status_entrega: mensagem.status_entrega,
+                  criado_em: mensagem.criado_em,
+                });
+              } catch (err) {
+                templateErro = err.message;
+                createLogger.error('Error sending template to existing conversation', { error: err.message });
+              }
+            } else {
+              templateErro = 'Token Graph API não configurado';
+            }
+          } else {
+            templateErro = 'Conexão WhatsApp não encontrada';
+          }
+        }
+
         return {
           success: true,
           data: {
-            conversa_id: conversaExistente.rows[0].id,
+            conversa_id: existingConversaId,
             existente: true,
+            template_enviado: templateEnviado,
+            template_erro: templateErro || undefined,
             message: 'Conversa ativa já existe para este contato'
           }
         };
