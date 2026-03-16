@@ -269,6 +269,24 @@ export default async function conversasRoutes(fastify, opts) {
         }));
       }
 
+      // Detalhes das conexões WhatsApp (multi-conexão)
+      if (conversa.conexoes_whatsapp && conversa.conexoes_whatsapp.length > 0) {
+        const wnIds = conversa.conexoes_whatsapp.map(c => c.wn_id).filter(Boolean);
+        if (wnIds.length > 0) {
+          const wnResult = await pool.query(
+            `SELECT id, numero, numero_formatado, nome, nome_exibicao FROM whatsapp_numbers WHERE id = ANY($1::uuid[])`,
+            [wnIds]
+          );
+          const wnMap = {};
+          wnResult.rows.forEach(w => { wnMap[w.id] = w; });
+          conversa.conexoes_whatsapp_detalhes = conversa.conexoes_whatsapp.map(c => ({
+            ...c,
+            ...(wnMap[c.wn_id] || {}),
+            is_ativa: c.wn_id === (conversa.conexao_ativa_id || '')
+          }));
+        }
+      }
+
       return {
         success: true,
         data: conversa
@@ -1482,6 +1500,56 @@ export default async function conversasRoutes(fastify, opts) {
   });
 
   // ============================================
+  // PUT /:id/conexao-ativa — Operador escolhe conexão WhatsApp ativa
+  // ============================================
+  fastify.put('/:id/conexao-ativa', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ],
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } }, required: ['id'] },
+      body: { type: 'object', properties: { whatsapp_number_id: { type: 'string', format: 'uuid' } }, required: ['whatsapp_number_id'] }
+    }
+  }, async (request, reply) => {
+    try {
+      const { id } = request.params;
+      const { whatsapp_number_id } = request.body;
+
+      // Verificar conversa
+      const conversaResult = await pool.query(
+        `SELECT id, conexoes_whatsapp FROM conversas WHERE id = $1 AND empresa_id = $2`,
+        [id, request.empresaId]
+      );
+      if (conversaResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Conversa nao encontrada' } });
+      }
+
+      // Verificar se o whatsapp_number_id pertence à empresa e está ativo
+      const wnResult = await pool.query(
+        `SELECT id, numero, nome FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+        [whatsapp_number_id, request.empresaId]
+      );
+      if (wnResult.rows.length === 0) {
+        return reply.code(400).send({ success: false, error: { message: 'Numero WhatsApp nao encontrado ou inativo' } });
+      }
+
+      // Atualizar conexão ativa
+      await pool.query(
+        `UPDATE conversas SET conexao_ativa_id = $1, atualizado_em = NOW() WHERE id = $2`,
+        [whatsapp_number_id, id]
+      );
+
+      logger.info(`Conexao ativa alterada para conversa ${id}: ${whatsapp_number_id} por ${request.user.nome}`);
+      reply.send({ success: true, data: { conexao_ativa_id: whatsapp_number_id, numero: wnResult.rows[0].numero, nome: wnResult.rows[0].nome } });
+    } catch (error) {
+      logger.error('Erro ao alterar conexao ativa:', error);
+      reply.code(500).send({ success: false, error: { message: 'Erro interno' } });
+    }
+  });
+
+  // ============================================
   // POST /api/chat/enviar — Operador envia mensagem
   // ============================================
   fastify.post('/enviar-mensagem', {
@@ -1583,11 +1651,12 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
 
-    // Buscar numero WhatsApp — da conversa ou fallback FIFO
-    const wnQuery = conversa.whatsapp_number_id
-      ? `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
-      : `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
-    const wnParam = conversa.whatsapp_number_id || conversa.empresa_id;
+    // Buscar numero WhatsApp — conexao_ativa_id > whatsapp_number_id > fallback FIFO
+    const wnIdEscolhido = conversa.conexao_ativa_id || conversa.whatsapp_number_id;
+    const wnQuery = wnIdEscolhido
+      ? `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+      : `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+    const wnParam = wnIdEscolhido || conversa.empresa_id;
     const whatsappResult = await pool.query(wnQuery, [wnParam]);
     if (whatsappResult.rows.length === 0) {
       return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
@@ -1723,11 +1792,12 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
 
-    // Buscar numero WhatsApp — da conversa ou fallback FIFO
-    const wnQuery = conversa.whatsapp_number_id
-      ? `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
-      : `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
-    const wnParam = conversa.whatsapp_number_id || conversa.empresa_id;
+    // Buscar numero WhatsApp — conexao_ativa_id > whatsapp_number_id > fallback FIFO
+    const wnIdEscolhido2 = conversa.conexao_ativa_id || conversa.whatsapp_number_id;
+    const wnQuery = wnIdEscolhido2
+      ? `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+      : `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+    const wnParam = wnIdEscolhido2 || conversa.empresa_id;
     const whatsappResult = await pool.query(wnQuery, [wnParam]);
     if (whatsappResult.rows.length === 0) {
       return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });

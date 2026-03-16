@@ -20,6 +20,32 @@ import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats, emitStatusEntr
 const createLogger = logger.child({ module: 'message-processor' });
 
 /**
+ * Adiciona/atualiza uma conexão WhatsApp no JSONB conexoes_whatsapp da conversa.
+ */
+async function atualizarConexoesWhatsApp(conversa_id, wnId) {
+  if (!wnId) return;
+  await pool.query(`
+    UPDATE conversas SET
+      conexoes_whatsapp = CASE
+        WHEN conexoes_whatsapp IS NULL OR conexoes_whatsapp = '[]'::jsonb THEN
+          jsonb_build_array(jsonb_build_object('wn_id', $2::text, 'first_seen', NOW(), 'last_seen', NOW()))
+        WHEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(conexoes_whatsapp) elem WHERE elem->>'wn_id' = $2::text) THEN
+          conexoes_whatsapp || jsonb_build_array(jsonb_build_object('wn_id', $2::text, 'first_seen', NOW(), 'last_seen', NOW()))
+        ELSE
+          (SELECT jsonb_agg(
+            CASE WHEN elem->>'wn_id' = $2::text
+              THEN jsonb_set(elem, '{last_seen}', to_jsonb(NOW()))
+              ELSE elem
+            END
+          ) FROM jsonb_array_elements(conexoes_whatsapp) elem)
+      END,
+      conexao_ativa_id = COALESCE(conexao_ativa_id, $2),
+      atualizado_em = NOW()
+    WHERE id = $1
+  `, [conversa_id, wnId]);
+}
+
+/**
  * Process an incoming WhatsApp message (from Meta webhook).
  * This is the heavy logic extracted from whatsapp.js webhook route.
  */
@@ -110,6 +136,16 @@ export async function processWhatsAppMessage({ message, contacts, phoneNumberId,
 export async function processN8nMessage({ message, phone, name, phoneNumberId, empresa_id, agentId, metadata, n8nResponseUrl, webhookToken }) {
   const startTime = Date.now();
 
+  // --- Resolve wnId from phoneNumberId (multi-conexão) ---
+  let wnId = null;
+  if (phoneNumberId) {
+    const wnRes = await pool.query(
+      `SELECT id FROM whatsapp_numbers WHERE phone_number_id = $1 AND empresa_id = $2 LIMIT 1`,
+      [phoneNumberId, empresa_id]
+    );
+    wnId = wnRes.rows[0]?.id || null;
+  }
+
   // --- Resolve agent ---
   let agentQuery, agentParams;
   if (agentId) {
@@ -177,6 +213,9 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
       pool.query('UPDATE conversas SET contato_id = $1 WHERE id = $2 AND contato_id IS NULL', [contato_id, conversa_id]).catch(() => {});
     }
 
+    // Atualizar conexões WhatsApp (multi-conexão por ticket)
+    atualizarConexoesWhatsApp(conversa_id, wnId).catch(() => {});
+
     // --- Check human control ---
     if (conversaResult.rows[0].controlado_por === 'humano') {
       createLogger.info('Message during human control (n8n), skipping AI', { empresa_id, phone, conversa_id });
@@ -223,15 +262,18 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
     );
 
     const insertConversa = await pool.query(`
-      INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket)
-      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9)
+      INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id, conexoes_whatsapp, conexao_ativa_id)
+      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10,
+        CASE WHEN $10 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $10::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
+        $10)
       RETURNING id
     `, [
       empresa_id, phone, name || null, contato_id, agente_id,
       defaultFilaId ? 'fila' : 'ia',
       defaultFilaId,
       JSON.stringify({ name: name || null, source: 'n8n' }),
-      numero_ticket
+      numero_ticket,
+      wnId || null
     ]);
 
     conversa_id = insertConversa.rows[0].id;
@@ -406,6 +448,9 @@ async function processMessageCommon({
       pool.query('UPDATE conversas SET contato_id = $1 WHERE id = $2 AND contato_id IS NULL', [contato_id, conversa_id]).catch(() => {});
     }
 
+    // Atualizar conexões WhatsApp (multi-conexão por ticket)
+    atualizarConexoesWhatsApp(conversa_id, wnId).catch(() => {});
+
     // --- Check human control ---
     if (conversaResult.rows[0].controlado_por === 'humano') {
       createLogger.info('Message during human control, skipping AI', { empresa_id, phone, conversa_id });
@@ -413,12 +458,13 @@ async function processMessageCommon({
       addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
 
       const logMsgResult = await pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
-        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, NOW())
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
+        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())
         RETURNING id, criado_em
       `, [conversa_id, empresa_id, historyText, parsed.type,
           mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
-          mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null]);
+          mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null,
+          wnId || null]);
 
       const fila_id = conversaResult.rows[0].fila_id;
       if (logMsgResult.rows[0]) {
@@ -452,8 +498,10 @@ async function processMessageCommon({
     );
 
     const insertConversa = await pool.query(`
-      INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id)
-      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10)
+      INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id, conexoes_whatsapp, conexao_ativa_id)
+      VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10,
+        CASE WHEN $10 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $10::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
+        $10)
       RETURNING id
     `, [
       empresa_id, phone, contactName || null, contato_id, agente_id,
@@ -514,12 +562,13 @@ async function processMessageCommon({
 
   // --- Log incoming message ---
   const incomingMsgResult = await pool.query(`
-    INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
-    VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())
+    INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
+    VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
     RETURNING id, criado_em
   `, [conversa_id, empresa_id, historyText, parsed.type, messageId,
       mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
-      mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null]);
+      mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null,
+      wnId || null]);
 
   // Emit WebSocket for incoming message
   if (incomingMsgResult.rows[0]) {

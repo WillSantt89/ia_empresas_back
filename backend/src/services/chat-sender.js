@@ -11,7 +11,7 @@ import { sendTextMessage } from './whatsapp-sender.js';
 export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
   // 1. Buscar conversa + empresa
   const conversaResult = await pool.query(
-    `SELECT c.*, e.n8n_response_url, e.webhook_token
+    `SELECT c.*, c.conexao_ativa_id, e.n8n_response_url, e.webhook_token
      FROM conversas c
      JOIN empresas e ON c.empresa_id = e.id
      WHERE c.id = $1`,
@@ -28,11 +28,12 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
     throw new Error('Conversa sem contato WhatsApp');
   }
 
-  // 2. Buscar numero WhatsApp — da conversa ou fallback FIFO
-  const wnQuery = conversa.whatsapp_number_id
-    ? `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
-    : `SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
-  const wnParam = conversa.whatsapp_number_id || conversa.empresa_id;
+  // 2. Buscar numero WhatsApp — conexao_ativa_id > whatsapp_number_id > fallback FIFO
+  const wnIdEscolhido = conversa.conexao_ativa_id || conversa.whatsapp_number_id;
+  const wnQuery = wnIdEscolhido
+    ? `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+    : `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+  const wnParam = wnIdEscolhido || conversa.empresa_id;
   const whatsappResult = await pool.query(wnQuery, [wnParam]);
 
   if (whatsappResult.rows.length === 0) {
@@ -46,13 +47,13 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
     throw new Error('Token WhatsApp invalido ou nao configurado');
   }
 
-  // 3. Salvar em mensagens_log
+  // 3. Salvar em mensagens_log (com whatsapp_number_id da conexão usada)
   const msgResult = await pool.query(
     `INSERT INTO mensagens_log
-       (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega)
-     VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending')
+       (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega, whatsapp_number_id)
+     VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending', $6)
      RETURNING *`,
-    [conversaId, conversa.empresa_id, conteudo, operador.id, operador.nome]
+    [conversaId, conversa.empresa_id, conteudo, operador.id, operador.nome, whatsappNumber.id || null]
   );
 
   const mensagem = msgResult.rows[0];
