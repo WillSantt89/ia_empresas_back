@@ -113,7 +113,7 @@ const whatsappWebhookRoutes = async (fastify) => {
         handleStatusUpdates(value.statuses, empresa_id).catch(err => {
           createLogger.error('Failed to handle status updates', { error: err.message });
         });
-        return reply.code(200).send('OK');
+        // NÃO fazer return — payload pode conter messages junto com statuses
       }
 
       // --- Handle messages: ENQUEUE to BullMQ ---

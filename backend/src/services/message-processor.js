@@ -201,7 +201,7 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
   // --- Find or create conversa ---
   let conversa_id;
   const conversaResult = await pool.query(`
-    SELECT id, controlado_por, humano_nome, fila_id FROM conversas
+    SELECT id, controlado_por, humano_nome, fila_id, ultima_msg_entrada_em FROM conversas
     WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
     ORDER BY criado_em DESC LIMIT 1
   `, [empresa_id, phone]);
@@ -218,36 +218,46 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
 
     // --- Check human control ---
     if (conversaResult.rows[0].controlado_por === 'humano') {
-      createLogger.info('Message during human control (n8n), skipping AI', { empresa_id, phone, conversa_id });
+      // Se nunca recebeu mensagem do cliente (resposta a template), ativar IA
+      if (!conversaResult.rows[0].ultima_msg_entrada_em) {
+        createLogger.info('First client response on template conversation, activating AI (n8n)', { empresa_id, phone, conversa_id });
+        await pool.query(
+          `UPDATE conversas SET controlado_por = 'ia', operador_id = NULL, operador_nome = NULL, ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
+          [conversa_id]
+        );
+        // Continua para processamento pela IA (não retorna)
+      } else {
+        createLogger.info('Message during human control (n8n), skipping AI', { empresa_id, phone, conversa_id });
 
-      addToHistory(empresa_id, conversationKey, 'user', message).catch(() => {});
+        addToHistory(empresa_id, conversationKey, 'user', message).catch(() => {});
 
-      const logMsgResult = await pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
-        VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())
-        RETURNING id, criado_em
-      `, [conversa_id, empresa_id, message]);
+        const logMsgResult = await pool.query(`
+          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, criado_em)
+          VALUES ($1, $2, 'entrada', $3, 'cliente', NOW())
+          RETURNING id, criado_em
+        `, [conversa_id, empresa_id, message]);
 
-      const fila_id = conversaResult.rows[0].fila_id;
-      if (logMsgResult.rows[0]) {
-        emitNovaMensagem(conversa_id, fila_id, {
-          id: logMsgResult.rows[0].id,
-          conversa_id,
-          conteudo: message,
-          direcao: 'entrada',
-          remetente_tipo: 'cliente',
-          criado_em: logMsgResult.rows[0].criado_em,
-        });
+        const fila_id = conversaResult.rows[0].fila_id;
+        if (logMsgResult.rows[0]) {
+          emitNovaMensagem(conversa_id, fila_id, {
+            id: logMsgResult.rows[0].id,
+            conversa_id,
+            conteudo: message,
+            direcao: 'entrada',
+            remetente_tipo: 'cliente',
+            criado_em: logMsgResult.rows[0].criado_em,
+          });
+        }
+
+        pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), ultima_msg_entrada_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
+
+        return {
+          response: null,
+          human_controlled: true,
+          conversation_id: conversa_id,
+          processing_time_ms: Date.now() - startTime,
+        };
       }
-
-      pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
-
-      return {
-        response: null,
-        human_controlled: true,
-        conversation_id: conversa_id,
-        processing_time_ms: Date.now() - startTime,
-      };
     }
   } else {
     // New conversation
@@ -309,6 +319,9 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
       calcularStatsFila(defaultFilaId).then(stats => emitFilaStats(defaultFilaId, stats)).catch(() => {});
     }
   }
+
+  // Atualizar ultima_msg_entrada_em (janela 24h WhatsApp) — fluxo n8n
+  pool.query(`UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`, [conversa_id]).catch(() => {});
 
   // --- Process with AI (shared logic) ---
   const result = await processAIResponse({
@@ -436,7 +449,7 @@ async function processMessageCommon({
   // --- Find or create conversa ---
   let conversa_id;
   const conversaResult = await pool.query(`
-    SELECT id, controlado_por, humano_nome, fila_id, agente_id as conversa_agente_id FROM conversas
+    SELECT id, controlado_por, humano_nome, fila_id, agente_id as conversa_agente_id, ultima_msg_entrada_em FROM conversas
     WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
     ORDER BY criado_em DESC LIMIT 1
   `, [empresa_id, phone]);
@@ -453,37 +466,47 @@ async function processMessageCommon({
 
     // --- Check human control ---
     if (conversaResult.rows[0].controlado_por === 'humano') {
-      createLogger.info('Message during human control, skipping AI', { empresa_id, phone, conversa_id });
+      // Se nunca recebeu mensagem do cliente (resposta a template), ativar IA
+      if (!conversaResult.rows[0].ultima_msg_entrada_em) {
+        createLogger.info('First client response on template conversation, activating AI', { empresa_id, phone, conversa_id });
+        await pool.query(
+          `UPDATE conversas SET controlado_por = 'ia', operador_id = NULL, operador_nome = NULL, ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
+          [conversa_id]
+        );
+        // Continua para processamento pela IA (não retorna)
+      } else {
+        createLogger.info('Message during human control, skipping AI', { empresa_id, phone, conversa_id });
 
-      addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+        addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
 
-      const logMsgResult = await pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
-        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())
-        RETURNING id, criado_em
-      `, [conversa_id, empresa_id, historyText, parsed.type,
-          mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
-          mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null,
-          wnId || null]);
+        const logMsgResult = await pool.query(`
+          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
+          VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())
+          RETURNING id, criado_em
+        `, [conversa_id, empresa_id, historyText, parsed.type,
+            mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
+            mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null,
+            wnId || null]);
 
-      const fila_id = conversaResult.rows[0].fila_id;
-      if (logMsgResult.rows[0]) {
-        emitNovaMensagem(conversa_id, fila_id, {
-          id: logMsgResult.rows[0].id,
-          conversa_id,
-          conteudo: historyText,
-          direcao: 'entrada',
-          remetente_tipo: 'cliente',
-          tipo_mensagem: parsed.type,
-          midia_url: mediaSaved?.relativePath || null,
-          midia_mime_type: mediaSaved ? mediaMimeType : null,
-          midia_nome_arquivo: mediaSaved ? (mediaFileName || null) : null,
-          criado_em: logMsgResult.rows[0].criado_em,
-        });
+        const fila_id = conversaResult.rows[0].fila_id;
+        if (logMsgResult.rows[0]) {
+          emitNovaMensagem(conversa_id, fila_id, {
+            id: logMsgResult.rows[0].id,
+            conversa_id,
+            conteudo: historyText,
+            direcao: 'entrada',
+            remetente_tipo: 'cliente',
+            tipo_mensagem: parsed.type,
+            midia_url: mediaSaved?.relativePath || null,
+            midia_mime_type: mediaSaved ? mediaMimeType : null,
+            midia_nome_arquivo: mediaSaved ? (mediaFileName || null) : null,
+            criado_em: logMsgResult.rows[0].criado_em,
+          });
+        }
+
+        pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), ultima_msg_entrada_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
+        return;
       }
-
-      pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
-      return;
     }
   } else {
     // New conversation
@@ -587,6 +610,9 @@ async function processMessageCommon({
       criado_em: incomingMsgResult.rows[0].criado_em,
     });
   }
+
+  // Atualizar ultima_msg_entrada_em (janela 24h WhatsApp)
+  pool.query(`UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`, [conversa_id]).catch(() => {});
 
   // --- Reject non-text media if agent config says so ---
   if (agent.mensagem_midia_nao_suportada && parsed.type !== 'text') {
