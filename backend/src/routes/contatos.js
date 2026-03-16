@@ -369,7 +369,7 @@ const contatosRoutes = async (fastify) => {
     const { empresaId: empresa_id } = request;
     const { id: userId, nome: userName, role } = request.user;
     const { id } = request.params;
-    const { whatsapp_number_id, template_name, language_code = 'pt_BR' } = request.body || {};
+    const { whatsapp_number_id, template_name, language_code = 'pt_BR', template_body } = request.body || {};
 
     try {
       // 1. Buscar contato
@@ -407,7 +407,7 @@ const contatosRoutes = async (fastify) => {
             const token = decrypt(wn.token_graph_api);
             if (token) {
               try {
-                const templateLabel = `[Template: ${template_name}]`;
+                const templateLabel = template_body ? `[Template: ${template_name}]\n${template_body}` : `[Template: ${template_name}]`;
                 const msgResult = await pool.query(
                   `INSERT INTO mensagens_log
                      (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega)

@@ -1675,7 +1675,7 @@ export default async function conversasRoutes(fastify, opts) {
     ]
   }, async (request, reply) => {
     const { user } = request;
-    const { conversa_id, template_name, language_code = 'pt_BR', components = [] } = request.body;
+    const { conversa_id, template_name, language_code = 'pt_BR', components = [], template_body } = request.body;
 
     if (!conversa_id || !template_name) {
       return reply.code(400).send({ success: false, error: { message: 'conversa_id e template_name sao obrigatorios' } });
@@ -1725,7 +1725,9 @@ export default async function conversasRoutes(fastify, opts) {
 
     try {
       // Montar texto do template para salvar no log
-      const templateLabel = `[Template: ${template_name}]`;
+      const templateLabel = template_body
+        ? `[Template: ${template_name}]\n${template_body}`
+        : `[Template: ${template_name}]`;
 
       // Salvar em mensagens_log
       const msgResult = await pool.query(
