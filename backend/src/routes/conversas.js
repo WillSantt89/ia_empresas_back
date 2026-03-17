@@ -2419,5 +2419,91 @@ export default async function conversasRoutes(fastify, opts) {
         client.release();
       }
     });
+
+    // POST /bulk/finalizar — Finalizar conversas em massa (admin/master/supervisor)
+    bulk.post('/finalizar', {
+      preHandler: [
+        fastify.authenticate,
+        fastify.addTenantFilter,
+        fastify.requirePermission('conversas', 'write')
+      ]
+    }, async (request, reply) => {
+      const { conversa_ids } = request.body;
+      if (!validateBulkIds(conversa_ids, reply)) return;
+
+      const { empresaId, user } = request;
+
+      if (!['master', 'admin', 'supervisor'].includes(user.role)) {
+        return reply.status(403).send({ success: false, error: { message: 'Apenas admin, master ou supervisor' } });
+      }
+
+      const client = await pool.connect();
+      const sucesso = [];
+      const erros = [];
+
+      try {
+        await client.query('BEGIN');
+
+        const conversasResult = await client.query(
+          `SELECT id, fila_id, contato_whatsapp, controlado_por, status FROM conversas
+           WHERE id = ANY($1) AND empresa_id = $2 AND status IN ('ativo', 'pendente')`,
+          [conversa_ids, empresaId]
+        );
+        const conversasMap = new Map(conversasResult.rows.map(c => [c.id, c]));
+
+        for (const cid of conversa_ids) {
+          const conversa = conversasMap.get(cid);
+          if (!conversa) { erros.push({ id: cid, motivo: 'Nao encontrada ou já finalizada' }); continue; }
+
+          await client.query(
+            `UPDATE conversas SET status = 'finalizado', atualizado_em = NOW() WHERE id = $1`,
+            [cid]
+          );
+
+          await client.query(
+            `UPDATE atendimentos SET status = 'finalizado', finalizado_em = NOW()
+             WHERE conversa_id = $1 AND status = 'ativo'`,
+            [cid]
+          );
+
+          await client.query(
+            `INSERT INTO controle_historico
+               (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+             VALUES ($1, $2, 'finalizado', $3, NULL, $4, $5, 'Finalizado em massa via painel')`,
+            [cid, empresaId, conversa.controlado_por, user.id, user.nome || user.email]
+          );
+
+          // Arquivar Redis
+          if (conversa.contato_whatsapp) {
+            const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+            archiveConversation(empresaId, conversationKey).catch(() => {});
+          }
+
+          sucesso.push(cid);
+        }
+
+        await client.query('COMMIT');
+
+        const filasAfetadas = new Set();
+        for (const cid of sucesso) {
+          const conversa = conversasMap.get(cid);
+          emitConversaAtualizada(cid, conversa.fila_id, { id: cid, status: 'finalizado' });
+          if (conversa.fila_id) filasAfetadas.add(conversa.fila_id);
+        }
+        for (const filaId of filasAfetadas) {
+          const stats = await calcularStatsFila(filaId);
+          emitFilaStats(filaId, stats);
+        }
+
+        logger.info(`Bulk finalizar: ${sucesso.length} ok, ${erros.length} erros por ${user.email}`);
+        reply.send({ success: true, data: { sucesso: sucesso.length, erros } });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        logger.error('Error bulk finalizar:', error);
+        throw error;
+      } finally {
+        client.release();
+      }
+    });
   }, { prefix: '/bulk' });
 }
