@@ -560,6 +560,108 @@ export default async function filasRoutes(fastify) {
   });
 
   // ============================================
+  // GET /api/filas/all/conversas — Todas as conversas (admin/master/supervisor)
+  // ============================================
+  fastify.get('/all/conversas', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('filas', 'read'),
+    ],
+  }, async (request, reply) => {
+    try {
+      const { empresaId, user } = request;
+      const { status, tipo, page = 1, per_page = 50, search } = request.query;
+
+      if (!['master', 'admin', 'supervisor'].includes(user.role)) {
+        return reply.status(403).send({ success: false, error: { message: 'Apenas admin, master ou supervisor' } });
+      }
+
+      let where = `c.empresa_id = $1`;
+      const params = [empresaId];
+      let paramCount = 1;
+
+      if (status) {
+        paramCount++;
+        where += ` AND c.status = $${paramCount}`;
+        params.push(status);
+      } else {
+        where += ` AND c.status IN ('ativo', 'pendente')`;
+      }
+
+      if (tipo === 'nao_atribuidas') {
+        where += ` AND c.operador_id IS NULL AND c.controlado_por IN ('fila', 'ia')`;
+      } else if (tipo === 'minhas') {
+        paramCount++;
+        where += ` AND c.operador_id = $${paramCount}`;
+        params.push(user.id);
+      }
+
+      if (search) {
+        paramCount++;
+        where += ` AND (c.contato_nome ILIKE $${paramCount} OR c.contato_whatsapp ILIKE $${paramCount} OR CAST(c.numero_ticket AS TEXT) ILIKE $${paramCount})`;
+        params.push(`%${search}%`);
+      }
+
+      const offset = (parseInt(page) - 1) * parseInt(per_page);
+
+      const countResult = await pool.query(
+        `SELECT COUNT(*) as total FROM conversas c WHERE ${where}`,
+        params
+      );
+
+      const result = await pool.query(
+        `SELECT c.*,
+                a.nome as agente_nome,
+                f.nome as fila_nome,
+                f.cor as fila_cor,
+                wn.nome_exibicao as conexao_nome,
+                wn.numero_formatado as conexao_numero,
+                lm.total_mensagens,
+                lm.ultima_mensagem,
+                lm.ultima_mensagem_em
+         FROM conversas c
+         LEFT JOIN agentes a ON c.agente_id = a.id
+         LEFT JOIN filas_atendimento f ON c.fila_id = f.id
+         LEFT JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
+         LEFT JOIN LATERAL (
+           SELECT
+             COUNT(*) as total_mensagens,
+             (SELECT conteudo FROM mensagens_log m2 WHERE m2.conversa_id = c.id ORDER BY m2.criado_em DESC LIMIT 1) as ultima_mensagem,
+             MAX(criado_em) as ultima_mensagem_em
+           FROM mensagens_log m WHERE m.conversa_id = c.id
+         ) lm ON true
+         WHERE ${where}
+         ORDER BY
+           CASE c.prioridade
+             WHEN 'urgent' THEN 1
+             WHEN 'high' THEN 2
+             WHEN 'medium' THEN 3
+             WHEN 'low' THEN 4
+             ELSE 5
+           END,
+           c.atualizado_em DESC
+         LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`,
+        [...params, parseInt(per_page), offset]
+      );
+
+      reply.send({
+        success: true,
+        data: result.rows,
+        meta: {
+          total: parseInt(countResult.rows[0].total),
+          page: parseInt(page),
+          per_page: parseInt(per_page),
+          total_pages: Math.ceil(parseInt(countResult.rows[0].total) / parseInt(per_page)),
+        },
+      });
+    } catch (err) {
+      request.log.error({ err }, 'Erro ao buscar todas conversas');
+      reply.status(500).send({ success: false, error: { message: err.message } });
+    }
+  });
+
+  // ============================================
   // GET /api/filas/:id/conversas — Conversas da fila
   // ============================================
   fastify.get('/:id/conversas', {
