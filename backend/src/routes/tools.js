@@ -31,7 +31,7 @@ const toolsRoutes = async (fastify) => {
         },
         required: ['type', 'properties']
       },
-      timeout_ms: { type: 'integer', minimum: 100, maximum: 30000, default: 5000 },
+      timeout_ms: { type: 'integer', minimum: 100, maximum: 120000, default: 5000 },
       ativo: { type: 'boolean' },
       tipo_tool: { type: 'string', enum: ['http', 'transferencia', 'encerramento', 'atributo'] },
       fila_destino_id: { type: 'string', format: 'uuid' },
