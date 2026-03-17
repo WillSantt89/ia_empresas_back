@@ -255,6 +255,11 @@ export async function checkMessageLimit(empresaId) {
 
   const maxMensagensMes = planLimits[0].max_mensagens_mes;
 
+  // 0 = ilimitado
+  if (!maxMensagensMes || maxMensagensMes <= 0) {
+    return true;
+  }
+
   // Get current month usage
   const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
   const { rows: usage } = await query(`
