@@ -55,7 +55,7 @@ const contatosRoutes = async (fastify) => {
       let paramIndex = 2;
 
       if (search) {
-        query += ` AND (ct.nome ILIKE $${paramIndex} OR ct.whatsapp ILIKE $${paramIndex} OR ct.email ILIKE $${paramIndex})`;
+        query += ` AND (ct.nome ILIKE $${paramIndex} OR ct.whatsapp ILIKE $${paramIndex} OR ct.email ILIKE $${paramIndex} OR ct.dados_json->>'cpf' ILIKE $${paramIndex})`;
         params.push(`%${search}%`);
         paramIndex++;
       }
@@ -71,7 +71,7 @@ const contatosRoutes = async (fastify) => {
         SELECT COUNT(DISTINCT ct.id) as total
         FROM contatos ct
         WHERE ct.empresa_id = $1
-        ${search ? ` AND (ct.nome ILIKE $2 OR ct.whatsapp ILIKE $2 OR ct.email ILIKE $2)` : ''}
+        ${search ? ` AND (ct.nome ILIKE $2 OR ct.whatsapp ILIKE $2 OR ct.email ILIKE $2 OR ct.dados_json->>'cpf' ILIKE $2)` : ''}
         ${ativo !== undefined ? ` AND ct.ativo = $${search ? 3 : 2}` : ''}
       `;
       const countParams = [empresa_id];
