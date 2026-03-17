@@ -8,7 +8,8 @@ COPY backend/ ./
 RUN npm prune --omit=dev
 
 FROM node:20-alpine
-RUN apk add --no-cache tini ffmpeg
+ENV TZ=America/Sao_Paulo
+RUN apk add --no-cache tini ffmpeg tzdata
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 WORKDIR /app
 # Copy pre-compiled node_modules from builder (includes native bcrypt binary)

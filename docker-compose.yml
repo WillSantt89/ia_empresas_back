@@ -6,6 +6,7 @@ services:
     container_name: agent_platform_postgres
     restart: unless-stopped
     environment:
+      TZ: America/Sao_Paulo
       POSTGRES_USER: ${DB_USER:-agent_platform}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-your_secure_password_here}
       POSTGRES_DB: ${DB_NAME:-agent_platform}
@@ -47,6 +48,7 @@ services:
     container_name: agent_platform_backend
     restart: unless-stopped
     environment:
+      TZ: America/Sao_Paulo
       NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: postgres://${DB_USER:-agent_platform}:${DB_PASSWORD:-your_secure_password_here}@postgres:5432/${DB_NAME:-agent_platform}
       REDIS_URL: redis://default:${REDIS_PASSWORD:-your_redis_password_here}@redis:6379
@@ -76,6 +78,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
+      TZ: America/Sao_Paulo
       NODE_ENV: ${NODE_ENV:-production}
       DATABASE_URL: postgres://${DB_USER:-agent_platform}:${DB_PASSWORD:-your_secure_password_here}@postgres:5432/${DB_NAME:-agent_platform}
       REDIS_URL: redis://default:${REDIS_PASSWORD:-your_redis_password_here}@redis:6379
