@@ -681,8 +681,8 @@ async function processMessageCommon({
     }
   }
 
-  // Atualizar ultima_msg_entrada_em (janela 24h WhatsApp)
-  pool.query(`UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`, [conversa_id]).catch(() => {});
+  // Atualizar ultima_msg_entrada_em (janela 24h WhatsApp) + resetar followup
+  pool.query(`UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW(), followup_count = 0, followup_ultimo_em = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
 
   // --- Reject non-text media if agent config says so ---
   if (agent.mensagem_midia_nao_suportada && parsed.type !== 'text') {
@@ -800,7 +800,7 @@ async function processMessageCommon({
 /**
  * Shared AI processing: daily limit, tools, Gemini, Redis history.
  */
-async function processAIResponse({
+export async function processAIResponse({
   empresa_id, conversa_id, contato_id, agente_id, agent,
   availableKeys, conversationKey, messageText, parts, startTime,
 }) {

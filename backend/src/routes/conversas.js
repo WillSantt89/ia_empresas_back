@@ -581,7 +581,9 @@ export default async function conversasRoutes(fastify, opts) {
         SET
           controlado_por = 'ia',
           humano_devolveu_em = NOW(),
-          atualizado_em = NOW()
+          atualizado_em = NOW(),
+          followup_count = 0,
+          followup_ultimo_em = NULL
         WHERE id = $1
       `, [id]);
 
@@ -1026,7 +1028,8 @@ export default async function conversasRoutes(fastify, opts) {
         `UPDATE conversas SET
            operador_id = NULL, operador_nome = NULL,
            controlado_por = $1, atualizado_em = NOW(),
-           lida = false, lida_em = NULL, lida_por = NULL
+           lida = false, lida_em = NULL, lida_por = NULL,
+           followup_count = 0, followup_ultimo_em = NULL
          WHERE id = $2`,
         [novoControlador, id]
       );

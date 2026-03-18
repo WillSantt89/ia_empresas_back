@@ -51,6 +51,7 @@ import labelsRoutes from './routes/labels.js';
 import contatosRoutes from './routes/contatos.js';
 import mediaRoutes from './routes/media.js';
 import camposPersonalizadosRoutes from './routes/campos-personalizados.js';
+import configFollowupRoutes from './routes/config-followup.js';
 
 // Import WebSocket
 import { initializeWebSocket } from './services/websocket.js';
@@ -58,6 +59,7 @@ import { initializeWebSocket } from './services/websocket.js';
 // Import jobs
 import timeoutChecker from './jobs/timeout-checker.js';
 import dailyReset from './jobs/daily-reset.js';
+import followupChecker from './jobs/followup-checker.js';
 
 // Import Bull Board (queue dashboard)
 import { createBullBoard } from '@bull-board/api';
@@ -339,6 +341,7 @@ async function start() {
     await fastify.register(contatosRoutes, { prefix: '/api/contatos' });
     await fastify.register(mediaRoutes, { prefix: '/api/media' });
     await fastify.register(camposPersonalizadosRoutes, { prefix: '/api/campos-personalizados' });
+    await fastify.register(configFollowupRoutes, { prefix: '/api/config-followup' });
 
     // Bull Board dashboard (queue monitoring) — master only
     const serverAdapter = new FastifyAdapter();
@@ -406,6 +409,7 @@ async function start() {
     // Start background jobs
     timeoutChecker.start();
     dailyReset.start();
+    followupChecker.start();
     logger.info('Background jobs started');
   } catch (error) {
     logger.fatal(error, 'Failed to start server');
