@@ -46,16 +46,23 @@ async function atualizarConexoesWhatsApp(conversa_id, wnId) {
 }
 
 /**
- * Process an incoming WhatsApp message (from Meta webhook).
- * This is the heavy logic extracted from whatsapp.js webhook route.
+ * Process a batch of WhatsApp messages from the same contact (debounce).
+ * All messages are parsed/logged individually, but sent to Gemini as one combined message.
+ * This prevents the AI from responding multiple times when a client sends rapid messages.
+ *
+ * @param {Array} batch - Array of { message, contacts, phoneNumberId, empresa_id, wnId }
  */
-export async function processWhatsAppMessage({ message, contacts, phoneNumberId, empresa_id, wnId }) {
-  const startTime = Date.now();
-  const phone = message.from;
-  const contactName = contacts[0]?.profile?.name || null;
-  const messageId = message.id;
+export async function processWhatsAppBatch(batch) {
+  if (!batch || batch.length === 0) return;
 
-  // Get Graph API token for this WhatsApp number
+  const startTime = Date.now();
+
+  // All items share the same phone/empresa (grouped by debounce key)
+  const { phoneNumberId, empresa_id, wnId } = batch[0];
+  const phone = batch[0].message.from;
+  const contactName = batch[0].contacts[0]?.profile?.name || null;
+
+  // Get Graph API token
   const wnResult = await pool.query(
     `SELECT token_graph_api, n8n_response_url FROM whatsapp_numbers wn
      JOIN empresas e ON e.id = wn.empresa_id
@@ -74,59 +81,93 @@ export async function processWhatsAppMessage({ message, contacts, phoneNumberId,
     return;
   }
 
-  // Mark as read (non-blocking)
-  markAsRead(phoneNumberId, graphToken, messageId).catch(() => {});
+  // Process each message: parse, download media, mark as read
+  const processedMessages = [];
 
-  // --- Parse message (text, image, audio, etc.) ---
-  const parsed = parseMetaMessage(message);
+  for (const item of batch) {
+    const msg = item.message;
 
-  if (parsed.type === 'unknown' && !parsed.text) {
-    createLogger.debug('Ignoring unknown message type', { type: message.type, phone });
-    return;
-  }
+    // Mark as read (non-blocking)
+    markAsRead(phoneNumberId, graphToken, msg.id).catch(() => {});
 
-  if (parsed.type === 'reaction') {
-    createLogger.debug('Ignoring reaction', { phone });
-    return;
-  }
+    const parsed = parseMetaMessage(msg);
 
-  // Build Gemini parts (downloads media if needed)
-  const { parts, historyText, mediaBuffer, mediaMimeType, mediaFileName } = await buildGeminiParts(parsed, graphToken);
-
-  // Save media to disk if present
-  let mediaSaved = null;
-  if (mediaBuffer) {
-    try {
-      mediaSaved = await saveMedia(mediaBuffer, empresa_id, mediaMimeType, mediaFileName);
-    } catch (err) {
-      createLogger.error('Failed to save media to disk', { error: err.message, empresa_id, type: parsed.type });
+    if ((parsed.type === 'unknown' && !parsed.text) || parsed.type === 'reaction') {
+      continue; // Skip unprocessable messages
     }
+
+    const { parts, historyText, mediaBuffer, mediaMimeType, mediaFileName } = await buildGeminiParts(parsed, graphToken);
+
+    let mediaSaved = null;
+    if (mediaBuffer) {
+      try {
+        mediaSaved = await saveMedia(mediaBuffer, empresa_id, mediaMimeType, mediaFileName);
+      } catch (err) {
+        createLogger.error('Failed to save media to disk', { error: err.message, empresa_id, type: parsed.type });
+      }
+    }
+
+    processedMessages.push({
+      messageId: msg.id,
+      parsed,
+      parts,
+      historyText,
+      mediaSaved,
+      mediaMimeType,
+      mediaFileName,
+    });
   }
 
-  createLogger.info('Processing WhatsApp message', {
-    empresa_id, phone, type: parsed.type,
-    historyText: historyText.substring(0, 100),
-    mediaSaved: !!mediaSaved,
+  if (processedMessages.length === 0) {
+    createLogger.debug('All messages in batch were skipped', { phone, empresa_id });
+    return;
+  }
+
+  // Combine all text messages into one for the AI
+  const combinedHistoryText = processedMessages.map(m => m.historyText).join('\n');
+
+  // Combine parts for Gemini (text + media from all messages)
+  const combinedParts = processedMessages.flatMap(m => m.parts || []);
+
+  // Use the last message's data for the main record
+  const lastMsg = processedMessages[processedMessages.length - 1];
+
+  createLogger.info('Processing WhatsApp batch', {
+    empresa_id, phone,
+    batchSize: batch.length,
+    processedCount: processedMessages.length,
+    combinedText: combinedHistoryText.substring(0, 150),
   });
 
-  // --- Process shared logic ---
+  // --- Process shared logic with combined message ---
   await processMessageCommon({
     empresa_id,
     phone,
     contactName,
-    messageId,
+    messageId: lastMsg.messageId,
     phoneNumberId,
     graphToken,
-    historyText,
-    parsed,
-    parts,
-    mediaSaved,
-    mediaMimeType,
-    mediaFileName,
+    historyText: combinedHistoryText,
+    parsed: lastMsg.parsed,
+    parts: combinedParts.length > 0 ? combinedParts : null,
+    mediaSaved: lastMsg.mediaSaved,
+    mediaMimeType: lastMsg.mediaMimeType,
+    mediaFileName: lastMsg.mediaFileName,
     startTime,
     wnId,
     source: 'whatsapp_direct',
+    // Extra: log individual messages before AI processing
+    _batchMessages: processedMessages,
   });
+}
+
+/**
+ * Process a single incoming WhatsApp message (legacy, still used by n8n path).
+ * For direct WhatsApp messages, use processWhatsAppBatch instead.
+ */
+export async function processWhatsAppMessage({ message, contacts, phoneNumberId, empresa_id, wnId }) {
+  // Delegate to batch with single item
+  await processWhatsAppBatch([{ message, contacts, phoneNumberId, empresa_id, wnId }]);
 }
 
 /**
@@ -406,7 +447,7 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
 async function processMessageCommon({
   empresa_id, phone, contactName, messageId, phoneNumberId, graphToken,
   historyText, parsed, parts, mediaSaved, mediaMimeType, mediaFileName,
-  startTime, wnId, source,
+  startTime, wnId, source, _batchMessages,
 }) {
   // --- Resolve default agent ---
   const agentResult = await pool.query(`
@@ -487,29 +528,37 @@ async function processMessageCommon({
 
         addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
 
-        const logMsgResult = await pool.query(`
-          INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
-          VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())
-          RETURNING id, criado_em
-        `, [conversa_id, empresa_id, historyText, parsed.type,
-            mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
-            mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null,
-            wnId || null]);
+        // Log each message in batch (or single message)
+        const humanMsgsToLog = _batchMessages || [{
+          messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
+        }];
 
         const fila_id = conversaResult.rows[0].fila_id;
-        if (logMsgResult.rows[0]) {
-          emitNovaMensagem(conversa_id, fila_id, {
-            id: logMsgResult.rows[0].id,
-            conversa_id,
-            conteudo: historyText,
-            direcao: 'entrada',
-            remetente_tipo: 'cliente',
-            tipo_mensagem: parsed.type,
-            midia_url: mediaSaved?.relativePath || null,
-            midia_mime_type: mediaSaved ? mediaMimeType : null,
-            midia_nome_arquivo: mediaSaved ? (mediaFileName || null) : null,
-            criado_em: logMsgResult.rows[0].criado_em,
-          });
+
+        for (const msg of humanMsgsToLog) {
+          const logMsgResult = await pool.query(`
+            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
+            VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
+            RETURNING id, criado_em
+          `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
+              msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
+              msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
+              wnId || null]);
+
+          if (logMsgResult.rows[0]) {
+            emitNovaMensagem(conversa_id, fila_id, {
+              id: logMsgResult.rows[0].id,
+              conversa_id,
+              conteudo: msg.historyText,
+              direcao: 'entrada',
+              remetente_tipo: 'cliente',
+              tipo_mensagem: msg.parsed.type,
+              midia_url: msg.mediaSaved?.relativePath || null,
+              midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
+              midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
+              criado_em: logMsgResult.rows[0].criado_em,
+            });
+          }
         }
 
         pool.query(`UPDATE conversas SET humano_ultima_msg_em = NOW(), ultima_msg_entrada_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
@@ -560,13 +609,18 @@ async function processMessageCommon({
       const operador = await atribuirConversaAutomatica(conversa_id, defaultFilaId).catch(() => null);
       if (operador) {
         addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
-        await pool.query(
-          `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
-           VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, NOW())`,
-          [conversa_id, empresa_id, historyText, parsed.type,
-           mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
-           mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null]
-        );
+        const autoAssignMsgs = _batchMessages || [{
+          messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
+        }];
+        for (const msg of autoAssignMsgs) {
+          await pool.query(
+            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
+             VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())`,
+            [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
+             msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
+             msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null]
+          );
+        }
         return;
       }
 
@@ -591,32 +645,40 @@ async function processMessageCommon({
     }
   }
 
-  // --- Log incoming message ---
-  const incomingMsgResult = await pool.query(`
-    INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
-    VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
-    RETURNING id, criado_em
-  `, [conversa_id, empresa_id, historyText, parsed.type, messageId,
-      mediaSaved?.relativePath || null, mediaSaved ? mediaMimeType : null,
-      mediaSaved ? (mediaFileName || null) : null, mediaSaved?.sizeBytes || null,
-      wnId || null]);
+  // --- Log incoming message(s) ---
+  // If batch, log each message individually; otherwise log the single message
+  const messagesToLog = _batchMessages || [{
+    messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
+  }];
 
-  // Emit WebSocket for incoming message
-  if (incomingMsgResult.rows[0]) {
-    const conversaForFila = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
-    const currentFilaId = conversaForFila.rows[0]?.fila_id;
-    emitNovaMensagem(conversa_id, currentFilaId, {
-      id: incomingMsgResult.rows[0].id,
-      conversa_id,
-      conteudo: historyText,
-      direcao: 'entrada',
-      remetente_tipo: 'cliente',
-      tipo_mensagem: parsed.type,
-      midia_url: mediaSaved?.relativePath || null,
-      midia_mime_type: mediaSaved ? mediaMimeType : null,
-      midia_nome_arquivo: mediaSaved ? (mediaFileName || null) : null,
-      criado_em: incomingMsgResult.rows[0].criado_em,
-    });
+  const conversaForFila = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+  const currentFilaId = conversaForFila.rows[0]?.fila_id;
+
+  for (const msg of messagesToLog) {
+    const incomingMsgResult = await pool.query(`
+      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
+      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
+      RETURNING id, criado_em
+    `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
+        msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
+        msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
+        wnId || null]);
+
+    // Emit WebSocket for each incoming message
+    if (incomingMsgResult.rows[0]) {
+      emitNovaMensagem(conversa_id, currentFilaId, {
+        id: incomingMsgResult.rows[0].id,
+        conversa_id,
+        conteudo: msg.historyText,
+        direcao: 'entrada',
+        remetente_tipo: 'cliente',
+        tipo_mensagem: msg.parsed.type,
+        midia_url: msg.mediaSaved?.relativePath || null,
+        midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
+        midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
+        criado_em: incomingMsgResult.rows[0].criado_em,
+      });
+    }
   }
 
   // Atualizar ultima_msg_entrada_em (janela 24h WhatsApp)

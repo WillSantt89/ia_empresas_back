@@ -2,11 +2,15 @@ import crypto from 'crypto';
 import { logger } from '../../config/logger.js';
 import { pool } from '../../config/database.js';
 import { decrypt } from '../../config/encryption.js';
+import { redis } from '../../config/redis.js';
 import { whatsappQueue } from '../../queues/queues.js';
 import { handleStatusUpdates } from '../../services/message-processor.js';
 import { emitStatusEntrega } from '../../services/websocket.js';
 
 const createLogger = logger.child({ module: 'whatsapp-webhook' });
+
+// Debounce delay in ms — waits for more messages before processing
+const DEBOUNCE_DELAY_MS = parseInt(process.env.WA_DEBOUNCE_MS || '4000', 10);
 
 const whatsappWebhookRoutes = async (fastify) => {
 
@@ -39,8 +43,8 @@ const whatsappWebhookRoutes = async (fastify) => {
    * POST /api/webhooks/whatsapp
    * Receive messages directly from Meta WhatsApp Cloud API
    *
-   * FAST PATH: validates HMAC, enqueues job, responds 200 in <100ms.
-   * Heavy processing (Gemini AI, sending, logging) happens in BullMQ workers.
+   * DEBOUNCE: accumulates rapid messages in Redis, waits 4s of silence,
+   * then processes all messages as a single batch.
    */
   fastify.post('/', {
     config: { rawBody: true },
@@ -116,7 +120,7 @@ const whatsappWebhookRoutes = async (fastify) => {
         // NÃO fazer return — payload pode conter messages junto com statuses
       }
 
-      // --- Handle messages: ENQUEUE to BullMQ ---
+      // --- Handle messages: DEBOUNCE + ENQUEUE ---
       const messages = value.messages;
       if (!messages || messages.length === 0) {
         return reply.code(200).send('OK');
@@ -125,25 +129,59 @@ const whatsappWebhookRoutes = async (fastify) => {
       const contacts = value.contacts || [];
 
       for (const message of messages) {
+        const phone = message.from;
+        const debounceKey = `debounce:${empresa_id}:${phone}`;
+        const dedupKey = `dedup:wa:${message.id}`;
+
+        // Deduplicação: Meta pode reenviar o mesmo webhook
+        const alreadySeen = await redis.set(dedupKey, '1', 'EX', 300, 'NX');
+        if (!alreadySeen) {
+          createLogger.debug({ messageId: message.id }, 'Duplicate message ignored (dedup)');
+          continue;
+        }
+
+        // Acumula mensagem no Redis (lista com TTL)
+        await redis.rpush(debounceKey, JSON.stringify({
+          message,
+          contacts,
+          phoneNumberId,
+          empresa_id,
+          wnId: whatsappNumber.wn_id,
+        }));
+        await redis.expire(debounceKey, 60); // TTL 60s safety net
+
+        // Remove job delayed anterior (se existir) e cria novo com delay
+        const debounceJobId = `debounce-${empresa_id}-${phone}`;
         try {
-          await whatsappQueue.add('process-message', {
-            message,
-            contacts,
-            phoneNumberId,
+          const existingJob = await whatsappQueue.getJob(debounceJobId);
+          if (existingJob) {
+            const state = await existingJob.getState();
+            if (state === 'delayed' || state === 'waiting') {
+              await existingJob.remove();
+            }
+          }
+        } catch (err) {
+          // Job may not exist or already started — that's fine
+          createLogger.debug({ debounceJobId, error: err.message }, 'Could not remove previous debounce job');
+        }
+
+        try {
+          await whatsappQueue.add('process-batch', {
             empresa_id,
-            wnId: whatsappNumber.wn_id,
+            phone,
+            debounceKey,
           }, {
-            // Deduplicate: Meta may re-send webhooks
-            jobId: `wa-${message.id}`,
+            jobId: debounceJobId,
+            delay: DEBOUNCE_DELAY_MS,
           });
 
-          createLogger.info({ empresa_id, phone: message.from, type: message.type, jobId: `wa-${message.id}` }, 'WhatsApp message enqueued');
+          createLogger.info({ empresa_id, phone, type: message.type, messageId: message.id, delay: DEBOUNCE_DELAY_MS }, 'WhatsApp message debounced');
         } catch (err) {
-          // If jobId already exists, BullMQ rejects — that's ok (dedup)
           if (err.message?.includes('Job already exists')) {
-            createLogger.debug({ messageId: message.id }, 'Duplicate message ignored');
+            // Job exists but couldn't be removed (already being processed) — process individually
+            createLogger.debug({ messageId: message.id }, 'Debounce job in progress, message will be picked up by batch');
           } else {
-            createLogger.error({ err, empresa_id, messageId: message.id }, 'Failed to enqueue WhatsApp message');
+            createLogger.error({ err, empresa_id, messageId: message.id }, 'Failed to enqueue debounce job');
           }
         }
       }

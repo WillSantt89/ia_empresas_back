@@ -3,28 +3,67 @@
  *
  * Processes WhatsApp and n8n message jobs from queues.
  * Each worker instance handles WORKER_CONCURRENCY jobs in parallel.
+ *
+ * WhatsApp messages use debounce: multiple rapid messages from the same
+ * contact are accumulated in Redis and processed as a single batch.
  */
 import { Worker } from 'bullmq';
 import { REDIS_CONNECTION, QUEUE_NAMES, WORKER_CONCURRENCY } from '../queues/config.js';
 import { deadLetterQueue } from '../queues/queues.js';
-import { processWhatsAppMessage, processN8nMessage } from '../services/message-processor.js';
+import { processWhatsAppBatch, processN8nMessage } from '../services/message-processor.js';
+import { redis } from '../config/redis.js';
 import { logger } from '../config/logger.js';
 
 const createLogger = logger.child({ module: 'message-worker' });
+
+// Lock TTL — max time a conversation can be locked (safety net)
+const LOCK_TTL_MS = 300000; // 5 min
 
 // WhatsApp message worker
 export const whatsappWorker = new Worker(
   QUEUE_NAMES.WHATSAPP_MESSAGE,
   async (job) => {
-    const { message, contacts, phoneNumberId, empresa_id, wnId } = job.data;
-    createLogger.info('Processing WhatsApp job', {
-      jobId: job.id,
-      empresa_id,
-      phone: message?.from,
-      attempt: job.attemptsMade + 1,
-    });
+    const { empresa_id, phone, debounceKey } = job.data;
 
-    await processWhatsAppMessage({ message, contacts, phoneNumberId, empresa_id, wnId });
+    // --- Acquire lock per conversation (phone + empresa) ---
+    const lockKey = `lock:conv:${empresa_id}:${phone}`;
+    const lockAcquired = await redis.set(lockKey, job.id, 'PX', LOCK_TTL_MS, 'NX');
+
+    if (!lockAcquired) {
+      // Another job is processing this conversation — re-enqueue with small delay
+      createLogger.info({ jobId: job.id, phone, empresa_id }, 'Conversation locked, re-queuing');
+      const { whatsappQueue } = await import('../queues/queues.js');
+      await whatsappQueue.add('process-batch', { empresa_id, phone, debounceKey }, {
+        delay: 5000, // wait 5s and try again
+      });
+      return;
+    }
+
+    try {
+      // --- Read all accumulated messages from Redis ---
+      const rawMessages = await redis.lrange(debounceKey, 0, -1);
+      await redis.del(debounceKey); // Clear immediately to avoid re-processing
+
+      if (!rawMessages || rawMessages.length === 0) {
+        createLogger.debug({ jobId: job.id, phone }, 'No messages in debounce buffer');
+        return;
+      }
+
+      const batch = rawMessages.map(raw => JSON.parse(raw));
+
+      createLogger.info({
+        jobId: job.id,
+        empresa_id,
+        phone,
+        batchSize: batch.length,
+        attempt: job.attemptsMade + 1,
+      }, 'Processing WhatsApp batch');
+
+      await processWhatsAppBatch(batch);
+    } finally {
+      // Always release lock
+      await redis.del(lockKey);
+    }
   },
   {
     connection: REDIS_CONNECTION,
@@ -64,6 +103,12 @@ whatsappWorker.on('completed', (job) => {
 
 whatsappWorker.on('failed', async (job, err) => {
   createLogger.error(`WhatsApp job failed: ${err.message} | jobId=${job?.id} attempt=${job?.attemptsMade}/${job?.opts?.attempts || 3} | ${err.stack?.split('\n')[1]?.trim() || ''}`);
+
+  // Release lock on failure
+  if (job?.data?.empresa_id && job?.data?.phone) {
+    const lockKey = `lock:conv:${job.data.empresa_id}:${job.data.phone}`;
+    await redis.del(lockKey).catch(() => {});
+  }
 
   // Move to dead letter queue after all retries exhausted
   if (job && job.attemptsMade >= (job.opts?.attempts || 3)) {
