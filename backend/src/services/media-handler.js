@@ -138,6 +138,24 @@ export function parseMetaMessage(messageObj) {
         text: messageObj.ephemeral?.text || messageObj.text?.body || '[Mensagem temporária recebida]',
       };
 
+    case 'unsupported':
+      return {
+        type: 'text',
+        text: '[Mensagem não suportada pelo WhatsApp (enquete, edição ou canal)]',
+      };
+
+    case 'order':
+      return {
+        type: 'text',
+        text: '[Pedido recebido via catálogo do WhatsApp]',
+      };
+
+    case 'system':
+      return {
+        type: 'text',
+        text: messageObj.system?.body || '[Mensagem do sistema WhatsApp]',
+      };
+
     default:
       createLogger.warn('Unknown message type', { type });
       return {
