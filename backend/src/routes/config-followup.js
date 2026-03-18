@@ -72,8 +72,8 @@ const configFollowupRoutes = async (fastify) => {
               }
             }
           },
-          horario_inicio: { type: 'string', pattern: '^\\d{2}:\\d{2}$' },
-          horario_fim: { type: 'string', pattern: '^\\d{2}:\\d{2}$' },
+          horario_inicio: { type: 'string', pattern: '^\\d{2}:\\d{2}(:\\d{2})?$' },
+          horario_fim: { type: 'string', pattern: '^\\d{2}:\\d{2}(:\\d{2})?$' },
           dias_semana: {
             type: 'array',
             minItems: 1,
@@ -87,7 +87,10 @@ const configFollowupRoutes = async (fastify) => {
   }, async (request, reply) => {
     try {
       const { empresaId } = request;
-      const { ativo, retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento } = request.body;
+      const { ativo, retries, dias_semana, mensagem_encerramento } = request.body;
+      // Normalizar horários para HH:MM (remover segundos se vier HH:MM:SS)
+      const horario_inicio = request.body.horario_inicio ? request.body.horario_inicio.slice(0, 5) : null;
+      const horario_fim = request.body.horario_fim ? request.body.horario_fim.slice(0, 5) : null;
 
       // Validar: soma dos intervalos <= 1440 min (24h)
       if (retries) {
