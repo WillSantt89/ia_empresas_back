@@ -130,6 +130,97 @@ export default async function conversasRoutes(fastify, opts) {
     }
   });
 
+  // Busca unificada — nome, telefone, ticket, CPF, email, conteúdo de mensagens
+  fastify.get('/busca', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'read')
+    ],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          q: { type: 'string', minLength: 2 },
+          page: { type: 'integer', minimum: 1, default: 1 },
+          per_page: { type: 'integer', minimum: 1, maximum: 50, default: 20 }
+        },
+        required: ['q']
+      }
+    }
+  }, async (request, reply) => {
+    try {
+      const { empresaId } = request;
+      const { q, page, per_page } = request.query;
+      const searchTerm = `%${q.trim()}%`;
+
+      // 3 queries em paralelo
+      const [conversasResult, contatosResult, mensagensResult] = await Promise.all([
+        // 1. Conversas — por ticket, nome, whatsapp
+        pool.query(`
+          SELECT c.id, c.numero_ticket, c.contato_nome, c.contato_whatsapp, c.contato_id,
+                 c.status, c.controlado_por, c.fila_id, c.operador_nome, c.prioridade,
+                 c.criado_em, c.atualizado_em,
+                 f.nome as fila_nome, f.cor as fila_cor
+          FROM conversas c
+          LEFT JOIN filas f ON f.id = c.fila_id
+          WHERE c.empresa_id = $1
+            AND (
+              c.contato_nome ILIKE $2
+              OR c.contato_whatsapp ILIKE $2
+              OR CAST(c.numero_ticket AS TEXT) ILIKE $2
+            )
+          ORDER BY c.atualizado_em DESC
+          LIMIT $3 OFFSET $4
+        `, [empresaId, searchTerm, per_page, (page - 1) * per_page]),
+
+        // 2. Contatos — por nome, whatsapp, email, CPF
+        pool.query(`
+          SELECT ct.id, ct.nome, ct.whatsapp, ct.email,
+                 ct.dados_json->>'cpf' as cpf,
+                 (SELECT COUNT(*) FROM conversas c2 WHERE c2.contato_id = ct.id AND c2.status = 'ativo') as conversas_ativas
+          FROM contatos ct
+          WHERE ct.empresa_id = $1 AND ct.ativo = true
+            AND (
+              ct.nome ILIKE $2
+              OR ct.whatsapp ILIKE $2
+              OR ct.email ILIKE $2
+              OR ct.dados_json->>'cpf' ILIKE $2
+            )
+          ORDER BY ct.nome
+          LIMIT 10
+        `, [empresaId, searchTerm]),
+
+        // 3. Mensagens — conteúdo (últimos 30 dias)
+        pool.query(`
+          SELECT ml.id as mensagem_id, ml.conversa_id, ml.conteudo, ml.criado_em, ml.direcao,
+                 c.numero_ticket, c.contato_nome, c.contato_whatsapp, c.status as conversa_status,
+                 c.fila_id
+          FROM mensagens_log ml
+          JOIN conversas c ON c.id = ml.conversa_id
+          WHERE ml.empresa_id = $1
+            AND ml.criado_em >= NOW() - INTERVAL '30 days'
+            AND ml.conteudo ILIKE $2
+            AND ml.tipo_mensagem = 'text'
+          ORDER BY ml.criado_em DESC
+          LIMIT 15
+        `, [empresaId, searchTerm])
+      ]);
+
+      return {
+        success: true,
+        data: {
+          conversas: conversasResult.rows,
+          contatos: contatosResult.rows,
+          mensagens: mensagensResult.rows,
+        }
+      };
+    } catch (error) {
+      logger.error('Error in busca unificada:', error);
+      throw error;
+    }
+  });
+
   // Obter detalhes de uma conversa
   fastify.get('/:id', {
     preHandler: [
