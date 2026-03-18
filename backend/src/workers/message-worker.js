@@ -10,7 +10,7 @@
 import { Worker } from 'bullmq';
 import { REDIS_CONNECTION, QUEUE_NAMES, WORKER_CONCURRENCY } from '../queues/config.js';
 import { deadLetterQueue } from '../queues/queues.js';
-import { processWhatsAppBatch, processN8nMessage } from '../services/message-processor.js';
+import { processWhatsAppBatch, processN8nMessage, triggerNewAgentResponse } from '../services/message-processor.js';
 import { redis } from '../config/redis.js';
 import { logger } from '../config/logger.js';
 
@@ -23,7 +23,14 @@ const LOCK_TTL_MS = 300000; // 5 min
 export const whatsappWorker = new Worker(
   QUEUE_NAMES.WHATSAPP_MESSAGE,
   async (job) => {
-    const { empresa_id, phone, debounceKey } = job.data;
+    const { empresa_id, phone, debounceKey, conversa_id, _trigger } = job.data;
+
+    // --- Transfer trigger: call new agent directly (no debounce/lock needed) ---
+    if (_trigger && conversa_id) {
+      createLogger.info({ jobId: job.id, conversa_id, empresa_id }, 'Triggering new agent after transfer');
+      await triggerNewAgentResponse({ conversa_id, empresa_id });
+      return;
+    }
 
     // --- Acquire lock per conversation (phone + empresa) ---
     const lockKey = `lock:conv:${empresa_id}:${phone}`;
