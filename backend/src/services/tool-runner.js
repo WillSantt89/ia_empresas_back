@@ -554,6 +554,14 @@ export async function executeAtributoTool(context, args) {
         `UPDATE contatos SET dados_json = $1, atualizado_em = NOW() WHERE id = $2`,
         [JSON.stringify(dadosAtuais), contato_id]
       );
+
+      // Se salvou "nome", atualizar também contatos.nome
+      if (salvos.nome) {
+        await pool.query(
+          `UPDATE contatos SET nome = $1 WHERE id = $2 AND empresa_id = $3`,
+          [String(salvos.nome), contato_id, empresa_id]
+        );
+      }
     } else if (tipo_atributo === 'atendimento') {
       // Buscar dados atuais da conversa
       const conv = await pool.query(
