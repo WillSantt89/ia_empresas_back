@@ -29,8 +29,8 @@ export const whatsappWorker = new Worker(
   {
     connection: REDIS_CONNECTION,
     concurrency: WORKER_CONCURRENCY,
-    lockDuration: 180000, // 3 min — tools podem demorar até 120s + tempo do Gemini
-    stalledInterval: 180000, // checar stalled jobs a cada 3 min
+    lockDuration: 300000, // 5 min — tools podem demorar até 120s + Gemini thinking + múltiplas iterações
+    stalledInterval: 300000, // checar stalled jobs a cada 5 min
   }
 );
 
@@ -51,8 +51,8 @@ export const n8nWorker = new Worker(
   {
     connection: REDIS_CONNECTION,
     concurrency: WORKER_CONCURRENCY,
-    lockDuration: 180000,
-    stalledInterval: 180000,
+    lockDuration: 300000,
+    stalledInterval: 300000,
   }
 );
 
