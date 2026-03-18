@@ -163,7 +163,7 @@ export default async function conversasRoutes(fastify, opts) {
                  c.criado_em, c.atualizado_em,
                  f.nome as fila_nome, f.cor as fila_cor
           FROM conversas c
-          LEFT JOIN filas f ON f.id = c.fila_id
+          LEFT JOIN filas_atendimento f ON f.id = c.fila_id
           WHERE c.empresa_id = $1
             AND (
               c.contato_nome ILIKE $2
