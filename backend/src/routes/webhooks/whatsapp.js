@@ -150,19 +150,15 @@ const whatsappWebhookRoutes = async (fastify) => {
         }));
         await redis.expire(debounceKey, 60); // TTL 60s safety net
 
-        // Remove job delayed anterior (se existir) e cria novo com delay
+        // Remove ANY previous debounce job (delayed, waiting, completed, or failed)
         const debounceJobId = `debounce-${empresa_id}-${phone}`;
         try {
           const existingJob = await whatsappQueue.getJob(debounceJobId);
           if (existingJob) {
-            const state = await existingJob.getState();
-            if (state === 'delayed' || state === 'waiting') {
-              await existingJob.remove();
-            }
+            await existingJob.remove().catch(() => {});
           }
         } catch (err) {
-          // Job may not exist or already started — that's fine
-          createLogger.debug({ debounceJobId, error: err.message }, 'Could not remove previous debounce job');
+          // Job may not exist or is active — that's fine
         }
 
         try {
@@ -173,13 +169,16 @@ const whatsappWebhookRoutes = async (fastify) => {
           }, {
             jobId: debounceJobId,
             delay: DEBOUNCE_DELAY_MS,
+            removeOnComplete: true, // Clean up immediately so jobId can be reused
+            removeOnFail: true,
           });
 
           createLogger.info({ empresa_id, phone, type: message.type, messageId: message.id, delay: DEBOUNCE_DELAY_MS }, 'WhatsApp message debounced');
         } catch (err) {
           if (err.message?.includes('Job already exists')) {
-            // Job exists but couldn't be removed (already being processed) — process individually
-            createLogger.debug({ messageId: message.id }, 'Debounce job in progress, message will be picked up by batch');
+            // Job is currently being processed — message is in Redis and will be picked up
+            // by the lock+re-queue mechanism or the next debounce cycle
+            createLogger.debug({ messageId: message.id }, 'Debounce job active, message buffered in Redis');
           } else {
             createLogger.error({ err, empresa_id, messageId: message.id }, 'Failed to enqueue debounce job');
           }
