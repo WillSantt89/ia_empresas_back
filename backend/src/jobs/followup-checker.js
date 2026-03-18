@@ -148,19 +148,22 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
   // Verificar se é o ÚLTIMO retry
   const isUltimoRetry = retryIndex === retriesArr.length - 1;
 
+  const retryNumero = followup_count + 1;
+  const totalRetries = retriesArr.length;
+
   if (isUltimoRetry) {
     // Enviar mensagem de encerramento e finalizar
-    await enviarFollowupFixo(conversa, mensagem_encerramento || 'Obrigado pelo contato! Estamos encerrando o atendimento.');
+    await enviarFollowupFixo(conversa, mensagem_encerramento || 'Obrigado pelo contato! Estamos encerrando o atendimento.', retryNumero, totalRetries);
     await finalizarConversaSilenciosa(conversa_id, empresa_id, conversa);
-    flog.info({ conversa_id, followup_count: followup_count + 1 }, 'Último followup enviado, conversa finalizada');
+    flog.info({ conversa_id, followup_count: retryNumero }, 'Último followup enviado, conversa finalizada');
     return;
   }
 
   // Enviar followup conforme tipo
   if (retryConfig.tipo === 'fixo') {
-    await enviarFollowupFixo(conversa, retryConfig.mensagem_fixa);
+    await enviarFollowupFixo(conversa, retryConfig.mensagem_fixa, retryNumero, totalRetries);
   } else {
-    await enviarFollowupIA(conversa, followup_count + 1, retriesArr.length);
+    await enviarFollowupIA(conversa, retryNumero, totalRetries);
   }
 
   // Atualizar contadores
@@ -175,7 +178,7 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
 /**
  * Envia mensagem fixa direta (sem Gemini)
  */
-async function enviarFollowupFixo(conversa, mensagem) {
+async function enviarFollowupFixo(conversa, mensagem, retryNumero, totalRetries) {
   const { id: conversa_id, empresa_id, contato_whatsapp, whatsapp_number_id, fila_id } = conversa;
 
   // Buscar credenciais WhatsApp
@@ -190,12 +193,14 @@ async function enviarFollowupFixo(conversa, mensagem) {
 
   const sendResult = await sendTextMessage(wnResult.rows[0].phone_number_id, graphToken, contato_whatsapp, mensagem);
 
+  const nomeFollowup = `Follow-up ${retryNumero}/${totalRetries}`;
+
   // Logar mensagem
   const logResult = await pool.query(`
     INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, status_entrega, criado_em)
-    VALUES ($1, $2, 'saida', $3, 'sistema', 'Follow-up', 'text', $4, $5, NOW())
+    VALUES ($1, $2, 'saida', $3, 'followup', $4, 'text', $5, $6, NOW())
     RETURNING id, criado_em
-  `, [conversa_id, empresa_id, mensagem, sendResult.wamid, sendResult.success ? 'sent' : 'failed']);
+  `, [conversa_id, empresa_id, mensagem, nomeFollowup, sendResult.wamid, sendResult.success ? 'sent' : 'failed']);
 
   // Salvar no Redis history
   const conversationKey = `whatsapp:${contato_whatsapp}`;
@@ -208,8 +213,8 @@ async function enviarFollowupFixo(conversa, mensagem) {
       conversa_id,
       conteudo: mensagem,
       direcao: 'saida',
-      remetente_tipo: 'sistema',
-      remetente_nome: 'Follow-up',
+      remetente_tipo: 'followup',
+      remetente_nome: nomeFollowup,
       tipo_mensagem: 'text',
       criado_em: logResult.rows[0].criado_em,
     });
@@ -278,16 +283,18 @@ async function enviarFollowupIA(conversa, retryNumero, totalRetries) {
   // Enviar para WhatsApp
   const sendResult = await sendTextMessage(phoneNumberId, graphToken, contato_whatsapp, result.text);
 
+  const nomeFollowup = `Follow-up ${retryNumero}/${totalRetries}`;
+
   // Logar
   const logResult = await pool.query(`
     INSERT INTO mensagens_log (
       conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem,
       tokens_input, tokens_output, modelo_usado, latencia_ms,
       whatsapp_message_id, status_entrega, criado_em
-    ) VALUES ($1, $2, 'saida', $3, 'ia', $4, 'text', $5, $6, $7, $8, $9, $10, NOW())
+    ) VALUES ($1, $2, 'saida', $3, 'followup', $4, 'text', $5, $6, $7, $8, $9, $10, NOW())
     RETURNING id, criado_em
   `, [
-    conversa_id, empresa_id, result.text, agent.agente_nome,
+    conversa_id, empresa_id, result.text, nomeFollowup,
     result.tokensInput, result.tokensOutput, result.modelo,
     result.processingTime, sendResult.wamid, sendResult.success ? 'sent' : 'failed',
   ]);
@@ -299,8 +306,8 @@ async function enviarFollowupIA(conversa, retryNumero, totalRetries) {
       conversa_id,
       conteudo: result.text,
       direcao: 'saida',
-      remetente_tipo: 'ia',
-      remetente_nome: agent.agente_nome,
+      remetente_tipo: 'followup',
+      remetente_nome: nomeFollowup,
       tipo_mensagem: 'text',
       criado_em: logResult.rows[0].criado_em,
     });
