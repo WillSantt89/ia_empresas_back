@@ -376,7 +376,7 @@ const statsTimers = new Map();
 export function emitFilaStats(filaId, stats) {
   if (statsTimers.has(filaId)) clearTimeout(statsTimers.get(filaId));
   statsTimers.set(filaId, setTimeout(() => {
-    emitToFila(filaId, 'fila:stats', stats);
+    emitToFila(filaId, 'fila:stats', { ...stats, fila_id: filaId });
     statsTimers.delete(filaId);
   }, 500));
 }
