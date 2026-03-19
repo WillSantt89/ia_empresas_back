@@ -21,7 +21,7 @@ const usuariosRoutes = async (fastify) => {
       telefone: { type: 'string', maxLength: 20 },
       role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
       ativo: { type: 'boolean' },
-      max_conversas_simultaneas: { type: 'integer', minimum: 1, maximum: 100 }
+      max_conversas_simultaneas: { type: 'integer', minimum: 1, maximum: 999 }
     }
   };
 
