@@ -244,8 +244,9 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
   const conversaResult = await pool.query(`
     SELECT id, controlado_por, humano_nome, fila_id, ultima_msg_entrada_em FROM conversas
     WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
+      ${wnId ? 'AND whatsapp_number_id = $3::uuid' : ''}
     ORDER BY criado_em DESC LIMIT 1
-  `, [empresa_id, phone]);
+  `, wnId ? [empresa_id, phone, wnId] : [empresa_id, phone]);
 
   if (conversaResult.rows.length > 0) {
     conversa_id = conversaResult.rows[0].id;
@@ -321,7 +322,9 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
       VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10::uuid,
         CASE WHEN $10 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $10::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
         $10::uuid)
-      RETURNING id
+      ON CONFLICT (empresa_id, contato_whatsapp, whatsapp_number_id) WHERE status = 'ativo' AND whatsapp_number_id IS NOT NULL
+      DO UPDATE SET atualizado_em = NOW()
+      RETURNING id, (xmax = 0) as is_new
     `, [
       empresa_id, phone, name || null, contato_id, agente_id,
       defaultFilaId ? 'fila' : 'ia',
@@ -332,8 +335,12 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
     ]);
 
     conversa_id = insertConversa.rows[0].id;
+    const isNewConversa = insertConversa.rows[0].is_new;
 
-    if (defaultFilaId) {
+    if (!isNewConversa) {
+      // Race condition: conversa já existia, tratar como existente
+      createLogger.info('Conversa already existed (ON CONFLICT), treating as existing (n8n)', { empresa_id, phone, conversa_id });
+    } else if (defaultFilaId) {
       emitNovaConversaNaFila(defaultFilaId, {
         id: conversa_id,
         contato_whatsapp: phone,
@@ -496,8 +503,9 @@ async function processMessageCommon({
   const conversaResult = await pool.query(`
     SELECT id, controlado_por, humano_nome, fila_id, agente_id as conversa_agente_id, ultima_msg_entrada_em FROM conversas
     WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
+      ${wnId ? 'AND whatsapp_number_id = $3::uuid' : ''}
     ORDER BY criado_em DESC LIMIT 1
-  `, [empresa_id, phone]);
+  `, wnId ? [empresa_id, phone, wnId] : [empresa_id, phone]);
 
   if (conversaResult.rows.length > 0) {
     conversa_id = conversaResult.rows[0].id;
@@ -582,7 +590,9 @@ async function processMessageCommon({
       VALUES ($1, $2, $3, $4, $5, $5, 'ativo', $6, $7, $8, $9, $10::uuid,
         CASE WHEN $10 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $10::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
         $10::uuid)
-      RETURNING id
+      ON CONFLICT (empresa_id, contato_whatsapp, whatsapp_number_id) WHERE status = 'ativo' AND whatsapp_number_id IS NOT NULL
+      DO UPDATE SET atualizado_em = NOW()
+      RETURNING id, (xmax = 0) as is_new
     `, [
       empresa_id, phone, contactName || null, contato_id, agente_id,
       defaultFilaId ? 'fila' : 'ia',
@@ -593,8 +603,12 @@ async function processMessageCommon({
     ]);
 
     conversa_id = insertConversa.rows[0].id;
+    const isNewConversa = insertConversa.rows[0].is_new;
 
-    if (defaultFilaId) {
+    if (!isNewConversa) {
+      // Race condition: conversa já existia, tratar como existente
+      createLogger.info('Conversa already existed (ON CONFLICT), treating as existing', { empresa_id, phone, conversa_id });
+    } else if (defaultFilaId) {
       emitNovaConversaNaFila(defaultFilaId, {
         id: conversa_id,
         contato_whatsapp: phone,
