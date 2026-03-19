@@ -20,7 +20,8 @@ const usuariosRoutes = async (fastify) => {
       senha: { type: 'string', minLength: 8 },
       telefone: { type: 'string', maxLength: 20 },
       role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
-      ativo: { type: 'boolean' }
+      ativo: { type: 'boolean' },
+      max_conversas_simultaneas: { type: 'integer', minimum: 1, maximum: 100 }
     }
   };
 
@@ -82,7 +83,7 @@ const usuariosRoutes = async (fastify) => {
       const total = parseInt(countResult.rows[0].total) || 0;
 
       // Get paginated results
-      const query = `SELECT id, nome, email, telefone, role, ativo, email_verified, ultimo_login, criado_em, atualizado_em FROM usuarios WHERE empresa_id = $1${whereExtra} ORDER BY criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+      const query = `SELECT id, nome, email, telefone, role, ativo, email_verified, ultimo_login, max_conversas_simultaneas, criado_em, atualizado_em FROM usuarios WHERE empresa_id = $1${whereExtra} ORDER BY criado_em DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
       params.push(limit, offset);
 
       const result = await pool.query(query, params);
