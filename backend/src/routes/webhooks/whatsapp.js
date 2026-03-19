@@ -102,7 +102,16 @@ const whatsappWebhookRoutes = async (fastify) => {
         const expected = Buffer.from(expectedSig, 'utf8');
         const received = Buffer.from(receivedSig, 'utf8');
         if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
-          createLogger.warn('Invalid HMAC signature', { phoneNumberId, empresa_id });
+          createLogger.warn({
+            phoneNumberId,
+            empresa_id,
+            hasRawBody: !!request.raw.rawBody,
+            rawBodySource: request.raw.rawBody ? 'rawBody' : 'JSON.stringify',
+            expectedLen: expectedSig.length,
+            receivedLen: receivedSig.length,
+            expectedPrefix: expectedSig.substring(0, 8),
+            receivedPrefix: receivedSig.substring(0, 8),
+          }, 'Invalid HMAC signature');
         }
       }
 
