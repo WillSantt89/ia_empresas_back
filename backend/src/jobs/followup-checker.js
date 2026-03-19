@@ -69,7 +69,7 @@ async function processEmpresaFollowups(config) {
     FROM conversas c
     WHERE c.empresa_id = $1
       AND c.status = 'ativo'
-      AND c.controlado_por = 'ia'
+      AND c.controlado_por IN ('ia', 'fila')
       AND c.followup_count < $2
       AND c.agente_id IS NOT NULL
       AND c.whatsapp_number_id IS NOT NULL
