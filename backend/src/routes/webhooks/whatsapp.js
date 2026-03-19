@@ -48,6 +48,18 @@ const whatsappWebhookRoutes = async (fastify) => {
    */
   fastify.post('/', {
     config: { rawBody: true },
+    // Captura raw body ANTES do parsing para validação HMAC
+    preParsing: async (request, _reply, payload) => {
+      const chunks = [];
+      for await (const chunk of payload) {
+        chunks.push(chunk);
+      }
+      const rawBody = Buffer.concat(chunks);
+      request.rawBodyBuffer = rawBody;
+      // Retorna stream reconstruído para o parser continuar
+      const { Readable } = await import('stream');
+      return Readable.from(rawBody);
+    },
   }, async (request, reply) => {
     try {
       const body = request.body;
@@ -95,23 +107,14 @@ const whatsappWebhookRoutes = async (fastify) => {
           return reply.code(401).send('Missing signature');
         }
 
-        const rawBody = request.raw.rawBody || JSON.stringify(request.body);
+        const rawBody = request.rawBodyBuffer || request.raw.rawBody || JSON.stringify(request.body);
         const expectedSig = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
         const receivedSig = signature.replace('sha256=', '');
 
         const expected = Buffer.from(expectedSig, 'utf8');
         const received = Buffer.from(receivedSig, 'utf8');
         if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
-          createLogger.warn({
-            phoneNumberId,
-            empresa_id,
-            hasRawBody: !!request.raw.rawBody,
-            rawBodySource: request.raw.rawBody ? 'rawBody' : 'JSON.stringify',
-            expectedLen: expectedSig.length,
-            receivedLen: receivedSig.length,
-            expectedPrefix: expectedSig.substring(0, 8),
-            receivedPrefix: receivedSig.substring(0, 8),
-          }, 'Invalid HMAC signature');
+          createLogger.warn({ phoneNumberId, empresa_id }, 'Invalid HMAC signature');
         }
       }
 
