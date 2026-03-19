@@ -33,7 +33,9 @@ const agentesRoutes = async (fastify) => {
       config_json: { type: 'object' },
       ativo: { type: 'boolean' },
       mensagem_midia_nao_suportada: { type: ['string', 'null'], maxLength: 1000 },
-      fila_id: { type: ['string', 'null'], format: 'uuid' }
+      fila_id: { type: ['string', 'null'], format: 'uuid' },
+      chatbot_fluxo_id: { type: ['string', 'null'], format: 'uuid' },
+      chatbot_ativo: { type: 'boolean' },
     }
   };
 
@@ -75,6 +77,8 @@ const agentesRoutes = async (fastify) => {
           a.cache_expires_at,
           a.mensagem_midia_nao_suportada,
           a.fila_id,
+          a.chatbot_fluxo_id,
+          a.chatbot_ativo,
           a.is_triagem,
           a.criado_em,
           a.atualizado_em,

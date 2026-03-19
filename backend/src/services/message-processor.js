@@ -16,6 +16,7 @@ import { saveMedia } from './media-storage.js';
 import { sendTextMessage, markAsRead } from './whatsapp-sender.js';
 import { atribuirConversaAutomatica, calcularStatsFila } from './fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats, emitStatusEntrega } from './websocket.js';
+import { getFlowState, startFlow, processFlowInput, clearFlowState } from './flow-engine.js';
 
 const createLogger = logger.child({ module: 'message-processor' });
 
@@ -192,14 +193,16 @@ export async function processN8nMessage({ message, phone, name, phoneNumberId, e
   if (agentId) {
     agentQuery = `
       SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
-             cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
+             cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+             chatbot_fluxo_id, chatbot_ativo
       FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true LIMIT 1
     `;
     agentParams = [agentId, empresa_id];
   } else {
     agentQuery = `
       SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
-             cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
+             cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+             chatbot_fluxo_id, chatbot_ativo
       FROM agentes WHERE empresa_id = $1 AND ativo = true
       ORDER BY is_triagem DESC NULLS LAST, criado_em ASC LIMIT 1
     `;
@@ -459,7 +462,8 @@ async function processMessageCommon({
   // --- Resolve default agent ---
   const agentResult = await pool.query(`
     SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
-           cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
+           cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+           chatbot_fluxo_id, chatbot_ativo
     FROM agentes
     WHERE empresa_id = $1 AND ativo = true
     ORDER BY is_triagem DESC NULLS LAST, criado_em ASC
@@ -500,6 +504,7 @@ async function processMessageCommon({
 
   // --- Find or create conversa ---
   let conversa_id;
+  let isNewConversation = false;
   const conversaResult = await pool.query(`
     SELECT id, controlado_por, humano_nome, fila_id, agente_id as conversa_agente_id, ultima_msg_entrada_em FROM conversas
     WHERE empresa_id = $1 AND contato_whatsapp = $2 AND status = 'ativo'
@@ -604,6 +609,7 @@ async function processMessageCommon({
 
     conversa_id = insertConversa.rows[0].id;
     const isNewConversa = insertConversa.rows[0].is_new;
+    isNewConversation = isNewConversa;
 
     if (!isNewConversa) {
       // Race condition: conversa já existia, tratar como existente
@@ -648,7 +654,8 @@ async function processMessageCommon({
     if (conversaAgenteId !== agente_id) {
       const overrideResult = await pool.query(`
         SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
-               cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
+               cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+               chatbot_fluxo_id, chatbot_ativo
         FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true
       `, [conversaAgenteId, empresa_id]);
 
@@ -725,6 +732,154 @@ async function processMessageCommon({
       }
     }
     return;
+  }
+
+  // --- Chatbot Flow Engine ---
+  if (agent.chatbot_ativo && agent.chatbot_fluxo_id) {
+    try {
+      const flowState = await getFlowState(empresa_id, phone);
+
+      // Buscar fluxo JSON do banco
+      const fluxoResult = await pool.query(
+        'SELECT fluxo_json FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2 AND ativo = true',
+        [agent.chatbot_fluxo_id, empresa_id]
+      );
+      const fluxoJson = fluxoResult.rows[0]?.fluxo_json;
+
+      if (fluxoJson && fluxoJson.nodes && fluxoJson.start_node) {
+        if (!flowState && isNewConversation) {
+          // Nova conversa — iniciar fluxo
+          const flowResult = await startFlow(empresa_id, phone, agent.chatbot_fluxo_id, fluxoJson);
+          if (flowResult?.response) {
+            const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
+            // Log resposta do chatbot
+            const flowLogResult = await pool.query(`
+              INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+              VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
+              RETURNING id, criado_em
+            `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
+
+            if (flowLogResult.rows[0]) {
+              const conversaForFluxo = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+              emitNovaMensagem(conversa_id, conversaForFluxo.rows[0]?.fila_id, {
+                id: flowLogResult.rows[0].id,
+                conversa_id,
+                conteudo: flowResult.response,
+                direcao: 'saida',
+                remetente_tipo: 'chatbot',
+                remetente_nome: agente_nome,
+                tipo_mensagem: 'text',
+                criado_em: flowLogResult.rows[0].criado_em,
+              });
+            }
+
+            addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+            addToHistory(empresa_id, conversationKey, 'model', flowResult.response).catch(() => {});
+            createLogger.info({ empresa_id, phone, fluxoId: agent.chatbot_fluxo_id }, 'Chatbot flow started');
+            return;
+          }
+        } else if (flowState) {
+          // Fluxo ativo — processar input
+          const flowResult = await processFlowInput(empresa_id, phone, fluxoJson, historyText);
+
+          if (flowResult) {
+            // Ação especial: transferir para fila
+            if (flowResult.action === 'transfer_queue' && flowResult.queueId) {
+              if (flowResult.response) {
+                const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
+                await pool.query(`
+                  INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+                  VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
+                `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
+              }
+              // Transferir conversa para fila
+              await pool.query(
+                `UPDATE conversas SET fila_id = $1, controlado_por = 'fila', atualizado_em = NOW() WHERE id = $2`,
+                [flowResult.queueId, conversa_id]
+              );
+              addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+              createLogger.info({ empresa_id, phone, queueId: flowResult.queueId }, 'Chatbot flow transferred to queue');
+              return;
+            }
+
+            // Ação: assign_agent — passa para IA com contexto das variáveis coletadas
+            if (flowResult.action === 'assign_agent') {
+              if (flowResult.response) {
+                const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
+                await pool.query(`
+                  INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+                  VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
+                `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
+              }
+              // Adicionar contexto do fluxo ao histórico para IA usar
+              if (flowResult.context) {
+                addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
+              }
+              addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+              createLogger.info({ empresa_id, phone, variables: flowResult.variables }, 'Chatbot flow assigned to agent');
+              // Continua para processamento pela IA (não retorna)
+            }
+
+            // Ação: end — finaliza
+            else if (flowResult.action === 'end') {
+              if (flowResult.response) {
+                const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
+                await pool.query(`
+                  INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+                  VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
+                `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
+              }
+              addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+              createLogger.info({ empresa_id, phone }, 'Chatbot flow ended');
+              return;
+            }
+
+            // Fluxo respondeu (handled=true)
+            else if (flowResult.handled && flowResult.response) {
+              const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
+              const flowLogResult = await pool.query(`
+                INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+                VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
+                RETURNING id, criado_em
+              `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
+
+              if (flowLogResult.rows[0]) {
+                const conversaForFluxo = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+                emitNovaMensagem(conversa_id, conversaForFluxo.rows[0]?.fila_id, {
+                  id: flowLogResult.rows[0].id,
+                  conversa_id,
+                  conteudo: flowResult.response,
+                  direcao: 'saida',
+                  remetente_tipo: 'chatbot',
+                  remetente_nome: agente_nome,
+                  tipo_mensagem: 'text',
+                  criado_em: flowLogResult.rows[0].criado_em,
+                });
+              }
+
+              addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+              addToHistory(empresa_id, conversationKey, 'model', flowResult.response).catch(() => {});
+              return;
+            }
+
+            // Fluxo handled=true mas sem response (opção válida sem mensagem)
+            else if (flowResult.handled) {
+              addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+              return;
+            }
+
+            // Fallback para IA (handled=false) — adicionar contexto do fluxo
+            if (!flowResult.handled && flowResult.context) {
+              addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
+              // Continua para processamento pela IA
+            }
+          }
+        }
+      }
+    } catch (flowError) {
+      createLogger.error({ err: flowError, empresa_id, phone }, 'Flow engine error, falling back to AI');
+      // Em caso de erro, continua para processamento normal pela IA
+    }
   }
 
   // --- Process with AI ---
