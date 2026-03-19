@@ -1905,6 +1905,7 @@ export default async function conversasRoutes(fastify, opts) {
 
     const conversaId = data.fields?.conversa_id?.value;
     const caption = data.fields?.caption?.value || '';
+    const forceMediaType = data.fields?.media_type?.value || null; // 'sticker' para forçar envio como figurinha
 
     if (!conversaId) {
       return reply.code(400).send({ success: false, error: { message: 'conversa_id obrigatorio' } });
@@ -1972,7 +1973,8 @@ export default async function conversasRoutes(fastify, opts) {
 
       // Determinar tipo WhatsApp
       let mediaType = 'document';
-      if (mimeType.startsWith('image/')) mediaType = 'image';
+      if (forceMediaType === 'sticker') mediaType = 'sticker';
+      else if (mimeType.startsWith('image/')) mediaType = 'image';
       else if (mimeType.startsWith('audio/')) mediaType = 'audio';
       else if (mimeType.startsWith('video/')) mediaType = 'video';
 
