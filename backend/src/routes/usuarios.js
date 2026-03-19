@@ -17,7 +17,7 @@ const usuariosRoutes = async (fastify) => {
     properties: {
       nome: { type: 'string', minLength: 2, maxLength: 255 },
       email: { type: 'string', format: 'email' },
-      senha: { type: 'string', minLength: 8 },
+      senha: { type: 'string' },
       telefone: { type: 'string', maxLength: 20 },
       role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
       ativo: { type: 'boolean' },
@@ -128,6 +128,14 @@ const usuariosRoutes = async (fastify) => {
     const { nome, email, senha, telefone, role, ativo = true } = request.body;
 
     try {
+      // Validate password length
+      if (!senha || senha.length < 8) {
+        return reply.code(400).send({
+          success: false,
+          error: { code: 'VALIDATION_ERROR', message: 'Senha deve ter no mínimo 8 caracteres' }
+        });
+      }
+
       // Check role hierarchy
       if (userRole === 'admin' && role === 'master') {
         return reply.code(403).send({
@@ -413,6 +421,9 @@ const usuariosRoutes = async (fastify) => {
 
       // Handle password update separately
       if (updates.senha) {
+        if (updates.senha.length < 8) {
+          return reply.code(400).send({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Senha deve ter no mínimo 8 caracteres' } });
+        }
         const hashedPassword = await hash(updates.senha);
         fields.push(`senha_hash = $${index}`);
         values.push(hashedPassword);
