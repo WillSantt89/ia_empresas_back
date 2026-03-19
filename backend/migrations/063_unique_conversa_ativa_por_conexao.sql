@@ -1,4 +1,6 @@
--- Migration 062: Prevenir tickets duplicados por conexao
+-- UP
+
+-- Migration 063: Prevenir tickets duplicados por conexao
 -- Regra: apenas 1 conversa ativa por (empresa, contato, conexao WhatsApp)
 
 -- 1. Limpar duplicatas existentes: manter apenas a mais recente por (empresa, contato, whatsapp_number_id)
