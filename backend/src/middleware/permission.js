@@ -234,11 +234,11 @@ export function requirePermission(resource, action) {
 export function requireRole(allowedRoles) {
   return async (request, reply) => {
     try {
-      // User must be authenticated
+      // User must be authenticated (fastify.authenticate should have set this)
       if (!request.user) {
         const error = new Error('Usuário não autenticado');
-        error.code = ERROR_CODES.AUTH_INVALID_CREDENTIALS;
-        error.statusCode = 401;
+        error.code = ERROR_CODES.PERMISSION_DENIED;
+        error.statusCode = 403;
         throw error;
       }
 
@@ -251,13 +251,13 @@ export function requireRole(allowedRoles) {
       }
 
     } catch (error) {
-      logger.warn('Role requirement not met', {
+      logger.warn({
         error: error.message,
         user_id: request.user?.id,
         role: request.user?.role,
         required_roles: allowedRoles,
         url: request.url
-      });
+      }, 'Role requirement not met');
 
       reply.code(error.statusCode || 403).send({
         success: false,
