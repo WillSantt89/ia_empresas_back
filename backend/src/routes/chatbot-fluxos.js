@@ -13,10 +13,22 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.get('/', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request) => {
-    const empresa_id = request.empresaId || request.user.empresa_id;
+    const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
+    const isMaster = request.user.role === 'master';
 
     let result;
-    if (empresa_id) {
+    if (isMaster) {
+      // Master vê fluxos de TODAS as empresas
+      result = await pool.query(`
+        SELECT cf.id, cf.nome, cf.descricao, cf.ativo, cf.criado_em, cf.atualizado_em,
+          cf.empresa_id,
+          e.nome as empresa_nome,
+          (SELECT COUNT(*) FROM agentes a WHERE a.chatbot_fluxo_id = cf.id AND a.chatbot_ativo = true) as agentes_vinculados
+        FROM chatbot_fluxos cf
+        JOIN empresas e ON e.id = cf.empresa_id
+        ORDER BY cf.criado_em DESC
+      `);
+    } else {
       result = await pool.query(`
         SELECT cf.id, cf.nome, cf.descricao, cf.ativo, cf.criado_em, cf.atualizado_em,
           (SELECT COUNT(*) FROM agentes a WHERE a.chatbot_fluxo_id = cf.id AND a.chatbot_ativo = true) as agentes_vinculados
@@ -24,16 +36,6 @@ const chatbotFluxosRoutes = async (fastify) => {
         WHERE cf.empresa_id = $1
         ORDER BY cf.criado_em DESC
       `, [empresa_id]);
-    } else {
-      // Master sem impersonação — listar todos
-      result = await pool.query(`
-        SELECT cf.id, cf.nome, cf.descricao, cf.ativo, cf.criado_em, cf.atualizado_em,
-          e.nome as empresa_nome,
-          (SELECT COUNT(*) FROM agentes a WHERE a.chatbot_fluxo_id = cf.id AND a.chatbot_ativo = true) as agentes_vinculados
-        FROM chatbot_fluxos cf
-        JOIN empresas e ON e.id = cf.empresa_id
-        ORDER BY cf.criado_em DESC
-      `);
     }
 
     return { success: true, data: result.rows };
@@ -46,13 +48,13 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.get('/:id', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request, reply) => {
-    const empresa_id = request.empresaId || request.user.empresa_id;
+    const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
+    const isMaster = request.user.role === 'master';
     const { id } = request.params;
 
-    const result = await pool.query(
-      'SELECT * FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2',
-      [id, empresa_id]
-    );
+    const result = isMaster
+      ? await pool.query('SELECT * FROM chatbot_fluxos WHERE id = $1', [id])
+      : await pool.query('SELECT * FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2', [id, empresa_id]);
 
     if (result.rows.length === 0) {
       return reply.code(404).send({ success: false, error: 'Fluxo não encontrado' });
@@ -80,7 +82,7 @@ const chatbotFluxosRoutes = async (fastify) => {
       }
     }
   }, async (request, reply) => {
-    const empresa_id = request.empresaId || request.user.empresa_id;
+    const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { nome, descricao, fluxo_json, ativo } = request.body;
 
     try {
@@ -116,14 +118,20 @@ const chatbotFluxosRoutes = async (fastify) => {
       }
     }
   }, async (request, reply) => {
-    const empresa_id = request.empresaId || request.user.empresa_id;
+    const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
+    const isMaster = request.user.role === 'master';
     const { id } = request.params;
     const { nome, descricao, fluxo_json, ativo } = request.body;
 
     // Build dynamic UPDATE
     const updates = [];
-    const params = [id, empresa_id];
-    let paramIndex = 3;
+    const params = [id];
+    let paramIndex = 2;
+
+    if (!isMaster) {
+      params.push(empresa_id);
+      paramIndex = 3;
+    }
 
     if (nome !== undefined) { updates.push(`nome = $${paramIndex++}`); params.push(nome); }
     if (descricao !== undefined) { updates.push(`descricao = $${paramIndex++}`); params.push(descricao); }
@@ -136,8 +144,9 @@ const chatbotFluxosRoutes = async (fastify) => {
 
     updates.push('atualizado_em = NOW()');
 
+    const whereClause = isMaster ? 'WHERE id = $1' : 'WHERE id = $1 AND empresa_id = $2';
     const result = await pool.query(
-      `UPDATE chatbot_fluxos SET ${updates.join(', ')} WHERE id = $1 AND empresa_id = $2 RETURNING *`,
+      `UPDATE chatbot_fluxos SET ${updates.join(', ')} ${whereClause} RETURNING *`,
       params
     );
 
@@ -156,13 +165,14 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.delete('/:id', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request, reply) => {
-    const empresa_id = request.empresaId || request.user.empresa_id;
+    const isMaster = request.user.role === 'master';
+    const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;
 
     // Verificar se há agentes vinculados com chatbot ativo
     const agentesAtivos = await pool.query(
-      'SELECT COUNT(*) as total FROM agentes WHERE chatbot_fluxo_id = $1 AND chatbot_ativo = true AND empresa_id = $2',
-      [id, empresa_id]
+      'SELECT COUNT(*) as total FROM agentes WHERE chatbot_fluxo_id = $1 AND chatbot_ativo = true',
+      [id]
     );
 
     if (parseInt(agentesAtivos.rows[0].total) > 0) {
@@ -172,10 +182,9 @@ const chatbotFluxosRoutes = async (fastify) => {
       });
     }
 
-    const result = await pool.query(
-      'DELETE FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2 RETURNING id',
-      [id, empresa_id]
-    );
+    const result = isMaster
+      ? await pool.query('DELETE FROM chatbot_fluxos WHERE id = $1 RETURNING id', [id])
+      : await pool.query('DELETE FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2 RETURNING id', [id, empresa_id]);
 
     if (result.rows.length === 0) {
       return reply.code(404).send({ success: false, error: 'Fluxo não encontrado' });
@@ -192,13 +201,13 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.post('/:id/duplicar', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request, reply) => {
-    const empresa_id = request.empresaId || request.user.empresa_id;
+    const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;
 
-    const original = await pool.query(
-      'SELECT * FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2',
-      [id, empresa_id]
-    );
+    const isMaster = request.user.role === 'master';
+    const original = isMaster
+      ? await pool.query('SELECT * FROM chatbot_fluxos WHERE id = $1', [id])
+      : await pool.query('SELECT * FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2', [id, empresa_id]);
 
     if (original.rows.length === 0) {
       return reply.code(404).send({ success: false, error: 'Fluxo não encontrado' });
