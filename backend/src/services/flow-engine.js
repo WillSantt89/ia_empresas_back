@@ -100,6 +100,60 @@ function interpolate(text, variables) {
  *   handled=true: fluxo respondeu, não chamar IA
  *   handled=false: fallback para IA (com context para o prompt)
  */
+/**
+ * Se o próximo nó é uma ação (transfer, assign, end), retorna resultado da ação.
+ * Caso contrário, processa cadeia normal.
+ */
+async function resolveNextNode(nodes, nextNode, variables) {
+  if (!nextNode || !nodes[nextNode]) {
+    return { handled: true, response: null, nextNode, variables };
+  }
+
+  const nextNodeData = nodes[nextNode];
+
+  if (nextNodeData.type === 'transfer_queue') {
+    return {
+      handled: true,
+      action: 'transfer_queue',
+      queueId: nextNodeData.queue_id,
+      response: nextNodeData.message ? interpolate(nextNodeData.message, variables) : null,
+      variables,
+      clearFlow: true,
+    };
+  }
+
+  if (nextNodeData.type === 'assign_agent') {
+    const varSummary = Object.entries(variables).map(([k, v]) => `${k}: ${v}`).join(', ');
+    return {
+      handled: false,
+      action: 'assign_agent',
+      response: nextNodeData.message ? interpolate(nextNodeData.message, variables) : null,
+      context: `O cliente completou o fluxo e informou: ${varSummary}. ${nextNodeData.instruction || ''}`,
+      variables,
+      clearFlow: true,
+    };
+  }
+
+  if (nextNodeData.type === 'end') {
+    return {
+      handled: true,
+      action: 'end',
+      response: nextNodeData.message ? interpolate(nextNodeData.message, variables) : null,
+      variables,
+      clearFlow: true,
+    };
+  }
+
+  // Nó normal — processar cadeia
+  const nextResult = await processNodeChain(nodes, nextNode, variables);
+  return {
+    handled: true,
+    response: nextResult.messages.length > 0 ? nextResult.messages.join('\n\n') : null,
+    nextNode: nextResult.finalNode,
+    variables: nextResult.variables,
+  };
+}
+
 export async function processFlowNode(fluxoJson, state, userInput) {
   const { nodes, start_node } = fluxoJson;
   if (!nodes) return { handled: false };
@@ -155,19 +209,7 @@ export async function processFlowNode(fluxoJson, state, userInput) {
         variables[node.variable] = matched.value;
       }
       const nextNode = matched.next || node.next;
-
-      // Processar cadeia de nós automáticos
-      if (nextNode && nodes[nextNode]) {
-        const nextResult = await processNodeChain(nodes, nextNode, variables);
-        return {
-          handled: true,
-          response: nextResult.messages.length > 0 ? nextResult.messages.join('\n\n') : null,
-          nextNode: nextResult.finalNode,
-          variables: nextResult.variables,
-        };
-      }
-
-      return { handled: true, response: null, nextNode, variables };
+      return await resolveNextNode(nodes, nextNode, variables);
     }
 
     // Não bateu — fallback
@@ -193,19 +235,7 @@ export async function processFlowNode(fluxoJson, state, userInput) {
       if (node.variable) {
         variables[node.variable] = validated;
       }
-      const nextNode = node.next;
-
-      if (nextNode && nodes[nextNode]) {
-        const nextResult = await processNodeChain(nodes, nextNode, variables);
-        return {
-          handled: true,
-          response: nextResult.messages.length > 0 ? nextResult.messages.join('\n\n') : null,
-          nextNode: nextResult.finalNode,
-          variables: nextResult.variables,
-        };
-      }
-
-      return { handled: true, response: null, nextNode, variables };
+      return await resolveNextNode(nodes, node.next, variables);
     }
 
     // Validação falhou
@@ -230,18 +260,7 @@ export async function processFlowNode(fluxoJson, state, userInput) {
         variables[node.variable] = yes ? 'sim' : 'nao';
       }
       const nextNode = yes ? (node.next_yes || node.next) : (node.next_no || node.next);
-
-      if (nextNode && nodes[nextNode]) {
-        const nextResult = await processNodeChain(nodes, nextNode, variables);
-        return {
-          handled: true,
-          response: nextResult.messages.length > 0 ? nextResult.messages.join('\n\n') : null,
-          nextNode: nextResult.finalNode,
-          variables: nextResult.variables,
-        };
-      }
-
-      return { handled: true, response: null, nextNode, variables };
+      return await resolveNextNode(nodes, nextNode, variables);
     }
 
     if (node.fallback === 'ai') {
