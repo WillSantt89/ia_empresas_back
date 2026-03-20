@@ -687,6 +687,18 @@ export default async function filasRoutes(fastify) {
     const params = [id, empresaId];
     let paramCount = 2;
 
+    // Filtrar por conexões do operador (se a conexão tem membros configurados)
+    if (user.role === 'operador') {
+      paramCount++;
+      where += ` AND (
+        c.whatsapp_number_id IS NULL
+        OR NOT EXISTS (SELECT 1 FROM whatsapp_number_membros wnm2 WHERE wnm2.whatsapp_number_id = c.whatsapp_number_id)
+        OR c.whatsapp_number_id IN (SELECT wnm.whatsapp_number_id FROM whatsapp_number_membros wnm WHERE wnm.usuario_id = $${paramCount})
+        OR c.operador_id = $${paramCount}
+      )`;
+      params.push(user.id);
+    }
+
     // Filtros
     if (status) {
       paramCount++;

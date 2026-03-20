@@ -560,6 +560,104 @@ export default async function whatsappNumbersRoutes(fastify, opts) {
     }
   });
 
+  // ============================================
+  // GET /api/whatsapp-numbers/:id/membros — Listar membros da conexão
+  // ============================================
+  fastify.get('/:id/membros', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('whatsapp_numbers', 'read')
+    ],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const { empresaId } = request;
+
+    // Verificar se a conexão pertence à empresa
+    const wnResult = await pool.query(
+      'SELECT id FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2',
+      [id, empresaId]
+    );
+    if (wnResult.rows.length === 0) {
+      return reply.code(404).send({ success: false, error: { message: 'Conexão não encontrada' } });
+    }
+
+    const result = await pool.query(
+      `SELECT u.id, u.nome, u.email, u.role, wnm.criado_em
+       FROM whatsapp_number_membros wnm
+       JOIN usuarios u ON wnm.usuario_id = u.id
+       WHERE wnm.whatsapp_number_id = $1
+       ORDER BY u.nome`,
+      [id]
+    );
+
+    reply.send({ success: true, data: result.rows });
+  });
+
+  // ============================================
+  // POST /api/whatsapp-numbers/:id/membros — Adicionar membros
+  // ============================================
+  fastify.post('/:id/membros', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('whatsapp_numbers', 'write')
+    ],
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const { empresaId } = request;
+    const { usuario_ids } = request.body;
+
+    if (!usuario_ids || !Array.isArray(usuario_ids) || usuario_ids.length === 0) {
+      return reply.code(400).send({ success: false, error: { message: 'usuario_ids é obrigatório (array)' } });
+    }
+
+    // Verificar se a conexão pertence à empresa
+    const wnResult = await pool.query(
+      'SELECT id FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2',
+      [id, empresaId]
+    );
+    if (wnResult.rows.length === 0) {
+      return reply.code(404).send({ success: false, error: { message: 'Conexão não encontrada' } });
+    }
+
+    let added = 0;
+    for (const usuarioId of usuario_ids) {
+      try {
+        await pool.query(
+          'INSERT INTO whatsapp_number_membros (whatsapp_number_id, usuario_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [id, usuarioId]
+        );
+        added++;
+      } catch (error) {
+        logger.warn({ err: error.message, usuarioId, whatsappNumberId: id }, 'Erro ao adicionar membro na conexão');
+      }
+    }
+
+    logger.info({ empresaId, whatsappNumberId: id, added }, 'Members added to WhatsApp connection');
+    reply.code(201).send({ success: true, data: { adicionados: added } });
+  });
+
+  // ============================================
+  // DELETE /api/whatsapp-numbers/:id/membros/:userId — Remover membro
+  // ============================================
+  fastify.delete('/:id/membros/:userId', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('whatsapp_numbers', 'write')
+    ],
+  }, async (request, reply) => {
+    const { id, userId } = request.params;
+
+    await pool.query(
+      'DELETE FROM whatsapp_number_membros WHERE whatsapp_number_id = $1 AND usuario_id = $2',
+      [id, userId]
+    );
+
+    reply.code(204).send();
+  });
+
   // Testar/verificar conexão do número via Meta Graph API
   fastify.post('/:id/testar', {
     preHandler: [

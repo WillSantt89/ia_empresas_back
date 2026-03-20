@@ -2078,10 +2078,16 @@ export default async function conversasRoutes(fastify, opts) {
     const params = [empresaId];
     let paramCount = 1;
 
-    // Operador: filtrar apenas filas dele
+    // Operador: filtrar apenas filas dele + conexões dele
     if (user.role === 'operador') {
       paramCount++;
       where += ` AND (c.fila_id IN (SELECT fm.fila_id FROM fila_membros fm WHERE fm.usuario_id = $${paramCount}) OR c.operador_id = $${paramCount})`;
+      where += ` AND (
+        c.whatsapp_number_id IS NULL
+        OR NOT EXISTS (SELECT 1 FROM whatsapp_number_membros wnm2 WHERE wnm2.whatsapp_number_id = c.whatsapp_number_id)
+        OR c.whatsapp_number_id IN (SELECT wnm.whatsapp_number_id FROM whatsapp_number_membros wnm WHERE wnm.usuario_id = $${paramCount})
+        OR c.operador_id = $${paramCount}
+      )`;
       params.push(user.id);
     }
 
