@@ -85,12 +85,17 @@ const chatbotFluxosRoutes = async (fastify) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { nome, descricao, fluxo_json, ativo } = request.body;
 
+    if (!empresa_id) {
+      return reply.code(400).send({ success: false, error: 'empresa_id não identificado' });
+    }
+
     try {
+      const jsonValue = typeof fluxo_json === 'string' ? fluxo_json : JSON.stringify(fluxo_json || {});
       const result = await pool.query(`
         INSERT INTO chatbot_fluxos (empresa_id, nome, descricao, fluxo_json, ativo)
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4::jsonb, $5)
         RETURNING *
-      `, [empresa_id, nome, descricao || null, fluxo_json || {}, ativo !== false]);
+      `, [empresa_id, nome, descricao || null, jsonValue, ativo !== false]);
 
       createLogger.info({ empresa_id, fluxoId: result.rows[0].id }, 'Chatbot flow created');
       return reply.code(201).send({ success: true, data: result.rows[0] });
