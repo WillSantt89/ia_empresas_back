@@ -53,6 +53,7 @@ import mediaRoutes from './routes/media.js';
 import camposPersonalizadosRoutes from './routes/campos-personalizados.js';
 import configFollowupRoutes from './routes/config-followup.js';
 import chatbotFluxosRoutes from './routes/chatbot-fluxos.js';
+import respostasProntasRoutes from './routes/respostas-prontas.js';
 
 // Import WebSocket
 import { initializeWebSocket } from './services/websocket.js';
@@ -344,6 +345,7 @@ async function start() {
     await fastify.register(camposPersonalizadosRoutes, { prefix: '/api/campos-personalizados' });
     await fastify.register(configFollowupRoutes, { prefix: '/api/config-followup' });
     await fastify.register(chatbotFluxosRoutes, { prefix: '/api/chatbot-fluxos' });
+    await fastify.register(respostasProntasRoutes, { prefix: '/api/respostas-prontas' });
 
     // Bull Board dashboard (queue monitoring) — master only
     const serverAdapter = new FastifyAdapter();
