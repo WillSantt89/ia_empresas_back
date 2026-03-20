@@ -464,6 +464,67 @@ export default async function assinaturasRoutes(fastify, opts) {
         }
       }
 
+      // Recalcular créditos extras de agentes adicionais
+      if (itens && Array.isArray(itens)) {
+        try {
+          // Buscar itens ativos da assinatura com seus slugs
+          const itensAtivos = await client.query(`
+            SELECT ai.quantidade, ic.slug
+            FROM assinatura_itens ai
+            JOIN itens_cobraveis ic ON ic.id = ai.item_cobravel_id
+            WHERE ai.assinatura_id = $1 AND ai.ativo = true
+              AND ic.slug IN ('agente_adicional_starter', 'agente_adicional_pro')
+          `, [assinatura.id]);
+
+          let creditosAgentes = 0;
+          for (const item of itensAtivos.rows) {
+            if (item.slug === 'agente_adicional_starter') creditosAgentes += item.quantidade * 15000;
+            if (item.slug === 'agente_adicional_pro') creditosAgentes += item.quantidade * 45000;
+          }
+
+          // Buscar plano para pegar créditos base
+          const planoResult = await client.query(
+            'SELECT creditos_ia_mensal FROM planos WHERE id = (SELECT plano_id FROM assinaturas WHERE id = $1)',
+            [assinatura.id]
+          );
+          const creditosPlano = planoResult.rows[0]?.creditos_ia_mensal || 0;
+
+          if (creditosPlano > 0 || creditosAgentes > 0) {
+            // Buscar recargas manuais já feitas (não sobrescrever)
+            const recargasResult = await client.query(
+              `SELECT COALESCE(SUM(quantidade), 0) as total_recargas
+               FROM creditos_ia_historico
+               WHERE empresa_id = $1 AND tipo = 'recarga'
+                 AND criado_em >= (SELECT ciclo_inicio FROM creditos_ia WHERE empresa_id = $1)`,
+              [empresaId]
+            );
+            const recargasManuais = parseInt(recargasResult.rows[0]?.total_recargas || '0');
+
+            // Upsert creditos_ia com extras = agentes + recargas manuais
+            await client.query(`
+              INSERT INTO creditos_ia (empresa_id, creditos_plano, creditos_extras, ciclo_inicio, ciclo_fim)
+              VALUES ($1, $2, $3, CURRENT_DATE, (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month - 1 day')::DATE)
+              ON CONFLICT (empresa_id) DO UPDATE SET
+                creditos_plano = $2,
+                creditos_extras = $3,
+                bloqueado = CASE WHEN ($2 - creditos_ia.creditos_plano_usados + $3 - creditos_ia.creditos_extras_usados) > 0 THEN false ELSE creditos_ia.bloqueado END,
+                atualizado_em = NOW()
+            `, [empresaId, creditosPlano, creditosAgentes + recargasManuais]);
+
+            // Registrar histórico se houve mudança de agentes
+            if (creditosAgentes > 0) {
+              await client.query(
+                `INSERT INTO creditos_ia_historico (empresa_id, tipo, quantidade, saldo_apos, referencia)
+                 VALUES ($1, 'agente_adicional', $2, $2 + $3, 'assinatura:itens')`,
+                [empresaId, creditosAgentes, creditosPlano]
+              );
+            }
+          }
+        } catch (err) {
+          logger.error('Erro ao recalcular créditos de agentes:', err);
+        }
+      }
+
       await client.query('COMMIT');
 
       // Buscar assinatura atualizada
