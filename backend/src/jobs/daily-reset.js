@@ -1,6 +1,7 @@
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
 import * as apiKeyManager from '../services/api-key-manager.js';
+import { resetMensalCreditos } from '../services/creditos-ia.js';
 
 let timeoutId = null;
 
@@ -31,7 +32,17 @@ async function performDailyReset() {
     const deletedLogs = await cleanOldLogs();
     logger.info(`✓ Cleaned ${deletedLogs} old log entries`);
 
-    // 6. Gerar notificação de reset concluído
+    // 6. Reset mensal de créditos IA (empresas cujo ciclo venceu)
+    try {
+      const resetados = await resetMensalCreditos();
+      if (resetados > 0) {
+        logger.info(`✓ Reset mensal de créditos IA: ${resetados} empresas`);
+      }
+    } catch (err) {
+      logger.error('Erro no reset mensal de créditos IA:', err);
+    }
+
+    // 7. Gerar notificação de reset concluído
     await createResetNotification();
 
     logger.info('Daily reset completed successfully');

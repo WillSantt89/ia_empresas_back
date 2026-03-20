@@ -54,6 +54,7 @@ import camposPersonalizadosRoutes from './routes/campos-personalizados.js';
 import configFollowupRoutes from './routes/config-followup.js';
 import chatbotFluxosRoutes from './routes/chatbot-fluxos.js';
 import respostasProntasRoutes from './routes/respostas-prontas.js';
+import creditosIaRoutes from './routes/creditos-ia.js';
 
 // Import WebSocket
 import { initializeWebSocket } from './services/websocket.js';
@@ -328,6 +329,7 @@ async function start() {
     await fastify.register(planosRoutes, { prefix: '/api/planos' });
     await fastify.register(itensCobraveisRoutes, { prefix: '/api/itens-cobraveis' });
     await fastify.register(assinaturasRoutes, { prefix: '/api/assinaturas' });
+    await fastify.register(creditosIaRoutes, { prefix: '/api/creditos-ia' });
     await fastify.register(promptsRoutes, { prefix: '/api/agentes' });
     await fastify.register(transferenciasRoutes, { prefix: '/api' });
     await fastify.register(agenteToolsRoutes, { prefix: '/api/agentes' });

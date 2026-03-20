@@ -1,5 +1,6 @@
 import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
+import { inicializarCreditos } from '../services/creditos-ia.js';
 
 export default async function assinaturasRoutes(fastify, opts) {
   // Obter assinatura de uma empresa
@@ -116,6 +117,30 @@ export default async function assinaturasRoutes(fastify, opts) {
 
       assinatura.uso_atual = usoResult.rows[0];
 
+      // Buscar créditos IA
+      const creditosResult = await pool.query(
+        `SELECT * FROM creditos_ia WHERE empresa_id = $1`,
+        [empresaId]
+      );
+      if (creditosResult.rows.length > 0) {
+        const c = creditosResult.rows[0];
+        const total = c.creditos_plano + c.creditos_extras;
+        const usados = c.creditos_plano_usados + c.creditos_extras_usados;
+        assinatura.creditos_ia = {
+          creditos_plano: c.creditos_plano,
+          creditos_plano_usados: c.creditos_plano_usados,
+          creditos_extras: c.creditos_extras,
+          creditos_extras_usados: c.creditos_extras_usados,
+          total,
+          usados,
+          saldo: total - usados,
+          percentual: total > 0 ? Math.round((usados / total) * 100) : 0,
+          bloqueado: c.bloqueado,
+          ciclo_inicio: c.ciclo_inicio,
+          ciclo_fim: c.ciclo_fim,
+        };
+      }
+
       return {
         success: true,
         data: assinatura
@@ -229,6 +254,13 @@ export default async function assinaturasRoutes(fastify, opts) {
             gen_random_uuid(), $1, $2, 'mudou_plano', $3, NOW()
           )
         `, [assinatura.id, empresaId, request.user.id]);
+
+        // Inicializar créditos IA se o plano incluir
+        if (planoExists.rows[0].creditos_ia_mensal > 0) {
+          inicializarCreditos(empresaId, planoExists.rows[0].creditos_ia_mensal).catch(err =>
+            logger.error('Erro ao inicializar créditos:', err)
+          );
+        }
       } else {
         assinatura = assinaturaResult.rows[0];
       }
@@ -266,6 +298,13 @@ export default async function assinaturasRoutes(fastify, opts) {
             gen_random_uuid(), $1, $2, 'mudou_plano', $3, NOW()
           )
         `, [assinatura.id, empresaId, userId]);
+
+        // Atualizar créditos IA se plano mudou
+        if (planoExists.rows[0].creditos_ia_mensal > 0) {
+          inicializarCreditos(empresaId, planoExists.rows[0].creditos_ia_mensal).catch(err =>
+            logger.error('Erro ao atualizar créditos após mudança de plano:', err)
+          );
+        }
       }
 
       // Atualizar status se fornecido

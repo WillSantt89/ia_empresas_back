@@ -17,6 +17,7 @@ import { sendTextMessage, markAsRead } from './whatsapp-sender.js';
 import { atribuirConversaAutomatica, calcularStatsFila } from './fila-manager.js';
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats, emitStatusEntrega } from './websocket.js';
 import { getFlowState, startFlow, processFlowInput, clearFlowState } from './flow-engine.js';
+import { consumirCredito } from './creditos-ia.js';
 
 const createLogger = logger.child({ module: 'message-processor' });
 
@@ -975,28 +976,22 @@ export async function processAIResponse({
 }) {
   const { modelo, temperatura, max_tokens, prompt_ativo } = agent;
 
-  // --- Daily limit check ---
-  await pool.query(`
-    INSERT INTO uso_diario_agente (empresa_id, agente_id, data, total_atendimentos, limite_diario)
-    SELECT $1, $2, CURRENT_DATE, 0, COALESCE(
-      (SELECT max_mensagens_mes / 30 FROM empresa_limits WHERE empresa_id = $1), 500
-    )
-    ON CONFLICT (empresa_id, agente_id, data) DO NOTHING
-  `, [empresa_id, agente_id]);
-
-  const usageResult = await pool.query(`
-    SELECT total_atendimentos, limite_diario, limite_atingido
-    FROM uso_diario_agente
-    WHERE empresa_id = $1 AND agente_id = $2 AND data = CURRENT_DATE
-  `, [empresa_id, agente_id]);
-
-  if (usageResult.rows.length > 0) {
-    const usage = usageResult.rows[0];
-    if (usage.limite_atingido || usage.total_atendimentos >= usage.limite_diario) {
-      createLogger.warn('Daily limit reached', { empresa_id, agente_id });
-      return null;
-    }
+  // --- Credit check (pool mensal por empresa) ---
+  const creditResult = await consumirCredito(empresa_id, `conversa:${conversa_id}`);
+  if (!creditResult.consumido) {
+    createLogger.warn('Créditos IA esgotados', { empresa_id, agente_id, motivo: creditResult.motivo });
+    return null;
   }
+  if (creditResult.fonte !== 'sem_controle') {
+    createLogger.info('Crédito consumido', { empresa_id, fonte: creditResult.fonte, saldo: creditResult.saldo_restante });
+  }
+
+  // --- Daily usage tracking (analytics, fire-and-forget) ---
+  pool.query(`
+    INSERT INTO uso_diario_agente (empresa_id, agente_id, data, total_atendimentos, limite_diario)
+    VALUES ($1, $2, CURRENT_DATE, 0, 999999)
+    ON CONFLICT (empresa_id, agente_id, data) DO NOTHING
+  `, [empresa_id, agente_id]).catch(() => {});
 
   // --- Get agent tools ---
   const toolsResult = await pool.query(`
