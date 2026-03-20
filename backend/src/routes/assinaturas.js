@@ -33,6 +33,11 @@ export default async function assinaturasRoutes(fastify, opts) {
           p.max_tools,
           p.max_mensagens_mes,
           p.permite_modelo_pro,
+          p.creditos_ia_mensal,
+          p.max_agentes,
+          p.max_conexoes_whatsapp,
+          p.chatbot_incluso,
+          p.tipo as plano_tipo,
           e.nome as empresa_nome,
           e.slug as empresa_slug
         FROM assinaturas a
