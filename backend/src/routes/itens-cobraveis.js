@@ -50,7 +50,7 @@ export default async function itensCobraveisRoutes(fastify, opts) {
         for (const item of result.rows) {
           if (item.tipo_cobranca === 'por_faixa') {
             const faixas = await pool.query(
-              'SELECT * FROM faixas_item WHERE item_cobravel_id = $1 AND ativo = true ORDER BY limite_diario ASC',
+              'SELECT * FROM faixas_item WHERE item_cobravel_id = $1 ORDER BY ativo DESC, limite_diario ASC',
               [item.id]
             );
             item.faixas = faixas.rows;
