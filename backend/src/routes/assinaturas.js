@@ -464,7 +464,7 @@ export default async function assinaturasRoutes(fastify, opts) {
         }
       }
 
-      // Recalcular créditos extras de agentes adicionais
+      // Recalcular créditos após salvar itens
       if (itens && Array.isArray(itens)) {
         try {
           // Buscar itens ativos da assinatura com seus slugs
@@ -483,40 +483,51 @@ export default async function assinaturasRoutes(fastify, opts) {
           }
 
           // Buscar plano para pegar créditos base
+          const planoAtualId = plano_id || assinatura.plano_id;
           const planoResult = await client.query(
-            'SELECT creditos_ia_mensal FROM planos WHERE id = (SELECT plano_id FROM assinaturas WHERE id = $1)',
-            [assinatura.id]
+            'SELECT creditos_ia_mensal FROM planos WHERE id = $1',
+            [planoAtualId]
           );
           const creditosPlano = planoResult.rows[0]?.creditos_ia_mensal || 0;
 
+          // Só processar se há algum crédito (plano ou agentes)
           if (creditosPlano > 0 || creditosAgentes > 0) {
-            // Buscar recargas manuais já feitas (não sobrescrever)
+            // Buscar recargas manuais do ciclo atual (para preservar)
             const recargasResult = await client.query(
               `SELECT COALESCE(SUM(quantidade), 0) as total_recargas
                FROM creditos_ia_historico
                WHERE empresa_id = $1 AND tipo = 'recarga'
-                 AND criado_em >= (SELECT ciclo_inicio FROM creditos_ia WHERE empresa_id = $1)`,
+                 AND criado_em >= COALESCE(
+                   (SELECT ciclo_inicio FROM creditos_ia WHERE empresa_id = $1),
+                   CURRENT_DATE
+                 )`,
               [empresaId]
             );
             const recargasManuais = parseInt(recargasResult.rows[0]?.total_recargas || '0');
+            const totalExtras = creditosAgentes + recargasManuais;
 
-            // Upsert creditos_ia com extras = agentes + recargas manuais
+            // Upsert creditos_ia
             await client.query(`
               INSERT INTO creditos_ia (empresa_id, creditos_plano, creditos_extras, ciclo_inicio, ciclo_fim)
               VALUES ($1, $2, $3, CURRENT_DATE, (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month - 1 day')::DATE)
               ON CONFLICT (empresa_id) DO UPDATE SET
                 creditos_plano = $2,
                 creditos_extras = $3,
-                bloqueado = CASE WHEN ($2 - creditos_ia.creditos_plano_usados + $3 - creditos_ia.creditos_extras_usados) > 0 THEN false ELSE creditos_ia.bloqueado END,
+                bloqueado = CASE
+                  WHEN ($2 - creditos_ia.creditos_plano_usados + $3 - creditos_ia.creditos_extras_usados) > 0
+                  THEN false
+                  ELSE creditos_ia.bloqueado
+                END,
                 atualizado_em = NOW()
-            `, [empresaId, creditosPlano, creditosAgentes + recargasManuais]);
+            `, [empresaId, creditosPlano, totalExtras]);
 
-            // Registrar histórico se houve mudança de agentes
+            // Histórico
             if (creditosAgentes > 0) {
+              const saldoTotal = creditosPlano + totalExtras;
               await client.query(
                 `INSERT INTO creditos_ia_historico (empresa_id, tipo, quantidade, saldo_apos, referencia)
-                 VALUES ($1, 'agente_adicional', $2, $2 + $3, 'assinatura:itens')`,
-                [empresaId, creditosAgentes, creditosPlano]
+                 VALUES ($1, 'agente_adicional', $2, $3, $4)`,
+                [empresaId, creditosAgentes, saldoTotal, `agentes:starter=${itensAtivos.rows.find(i => i.slug === 'agente_adicional_starter')?.quantidade || 0},pro=${itensAtivos.rows.find(i => i.slug === 'agente_adicional_pro')?.quantidade || 0}`]
               );
             }
           }
