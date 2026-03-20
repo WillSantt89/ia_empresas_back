@@ -9,16 +9,19 @@ import { ERROR_CODES } from '../config/constants.js';
 export async function authMiddleware(request, reply) {
   try {
     // Skip auth for public routes
-    const publicRoutes = [
+    const publicPrefixes = [
       '/health',
       '/api/auth/login',
       '/api/auth/forgot-password',
       '/api/auth/reset-password',
-      '/api/chat', // Chat uses webhook API key instead
       '/api/webhooks/whatsapp' // Meta WhatsApp webhook (uses HMAC signature)
     ];
 
-    if (publicRoutes.some(route => request.url.startsWith(route))) {
+    // /api/chat uses webhook API key — match exact prefix but NOT /api/chatbot-*
+    const isPublic = publicPrefixes.some(route => request.url.startsWith(route))
+      || (request.url.startsWith('/api/chat/') || request.url === '/api/chat');
+
+    if (isPublic) {
       return;
     }
 
@@ -115,7 +118,7 @@ export async function authMiddleware(request, reply) {
       url: request.url
     });
 
-    reply.code(error.statusCode || 401).send({
+    return reply.code(error.statusCode || 401).send({
       success: false,
       error: {
         code: error.code || ERROR_CODES.AUTH_INVALID_CREDENTIALS,
