@@ -745,11 +745,20 @@ async function processMessageCommon({
         'SELECT fluxo_json FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2 AND ativo = true',
         [agent.chatbot_fluxo_id, empresa_id]
       );
-      const fluxoJson = fluxoResult.rows[0]?.fluxo_json;
+      let fluxoJson = fluxoResult.rows[0]?.fluxo_json;
+
+      // Se fluxo_json veio como string (double-stringify), fazer parse
+      if (typeof fluxoJson === 'string') {
+        try { fluxoJson = JSON.parse(fluxoJson); } catch { fluxoJson = null; }
+      }
+
+      if (!fluxoJson || !fluxoJson.nodes || !fluxoJson.start_node) {
+        createLogger.warn({ empresa_id, fluxoId: agent.chatbot_fluxo_id }, 'Chatbot flow JSON invalid or not found');
+      }
 
       if (fluxoJson && fluxoJson.nodes && fluxoJson.start_node) {
-        if (!flowState && isNewConversation) {
-          // Nova conversa — iniciar fluxo
+        if (!flowState) {
+          // Sem fluxo ativo — iniciar fluxo
           const flowResult = await startFlow(empresa_id, phone, agent.chatbot_fluxo_id, fluxoJson);
           if (flowResult?.response) {
             const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);

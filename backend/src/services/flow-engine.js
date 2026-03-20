@@ -12,6 +12,7 @@ import { logger } from '../config/logger.js';
 const createLogger = logger.child({ module: 'flow-engine' });
 
 const FLOW_TTL = 86400; // 24h
+const LOCK_TTL = 10; // 10s lock para evitar race condition
 
 // --- Validações de input ---
 const VALIDATORS = {
@@ -43,6 +44,20 @@ const VALIDATORS = {
  */
 function flowKey(empresaId, phone) {
   return `chatbot:${empresaId}:${phone}`;
+}
+
+/**
+ * Adquire lock para evitar race condition entre workers
+ */
+async function acquireLock(empresaId, phone) {
+  const lockKey = `lock:chatbot:${empresaId}:${phone}`;
+  const result = await redis.set(lockKey, '1', 'EX', LOCK_TTL, 'NX');
+  return result === 'OK';
+}
+
+async function releaseLock(empresaId, phone) {
+  const lockKey = `lock:chatbot:${empresaId}:${phone}`;
+  await redis.del(lockKey);
 }
 
 /**
@@ -373,52 +388,80 @@ function evaluateCondition(value, operator, condValue) {
  * Inicia um fluxo para uma conversa
  */
 export async function startFlow(empresaId, phone, fluxoId, fluxoJson) {
-  const startNode = fluxoJson.start_node;
-  if (!startNode || !fluxoJson.nodes?.[startNode]) {
-    createLogger.warn({ fluxoId }, 'Invalid flow: no start_node');
+  // Lock para evitar race condition entre workers
+  const locked = await acquireLock(empresaId, phone);
+  if (!locked) {
+    createLogger.warn({ empresaId, phone }, 'Flow start skipped — another worker processing');
     return null;
   }
 
-  const state = {
-    fluxo_id: fluxoId,
-    node_atual: startNode,
-    variables: {},
-    started_at: new Date().toISOString(),
-  };
+  try {
+    // Verificar se outro worker já iniciou o fluxo
+    const existing = await getFlowState(empresaId, phone);
+    if (existing) {
+      createLogger.info({ empresaId, phone }, 'Flow already started by another worker');
+      return null;
+    }
 
-  await saveFlowState(empresaId, phone, state);
+    const startNode = fluxoJson.start_node;
+    if (!startNode || !fluxoJson.nodes?.[startNode]) {
+      createLogger.warn({ fluxoId }, 'Invalid flow: no start_node');
+      return null;
+    }
 
-  // Processar cadeia inicial (mensagens de boas-vindas + primeiro input)
-  const result = await processNodeChain(fluxoJson.nodes, startNode, {});
+    const state = {
+      fluxo_id: fluxoId,
+      node_atual: startNode,
+      variables: {},
+      started_at: new Date().toISOString(),
+    };
 
-  // Atualizar estado com o nó final da cadeia
-  state.node_atual = result.finalNode;
-  state.variables = result.variables;
-  await saveFlowState(empresaId, phone, state);
+    await saveFlowState(empresaId, phone, state);
 
-  return {
-    response: result.messages.join('\n\n'),
-    state,
-  };
+    // Processar cadeia inicial (mensagens de boas-vindas + primeiro input)
+    const result = await processNodeChain(fluxoJson.nodes, startNode, {});
+
+    // Atualizar estado com o nó final da cadeia
+    state.node_atual = result.finalNode;
+    state.variables = result.variables;
+    await saveFlowState(empresaId, phone, state);
+
+    return {
+      response: result.messages.join('\n\n'),
+      state,
+    };
+  } finally {
+    await releaseLock(empresaId, phone);
+  }
 }
 
 /**
  * Processa input do cliente no fluxo ativo
  */
 export async function processFlowInput(empresaId, phone, fluxoJson, userInput) {
-  const state = await getFlowState(empresaId, phone);
-  if (!state) return null;
-
-  const result = await processFlowNode(fluxoJson, state, userInput);
-
-  if (result.clearFlow) {
-    await clearFlowState(empresaId, phone);
-    createLogger.info({ empresaId, phone, action: result.action, variables: result.variables }, 'Flow completed');
-  } else if (result.nextNode) {
-    state.node_atual = result.nextNode;
-    state.variables = result.variables || state.variables;
-    await saveFlowState(empresaId, phone, state);
+  const locked = await acquireLock(empresaId, phone);
+  if (!locked) {
+    createLogger.warn({ empresaId, phone }, 'Flow input skipped — another worker processing');
+    return { handled: true, response: null }; // Silently skip duplicate
   }
 
-  return result;
+  try {
+    const state = await getFlowState(empresaId, phone);
+    if (!state) return null;
+
+    const result = await processFlowNode(fluxoJson, state, userInput);
+
+    if (result.clearFlow) {
+      await clearFlowState(empresaId, phone);
+      createLogger.info({ empresaId, phone, action: result.action, variables: result.variables }, 'Flow completed');
+    } else if (result.nextNode) {
+      state.node_atual = result.nextNode;
+      state.variables = result.variables || state.variables;
+      await saveFlowState(empresaId, phone, state);
+    }
+
+    return result;
+  } finally {
+    await releaseLock(empresaId, phone);
+  }
 }

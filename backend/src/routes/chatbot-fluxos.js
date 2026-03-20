@@ -135,7 +135,7 @@ const chatbotFluxosRoutes = async (fastify) => {
 
     if (nome !== undefined) { updates.push(`nome = $${paramIndex++}`); params.push(nome); }
     if (descricao !== undefined) { updates.push(`descricao = $${paramIndex++}`); params.push(descricao); }
-    if (fluxo_json !== undefined) { updates.push(`fluxo_json = $${paramIndex++}`); params.push(JSON.stringify(fluxo_json)); }
+    if (fluxo_json !== undefined) { updates.push(`fluxo_json = $${paramIndex++}`); params.push(typeof fluxo_json === 'string' ? fluxo_json : JSON.stringify(fluxo_json)); }
     if (ativo !== undefined) { updates.push(`ativo = $${paramIndex++}`); params.push(ativo); }
 
     if (updates.length === 0) {
