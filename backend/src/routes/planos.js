@@ -15,33 +15,6 @@ export default async function planosRoutes(fastify, opts) {
           ativo: { type: 'boolean' }
         }
       },
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            success: { type: 'boolean' },
-            data: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  id: { type: 'string' },
-                  nome: { type: 'string' },
-                  descricao: { type: 'string' },
-                  preco_base_mensal: { type: 'number' },
-                  max_usuarios: { type: 'integer' },
-                  max_tools: { type: 'integer' },
-                  max_mensagens_mes: { type: 'integer' },
-                  permite_modelo_pro: { type: 'boolean' },
-                  ativo: { type: 'boolean' },
-                  criado_em: { type: 'string' },
-                  atualizado_em: { type: 'string' }
-                }
-              }
-            }
-          }
-        }
-      }
     }
   }, async (request, reply) => {
     try {
@@ -97,8 +70,13 @@ export default async function planosRoutes(fastify, opts) {
           preco_base_mensal: { type: 'number', minimum: 0 },
           max_usuarios: { type: 'integer', minimum: 1, default: 3 },
           max_tools: { type: 'integer', minimum: 0, default: 10 },
-          max_mensagens_mes: { type: 'integer', minimum: 0, default: 5000 },
-          permite_modelo_pro: { type: 'boolean', default: false }
+          max_mensagens_mes: { type: 'integer', minimum: 0, default: 0 },
+          permite_modelo_pro: { type: 'boolean', default: false },
+          creditos_ia_mensal: { type: 'integer', minimum: 0, default: 0 },
+          max_agentes: { type: 'integer', minimum: 0, default: 0 },
+          max_conexoes_whatsapp: { type: 'integer', minimum: 0, default: 0 },
+          chatbot_incluso: { type: 'boolean', default: false },
+          tipo: { type: 'string', enum: ['chat', 'ia', 'trafego'], default: 'ia' }
         }
       }
     }
@@ -115,7 +93,12 @@ export default async function planosRoutes(fastify, opts) {
         max_usuarios,
         max_tools,
         max_mensagens_mes,
-        permite_modelo_pro
+        permite_modelo_pro,
+        creditos_ia_mensal,
+        max_agentes,
+        max_conexoes_whatsapp,
+        chatbot_incluso,
+        tipo,
       } = request.body;
 
       // Verificar se nome já existe
@@ -138,10 +121,12 @@ export default async function planosRoutes(fastify, opts) {
         INSERT INTO planos (
           id, nome, descricao, preco_base_mensal,
           max_usuarios, max_tools, max_mensagens_mes,
-          permite_modelo_pro, ativo, criado_em, atualizado_em
+          permite_modelo_pro, creditos_ia_mensal, max_agentes,
+          max_conexoes_whatsapp, chatbot_incluso, tipo,
+          ativo, criado_em, atualizado_em
         )
         VALUES (
-          gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, true, NOW(), NOW()
+          gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, NOW(), NOW()
         )
         RETURNING *
       `, [
@@ -151,7 +136,12 @@ export default async function planosRoutes(fastify, opts) {
         max_usuarios,
         max_tools,
         max_mensagens_mes,
-        permite_modelo_pro
+        permite_modelo_pro,
+        creditos_ia_mensal || 0,
+        max_agentes || 0,
+        max_conexoes_whatsapp || 0,
+        chatbot_incluso || false,
+        tipo || 'ia',
       ]);
 
       await client.query('COMMIT');
@@ -195,6 +185,11 @@ export default async function planosRoutes(fastify, opts) {
           max_tools: { type: 'integer', minimum: 0 },
           max_mensagens_mes: { type: 'integer', minimum: 0 },
           permite_modelo_pro: { type: 'boolean' },
+          creditos_ia_mensal: { type: 'integer', minimum: 0 },
+          max_agentes: { type: 'integer', minimum: 0 },
+          max_conexoes_whatsapp: { type: 'integer', minimum: 0 },
+          chatbot_incluso: { type: 'boolean' },
+          tipo: { type: 'string', enum: ['chat', 'ia', 'trafego'] },
           ativo: { type: 'boolean' }
         }
       }
