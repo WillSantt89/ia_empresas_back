@@ -13,15 +13,28 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.get('/', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request) => {
-    const { empresa_id } = request.user;
+    const empresa_id = request.empresaId || request.user.empresa_id;
 
-    const result = await pool.query(`
-      SELECT cf.id, cf.nome, cf.descricao, cf.ativo, cf.criado_em, cf.atualizado_em,
-        (SELECT COUNT(*) FROM agentes a WHERE a.chatbot_fluxo_id = cf.id AND a.chatbot_ativo = true) as agentes_vinculados
-      FROM chatbot_fluxos cf
-      WHERE cf.empresa_id = $1
-      ORDER BY cf.criado_em DESC
-    `, [empresa_id]);
+    let result;
+    if (empresa_id) {
+      result = await pool.query(`
+        SELECT cf.id, cf.nome, cf.descricao, cf.ativo, cf.criado_em, cf.atualizado_em,
+          (SELECT COUNT(*) FROM agentes a WHERE a.chatbot_fluxo_id = cf.id AND a.chatbot_ativo = true) as agentes_vinculados
+        FROM chatbot_fluxos cf
+        WHERE cf.empresa_id = $1
+        ORDER BY cf.criado_em DESC
+      `, [empresa_id]);
+    } else {
+      // Master sem impersonação — listar todos
+      result = await pool.query(`
+        SELECT cf.id, cf.nome, cf.descricao, cf.ativo, cf.criado_em, cf.atualizado_em,
+          e.nome as empresa_nome,
+          (SELECT COUNT(*) FROM agentes a WHERE a.chatbot_fluxo_id = cf.id AND a.chatbot_ativo = true) as agentes_vinculados
+        FROM chatbot_fluxos cf
+        JOIN empresas e ON e.id = cf.empresa_id
+        ORDER BY cf.criado_em DESC
+      `);
+    }
 
     return { success: true, data: result.rows };
   });
@@ -33,7 +46,7 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.get('/:id', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request, reply) => {
-    const { empresa_id } = request.user;
+    const empresa_id = request.empresaId || request.user.empresa_id;
     const { id } = request.params;
 
     const result = await pool.query(
@@ -67,7 +80,7 @@ const chatbotFluxosRoutes = async (fastify) => {
       }
     }
   }, async (request, reply) => {
-    const { empresa_id } = request.user;
+    const empresa_id = request.empresaId || request.user.empresa_id;
     const { nome, descricao, fluxo_json, ativo } = request.body;
 
     try {
@@ -103,7 +116,7 @@ const chatbotFluxosRoutes = async (fastify) => {
       }
     }
   }, async (request, reply) => {
-    const { empresa_id } = request.user;
+    const empresa_id = request.empresaId || request.user.empresa_id;
     const { id } = request.params;
     const { nome, descricao, fluxo_json, ativo } = request.body;
 
@@ -143,7 +156,7 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.delete('/:id', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request, reply) => {
-    const { empresa_id } = request.user;
+    const empresa_id = request.empresaId || request.user.empresa_id;
     const { id } = request.params;
 
     // Verificar se há agentes vinculados com chatbot ativo
@@ -179,7 +192,7 @@ const chatbotFluxosRoutes = async (fastify) => {
   fastify.post('/:id/duplicar', {
     preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
   }, async (request, reply) => {
-    const { empresa_id } = request.user;
+    const empresa_id = request.empresaId || request.user.empresa_id;
     const { id } = request.params;
 
     const original = await pool.query(
