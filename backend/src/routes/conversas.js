@@ -6,6 +6,7 @@ import { sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../ser
 import { decrypt } from '../config/encryption.js';
 import { saveMedia } from '../services/media-storage.js';
 import { addToHistory, archiveConversation } from '../services/memory.js';
+import { clearFlowState } from '../services/flow-engine.js';
 import {
   emitConversaAtribuida, emitConversaAtualizada,
   emitNovaConversaNaFila, emitFilaStats, emitToUser,
@@ -793,6 +794,11 @@ export default async function conversasRoutes(fastify, opts) {
       const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
       archiveConversation(empresaId, conversationKey).catch(err => {
         logger.error('Failed to archive Redis history on finalize', { conversa_id: id, error: err.message });
+      });
+
+      // Limpar estado do chatbot para que próxima mensagem reinicie o fluxo
+      clearFlowState(empresaId, conversa.contato_whatsapp).catch(err => {
+        logger.error('Failed to clear chatbot flow state on finalize', { conversa_id: id, error: err.message });
       });
 
       // WebSocket: notificar fila
