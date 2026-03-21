@@ -736,9 +736,11 @@ async function processMessageCommon({
   }
 
   // --- Chatbot Flow Engine ---
+  createLogger.info({ empresa_id, phone, chatbot_ativo: agent.chatbot_ativo, chatbot_fluxo_id: agent.chatbot_fluxo_id, agente: agente_nome }, 'CHATBOT CHECK');
   if (agent.chatbot_ativo && agent.chatbot_fluxo_id) {
     try {
       const flowState = await getFlowState(empresa_id, phone);
+      createLogger.info({ empresa_id, phone, hasFlowState: !!flowState }, 'CHATBOT flow state check');
 
       // Buscar fluxo JSON do banco
       const fluxoResult = await pool.query(
@@ -746,19 +748,21 @@ async function processMessageCommon({
         [agent.chatbot_fluxo_id, empresa_id]
       );
       let fluxoJson = fluxoResult.rows[0]?.fluxo_json;
+      createLogger.info({ empresa_id, phone, found: !!fluxoJson, type: typeof fluxoJson, hasNodes: !!(fluxoJson?.nodes), hasStart: !!(fluxoJson?.start_node) }, 'CHATBOT fluxo query result');
 
       // Se fluxo_json veio como string (double-stringify), fazer parse
       if (typeof fluxoJson === 'string') {
-        try { fluxoJson = JSON.parse(fluxoJson); } catch { fluxoJson = null; }
+        try { fluxoJson = JSON.parse(fluxoJson); createLogger.info({ empresa_id, phone }, 'CHATBOT parsed string fluxo_json'); } catch { fluxoJson = null; }
       }
 
       if (!fluxoJson || !fluxoJson.nodes || !fluxoJson.start_node) {
-        createLogger.warn({ empresa_id, fluxoId: agent.chatbot_fluxo_id }, 'Chatbot flow JSON invalid or not found');
+        createLogger.warn({ empresa_id, fluxoId: agent.chatbot_fluxo_id, fluxoJson: fluxoJson ? 'exists but invalid' : 'null' }, 'Chatbot flow JSON invalid or not found');
       }
 
       if (fluxoJson && fluxoJson.nodes && fluxoJson.start_node) {
         if (!flowState) {
           // Sem fluxo ativo — iniciar fluxo
+          createLogger.info({ empresa_id, phone }, 'CHATBOT starting flow');
           const flowResult = await startFlow(empresa_id, phone, agent.chatbot_fluxo_id, fluxoJson);
           if (flowResult?.response) {
             const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
