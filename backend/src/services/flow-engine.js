@@ -149,7 +149,7 @@ async function resolveNextNode(nodes, nextNode, variables) {
   const nextResult = await processNodeChain(nodes, nextNode, variables);
   return {
     handled: true,
-    response: nextResult.messages.length > 0 ? nextResult.messages.join('\n\n') : null,
+    response: nextResult.messages.length > 0 ? nextResult.messages.join('\n') : null,
     nextNode: nextResult.finalNode,
     variables: nextResult.variables,
   };
@@ -181,13 +181,13 @@ export async function processFlowNode(fluxoJson, state, userInput) {
       const nextResult = await processNodeChain(nodes, nextNode, variables);
       return {
         handled: true,
-        response: [...messages, ...nextResult.messages].join('\n\n'),
+        response: [...messages, ...nextResult.messages].join('\n'),
         nextNode: nextResult.finalNode,
         variables: nextResult.variables,
       };
     }
 
-    return { handled: true, response: messages.join('\n\n'), nextNode, variables };
+    return { handled: true, response: messages.join('\n'), nextNode, variables };
   }
 
   // --- Nó tipo input_options: verifica se input bate com opção ---
@@ -224,7 +224,7 @@ export async function processFlowNode(fluxoJson, state, userInput) {
 
     // Repetir opções
     const messages = (node.messages || []).map(m => interpolate(m, variables));
-    return { handled: true, response: messages.join('\n\n'), nextNode: nodeId, variables };
+    return { handled: true, response: messages.join('\n'), nextNode: nodeId, variables };
   }
 
   // --- Nó tipo input_text: valida e salva ---
@@ -280,7 +280,7 @@ export async function processFlowNode(fluxoJson, state, userInput) {
     const result = await processNodeChain(nodes, nodeId, variables);
     return {
       handled: true,
-      response: result.messages.length > 0 ? result.messages.join('\n\n') : null,
+      response: result.messages.length > 0 ? result.messages.join('\n') : null,
       nextNode: result.finalNode,
       variables: result.variables,
     };
@@ -447,7 +447,7 @@ export async function startFlow(empresaId, phone, fluxoId, fluxoJson) {
     await saveFlowState(empresaId, phone, state);
 
     return {
-      response: result.messages.join('\n\n'),
+      response: result.messages.join('\n'),
       state,
     };
   } finally {
