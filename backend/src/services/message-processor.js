@@ -760,9 +760,9 @@ async function processMessageCommon({
       }
 
       if (fluxoJson && fluxoJson.nodes && fluxoJson.start_node) {
-        if (!flowState) {
-          // Sem fluxo ativo — iniciar fluxo
-          createLogger.info({ empresa_id, phone }, 'CHATBOT starting flow');
+        if (!flowState && isNewConversation) {
+          // Nova conversa sem fluxo ativo — iniciar fluxo
+          createLogger.info({ empresa_id, phone, isNewConversation }, 'CHATBOT starting flow');
           const flowResult = await startFlow(empresa_id, phone, agent.chatbot_fluxo_id, fluxoJson);
           if (flowResult?.response) {
             const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
