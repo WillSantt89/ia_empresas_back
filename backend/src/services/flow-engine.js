@@ -461,7 +461,7 @@ export async function processFlowInput(empresaId, phone, fluxoJson, userInput) {
   const locked = await acquireLock(empresaId, phone);
   if (!locked) {
     createLogger.warn({ empresaId, phone }, 'Flow input skipped — another worker processing');
-    return { handled: true, response: null }; // Silently skip duplicate
+    return null; // Retorna null para que message-processor trate como "não processado"
   }
 
   try {

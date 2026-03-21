@@ -876,15 +876,13 @@ async function processMessageCommon({
               return;
             }
 
-            // Fluxo handled=true mas sem response (opção válida sem mensagem)
-            else if (flowResult.handled) {
+            // Fallback para IA (handled=false ou handled sem response/action)
+            else {
+              if (flowResult.context) {
+                addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
+              }
               addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
-              return;
-            }
-
-            // Fallback para IA (handled=false) — adicionar contexto do fluxo
-            if (!flowResult.handled && flowResult.context) {
-              addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
+              createLogger.info({ empresa_id, phone, handled: flowResult.handled, hasResponse: !!flowResult.response }, 'Chatbot fallback to AI');
               // Continua para processamento pela IA
             }
           }
