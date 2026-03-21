@@ -816,7 +816,7 @@ async function processMessageCommon({
               return;
             }
 
-            // Ação: assign_agent — passa para IA com contexto das variáveis coletadas
+            // Ação: assign_agent — passa para IA (mesmo agente ou agente destino)
             if (flowResult.action === 'assign_agent') {
               if (flowResult.response) {
                 const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, flowResult.response);
@@ -825,12 +825,34 @@ async function processMessageCommon({
                   VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
                 `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
               }
+
+              // Se tem agente destino específico, trocar o agente
+              if (flowResult.agentId && flowResult.agentId !== agente_id) {
+                const destAgentResult = await pool.query(`
+                  SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+                         cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+                         chatbot_fluxo_id, chatbot_ativo
+                  FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true
+                `, [flowResult.agentId, empresa_id]);
+
+                if (destAgentResult.rows.length > 0) {
+                  agent = destAgentResult.rows[0];
+                  ({ agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent);
+                  // Atualizar conversa com novo agente
+                  await pool.query(
+                    `UPDATE conversas SET agente_id = $1, controlado_por = 'ia', atualizado_em = NOW() WHERE id = $2`,
+                    [agente_id, conversa_id]
+                  );
+                  createLogger.info({ empresa_id, phone, destAgente: agente_nome }, 'Chatbot transferred to destination agent');
+                }
+              }
+
               // Adicionar contexto do fluxo ao histórico para IA usar
               if (flowResult.context) {
                 addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
               }
               addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
-              createLogger.info({ empresa_id, phone, variables: flowResult.variables }, 'Chatbot flow assigned to agent');
+              createLogger.info({ empresa_id, phone, agente: agente_nome, variables: flowResult.variables }, 'Chatbot flow assigned to agent');
               // Continua para processamento pela IA (não retorna)
             }
 
