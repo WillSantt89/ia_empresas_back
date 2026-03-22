@@ -2614,4 +2614,218 @@ export default async function conversasRoutes(fastify, opts) {
       }
     });
   }, { prefix: '/bulk' });
+
+  // GET /expirados — Tickets com janela 24h expirada
+  fastify.get('/expirados', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'read')
+    ],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          fila_id: { type: 'string', format: 'uuid' },
+          horas_min: { type: 'integer', minimum: 24, default: 24 },
+          horas_max: { type: 'integer' },
+          sem_resposta: { type: 'boolean' },
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const empresaId = request.empresaId;
+    const { fila_id, horas_min = 24, horas_max, sem_resposta } = request.query;
+
+    try {
+      let query = `
+        SELECT
+          c.id, c.numero_ticket, c.contato_whatsapp, c.contato_nome,
+          c.controlado_por, c.status, c.fila_id, c.agente_id,
+          c.criado_em, c.atualizado_em, c.ultima_msg_entrada_em,
+          c.whatsapp_number_id, c.conexao_ativa_id,
+          f.nome as fila_nome,
+          a.nome as agente_nome,
+          wn.nome as conexao_nome, wn.phone_number as conexao_phone,
+          EXTRACT(EPOCH FROM (NOW() - c.ultima_msg_entrada_em)) / 3600 as horas_expirado,
+          (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'entrada') as total_msgs_cliente,
+          (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'saida') as total_msgs_saida,
+          cont.nome as contato_nome_salvo, cont.dados_json as contato_dados
+        FROM conversas c
+        LEFT JOIN filas_atendimento f ON f.id = c.fila_id
+        LEFT JOIN agentes a ON a.id = c.agente_id
+        LEFT JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
+        LEFT JOIN contatos cont ON cont.id = c.contato_id
+        WHERE c.empresa_id = $1
+          AND c.status = 'ativo'
+          AND c.ultima_msg_entrada_em < NOW() - INTERVAL '${parseInt(horas_min)} hours'
+      `;
+      const params = [empresaId];
+
+      if (horas_max) {
+        query += ` AND c.ultima_msg_entrada_em > NOW() - INTERVAL '${parseInt(horas_max)} hours'`;
+      }
+
+      if (fila_id) {
+        params.push(fila_id);
+        query += ` AND c.fila_id = $${params.length}`;
+      }
+
+      query += ` ORDER BY c.ultima_msg_entrada_em ASC`;
+
+      const result = await pool.query(query, params);
+
+      let rows = result.rows;
+
+      // Filtro client-side: sem_resposta (só 1 msg de entrada)
+      if (sem_resposta === true || sem_resposta === 'true') {
+        rows = rows.filter(r => parseInt(r.total_msgs_cliente) <= 1);
+      }
+
+      // Stats por fila
+      const statsPorFila = {};
+      for (const row of rows) {
+        const filaKey = row.fila_id || 'sem_fila';
+        if (!statsPorFila[filaKey]) {
+          statsPorFila[filaKey] = { fila_id: row.fila_id, fila_nome: row.fila_nome || 'Sem fila', total: 0, sem_resposta: 0 };
+        }
+        statsPorFila[filaKey].total++;
+        if (parseInt(row.total_msgs_cliente) <= 1) {
+          statsPorFila[filaKey].sem_resposta++;
+        }
+      }
+
+      return {
+        success: true,
+        data: rows,
+        stats: {
+          total: rows.length,
+          por_fila: Object.values(statsPorFila),
+          sem_resposta: rows.filter(r => parseInt(r.total_msgs_cliente) <= 1).length,
+          com_interacao: rows.filter(r => parseInt(r.total_msgs_cliente) > 1).length,
+        }
+      };
+    } catch (error) {
+      logger.error('Error listing expired tickets:', error);
+      throw error;
+    }
+  });
+
+  // POST /expirados/template-lote — Enviar template em lote
+  fastify.post('/expirados/template-lote', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['conversa_ids', 'template_name'],
+        properties: {
+          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 50 },
+          template_name: { type: 'string' },
+          language_code: { type: 'string', default: 'pt_BR' },
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const empresaId = request.empresaId;
+    const { user } = request;
+    const { conversa_ids, template_name, language_code = 'pt_BR' } = request.body;
+
+    if (!['master', 'admin', 'supervisor'].includes(user.role)) {
+      return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
+    }
+
+    try {
+      // Buscar conversas com dados de conexão WhatsApp
+      const conversasResult = await pool.query(`
+        SELECT c.id, c.contato_whatsapp, c.whatsapp_number_id, c.fila_id,
+               wn.phone_number_id, wn.access_token_encrypted
+        FROM conversas c
+        JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
+        WHERE c.id = ANY($1) AND c.empresa_id = $2 AND c.status = 'ativo'
+      `, [conversa_ids, empresaId]);
+
+      const sucesso = [];
+      const erros = [];
+
+      for (const conversa of conversasResult.rows) {
+        try {
+          const graphToken = decrypt(conversa.access_token_encrypted);
+          const result = await sendTemplateMessage(
+            conversa.phone_number_id, graphToken,
+            conversa.contato_whatsapp, template_name, language_code
+          );
+
+          if (result.wamid) {
+            // Log da mensagem
+            await pool.query(`
+              INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+              VALUES ($1, $2, 'saida', $3, 'operador', $4, 'text', $5, NOW())
+            `, [conversa.id, empresaId, `[Template: ${template_name}]`, user.nome || user.email, result.wamid]);
+
+            sucesso.push(conversa.id);
+          } else {
+            erros.push({ id: conversa.id, phone: conversa.contato_whatsapp, motivo: result.error || 'Falha no envio' });
+          }
+        } catch (err) {
+          erros.push({ id: conversa.id, phone: conversa.contato_whatsapp, motivo: err.message });
+        }
+      }
+
+      logger.info(`Template lote: ${sucesso.length} ok, ${erros.length} erros por ${user.email}`);
+      return { success: true, data: { sucesso: sucesso.length, erros, template: template_name } };
+    } catch (error) {
+      logger.error('Error sending bulk template:', error);
+      throw error;
+    }
+  });
+
+  // POST /expirados/transferir-lote — Transferir fila em lote
+  fastify.post('/expirados/transferir-lote', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['conversa_ids', 'fila_destino_id'],
+        properties: {
+          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1 },
+          fila_destino_id: { type: 'string', format: 'uuid' },
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const empresaId = request.empresaId;
+    const { user } = request;
+    const { conversa_ids, fila_destino_id } = request.body;
+
+    if (!['master', 'admin', 'supervisor'].includes(user.role)) {
+      return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
+    }
+
+    try {
+      const result = await pool.query(
+        `UPDATE conversas SET fila_id = $1, controlado_por = 'fila', atualizado_em = NOW()
+         WHERE id = ANY($2) AND empresa_id = $3 AND status = 'ativo'
+         RETURNING id, fila_id`,
+        [fila_destino_id, conversa_ids, empresaId]
+      );
+
+      // Emit stats
+      const stats = await calcularStatsFila(fila_destino_id);
+      emitFilaStats(fila_destino_id, stats);
+
+      logger.info(`Transferência lote: ${result.rowCount} tickets para fila ${fila_destino_id} por ${user.email}`);
+      return { success: true, data: { transferidos: result.rowCount } };
+    } catch (error) {
+      logger.error('Error bulk transfer:', error);
+      throw error;
+    }
+  });
 }
