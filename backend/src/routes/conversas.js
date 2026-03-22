@@ -2653,7 +2653,7 @@ export default async function conversasRoutes(fastify, opts) {
           c.whatsapp_number_id,
           f.nome as fila_nome,
           a.nome as agente_nome,
-          wn.nome as conexao_nome, wn.phone_number as conexao_phone,
+          wn.nome_exibicao as conexao_nome, wn.phone_number_id as conexao_phone,
           EXTRACT(EPOCH FROM (NOW() - COALESCE(c.ultima_msg_entrada_em, c.criado_em))) / 3600 as horas_expirado,
           (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'entrada') as total_msgs_cliente,
           (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'saida') as total_msgs_saida
