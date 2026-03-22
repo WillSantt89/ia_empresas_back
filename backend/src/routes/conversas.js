@@ -2717,7 +2717,7 @@ export default async function conversasRoutes(fastify, opts) {
     }
   });
 
-  // POST /expirados/template-lote — Enviar template em lote
+  // POST /expirados/template-lote — Fechar tickets + enviar template em lote
   fastify.post('/expirados/template-lote', {
     preHandler: [
       fastify.authenticate,
@@ -2727,10 +2727,11 @@ export default async function conversasRoutes(fastify, opts) {
     schema: {
       body: {
         type: 'object',
-        required: ['conversa_ids', 'template_name'],
+        required: ['conversa_ids', 'template_name', 'whatsapp_number_id'],
         properties: {
           conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 50 },
           template_name: { type: 'string' },
+          whatsapp_number_id: { type: 'string', format: 'uuid' },
           language_code: { type: 'string', default: 'pt_BR' },
         }
       }
@@ -2738,51 +2739,94 @@ export default async function conversasRoutes(fastify, opts) {
   }, async (request, reply) => {
     const empresaId = request.empresaId;
     const { user } = request;
-    const { conversa_ids, template_name, language_code = 'pt_BR' } = request.body;
+    const { conversa_ids, template_name, whatsapp_number_id, language_code = 'pt_BR' } = request.body;
 
     if (!['master', 'admin', 'supervisor'].includes(user.role)) {
       return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
     }
 
     try {
-      // Buscar conversas com dados de conexão WhatsApp
+      // Buscar conexão WhatsApp selecionada
+      const wnResult = await pool.query(
+        'SELECT phone_number_id, access_token_encrypted FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2',
+        [whatsapp_number_id, empresaId]
+      );
+      if (wnResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: 'Conexão WhatsApp não encontrada' });
+      }
+      const { phone_number_id, access_token_encrypted } = wnResult.rows[0];
+      const graphToken = decrypt(access_token_encrypted);
+
+      // Buscar conversas ativas
       const conversasResult = await pool.query(`
-        SELECT c.id, c.contato_whatsapp, c.whatsapp_number_id, c.fila_id,
-               wn.phone_number_id, wn.access_token_encrypted
+        SELECT c.id, c.contato_whatsapp, c.fila_id, c.controlado_por
         FROM conversas c
-        JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
         WHERE c.id = ANY($1) AND c.empresa_id = $2 AND c.status = 'ativo'
       `, [conversa_ids, empresaId]);
 
-      const sucesso = [];
+      const fechados = [];
+      const enviados = [];
       const erros = [];
 
       for (const conversa of conversasResult.rows) {
         try {
-          const graphToken = decrypt(conversa.access_token_encrypted);
+          // 1. Fechar ticket
+          await pool.query(
+            `UPDATE conversas SET status = 'finalizado', atualizado_em = NOW() WHERE id = $1`,
+            [conversa.id]
+          );
+          await pool.query(
+            `UPDATE atendimentos SET status = 'finalizado', finalizado_em = NOW() WHERE conversa_id = $1 AND status = 'ativo'`,
+            [conversa.id]
+          );
+          await pool.query(
+            `INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, humano_id, humano_nome, motivo)
+             VALUES ($1, $2, 'finalizado', $3, NULL, $4, $5, 'Fechado para disparo de template em lote')`,
+            [conversa.id, empresaId, conversa.controlado_por, user.id, user.nome || user.email]
+          );
+
+          // Arquivar Redis + limpar chatbot
+          if (conversa.contato_whatsapp) {
+            const conversationKey = `whatsapp:${conversa.contato_whatsapp}`;
+            archiveConversation(empresaId, conversationKey).catch(() => {});
+            clearFlowState(empresaId, conversa.contato_whatsapp).catch(() => {});
+          }
+
+          emitConversaAtualizada(conversa.id, conversa.fila_id, { id: conversa.id, status: 'finalizado' });
+          fechados.push(conversa.id);
+
+          // 2. Enviar template
           const result = await sendTemplateMessage(
-            conversa.phone_number_id, graphToken,
+            phone_number_id, graphToken,
             conversa.contato_whatsapp, template_name, language_code
           );
 
           if (result.wamid) {
-            // Log da mensagem
-            await pool.query(`
-              INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
-              VALUES ($1, $2, 'saida', $3, 'operador', $4, 'text', $5, NOW())
-            `, [conversa.id, empresaId, `[Template: ${template_name}]`, user.nome || user.email, result.wamid]);
-
-            sucesso.push(conversa.id);
+            enviados.push({ id: conversa.id, phone: conversa.contato_whatsapp });
           } else {
-            erros.push({ id: conversa.id, phone: conversa.contato_whatsapp, motivo: result.error || 'Falha no envio' });
+            erros.push({ phone: conversa.contato_whatsapp, motivo: result.error || 'Falha no envio do template' });
           }
         } catch (err) {
-          erros.push({ id: conversa.id, phone: conversa.contato_whatsapp, motivo: err.message });
+          erros.push({ phone: conversa.contato_whatsapp, motivo: err.message });
         }
       }
 
-      logger.info(`Template lote: ${sucesso.length} ok, ${erros.length} erros por ${user.email}`);
-      return { success: true, data: { sucesso: sucesso.length, erros, template: template_name } };
+      // Atualizar stats das filas afetadas
+      const filasAfetadas = new Set(conversasResult.rows.map(c => c.fila_id).filter(Boolean));
+      for (const filaId of filasAfetadas) {
+        calcularStatsFila(filaId).then(s => emitFilaStats(filaId, s)).catch(() => {});
+      }
+
+      logger.info(`Template lote: ${fechados.length} fechados, ${enviados.length} templates enviados, ${erros.length} erros — por ${user.email}`);
+      return {
+        success: true,
+        data: {
+          fechados: fechados.length,
+          enviados: enviados.length,
+          erros,
+          template: template_name,
+        }
+      };
     } catch (error) {
       logger.error('Error sending bulk template:', error);
       throw error;
