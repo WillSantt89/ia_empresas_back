@@ -2638,32 +2638,38 @@ export default async function conversasRoutes(fastify, opts) {
     const { fila_id, horas_min = 24, horas_max, sem_resposta } = request.query;
 
     try {
+      if (!empresaId) {
+        return reply.code(400).send({ success: false, error: 'empresa_id não identificado' });
+      }
+
+      const horasMinInt = parseInt(horas_min) || 24;
+      const horasMaxInt = horas_max ? parseInt(horas_max) : null;
+
       let query = `
         SELECT
           c.id, c.numero_ticket, c.contato_whatsapp, c.contato_nome,
           c.controlado_por, c.status, c.fila_id, c.agente_id,
           c.criado_em, c.atualizado_em, c.ultima_msg_entrada_em,
-          c.whatsapp_number_id, c.conexao_ativa_id,
+          c.whatsapp_number_id,
           f.nome as fila_nome,
           a.nome as agente_nome,
           wn.nome as conexao_nome, wn.phone_number as conexao_phone,
-          EXTRACT(EPOCH FROM (NOW() - c.ultima_msg_entrada_em)) / 3600 as horas_expirado,
+          EXTRACT(EPOCH FROM (NOW() - COALESCE(c.ultima_msg_entrada_em, c.criado_em))) / 3600 as horas_expirado,
           (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'entrada') as total_msgs_cliente,
-          (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'saida') as total_msgs_saida,
-          cont.nome as contato_nome_salvo, cont.dados_json as contato_dados
+          (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'saida') as total_msgs_saida
         FROM conversas c
         LEFT JOIN filas_atendimento f ON f.id = c.fila_id
         LEFT JOIN agentes a ON a.id = c.agente_id
         LEFT JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
-        LEFT JOIN contatos cont ON cont.id = c.contato_id
         WHERE c.empresa_id = $1
           AND c.status = 'ativo'
-          AND c.ultima_msg_entrada_em < NOW() - INTERVAL '${parseInt(horas_min)} hours'
+          AND COALESCE(c.ultima_msg_entrada_em, c.criado_em) < NOW() - make_interval(hours => $2)
       `;
-      const params = [empresaId];
+      const params = [empresaId, horasMinInt];
 
-      if (horas_max) {
-        query += ` AND c.ultima_msg_entrada_em > NOW() - INTERVAL '${parseInt(horas_max)} hours'`;
+      if (horasMaxInt) {
+        params.push(horasMaxInt);
+        query += ` AND COALESCE(c.ultima_msg_entrada_em, c.criado_em) > NOW() - make_interval(hours => $${params.length})`;
       }
 
       if (fila_id) {
