@@ -28,35 +28,43 @@ const MAX_PER_CYCLE = 50; // Máximo de conversas por ciclo (evita sobrecarga)
 
 async function checkFollowups() {
   try {
-    // 1. Buscar empresas com followup ativo
+    // 1. Buscar todas as configs ativas (por fila e padrão)
     const configsResult = await pool.query(`
-      SELECT cf.*, e.nome as empresa_nome
+      SELECT cf.*, e.nome as empresa_nome, f.nome as fila_nome
       FROM config_followup cf
       JOIN empresas e ON e.id = cf.empresa_id AND e.ativo = true
+      LEFT JOIN filas_atendimento f ON f.id = cf.fila_id
       WHERE cf.ativo = true
     `);
 
     if (configsResult.rows.length === 0) return;
 
+    // Agrupar configs por empresa
+    const configsPorEmpresa = {};
     for (const config of configsResult.rows) {
-      await processEmpresaFollowups(config);
+      if (!configsPorEmpresa[config.empresa_id]) {
+        configsPorEmpresa[config.empresa_id] = { padrao: null, porFila: {} };
+      }
+      if (config.fila_id) {
+        configsPorEmpresa[config.empresa_id].porFila[config.fila_id] = config;
+      } else {
+        configsPorEmpresa[config.empresa_id].padrao = config;
+      }
+    }
+
+    for (const [empresa_id, configs] of Object.entries(configsPorEmpresa)) {
+      await processEmpresaFollowups(empresa_id, configs);
     }
   } catch (error) {
     flog.error({ err: error }, 'Erro no followup checker');
   }
 }
 
-async function processEmpresaFollowups(config) {
-  const { empresa_id, retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento } = config;
-  const retriesArr = Array.isArray(retries) ? retries : [];
-  if (retriesArr.length === 0) return;
-
-  const maxRetries = retriesArr.length;
-
-  // Verificar horário de funcionamento (timezone do servidor = America/Sao_Paulo)
-  if (!isWithinBusinessHours(horario_inicio, horario_fim, dias_semana)) {
-    return;
-  }
+async function processEmpresaFollowups(empresa_id, configs) {
+  // Determinar max retries global (maior entre todas as configs)
+  const allConfigs = [configs.padrao, ...Object.values(configs.porFila)].filter(Boolean);
+  const globalMaxRetries = Math.max(...allConfigs.map(c => (Array.isArray(c.retries) ? c.retries.length : 0)));
+  if (globalMaxRetries === 0) return;
 
   // 2. Buscar conversas elegíveis
   const conversasResult = await pool.query(`
@@ -75,9 +83,20 @@ async function processEmpresaFollowups(config) {
       AND c.whatsapp_number_id IS NOT NULL
     ORDER BY c.atualizado_em ASC
     LIMIT $3
-  `, [empresa_id, maxRetries, MAX_PER_CYCLE]);
+  `, [empresa_id, globalMaxRetries, MAX_PER_CYCLE]);
 
   for (const conversa of conversasResult.rows) {
+    // Resolver config: específica da fila ou padrão
+    const config = (conversa.fila_id && configs.porFila[conversa.fila_id]) || configs.padrao;
+    if (!config || !config.ativo) continue;
+
+    const { retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento } = config;
+    const retriesArr = Array.isArray(retries) ? retries : [];
+    if (retriesArr.length === 0) continue;
+    if (conversa.followup_count >= retriesArr.length) continue;
+
+    // Verificar horário de funcionamento
+    if (!isWithinBusinessHours(horario_inicio, horario_fim, dias_semana)) continue;
     try {
       await processConversaFollowup(conversa, retriesArr, mensagem_encerramento);
     } catch (error) {
