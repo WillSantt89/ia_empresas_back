@@ -2729,7 +2729,7 @@ export default async function conversasRoutes(fastify, opts) {
         type: 'object',
         required: ['conversa_ids', 'template_name', 'whatsapp_number_id'],
         properties: {
-          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 50 },
+          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 500 },
           template_name: { type: 'string' },
           whatsapp_number_id: { type: 'string', format: 'uuid' },
           language_code: { type: 'string', default: 'pt_BR' },
