@@ -2748,14 +2748,14 @@ export default async function conversasRoutes(fastify, opts) {
     try {
       // Buscar conexão WhatsApp selecionada
       const wnResult = await pool.query(
-        'SELECT phone_number_id, access_token_encrypted FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2',
+        'SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true',
         [whatsapp_number_id, empresaId]
       );
       if (wnResult.rows.length === 0) {
         return reply.code(404).send({ success: false, error: 'Conexão WhatsApp não encontrada' });
       }
-      const { phone_number_id, access_token_encrypted } = wnResult.rows[0];
-      const graphToken = decrypt(access_token_encrypted);
+      const { phone_number_id, token_graph_api } = wnResult.rows[0];
+      const graphToken = decrypt(token_graph_api);
 
       // Buscar conversas ativas
       const conversasResult = await pool.query(`
