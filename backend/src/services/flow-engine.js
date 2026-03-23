@@ -128,6 +128,7 @@ async function resolveNextNode(nodes, nextNode, variables) {
       handled: false,
       action: 'assign_agent',
       agentId: nextNodeData.agent_id || null,
+      queueId: nextNodeData.queue_id || null,
       response: nextNodeData.message ? interpolate(nextNodeData.message, variables) : null,
       context: `O cliente completou o fluxo e informou: ${varSummary}. ${nextNodeData.instruction || ''}`,
       variables,

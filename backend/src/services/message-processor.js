@@ -841,12 +841,20 @@ async function processMessageCommon({
                 if (destAgentResult.rows.length > 0) {
                   agent = destAgentResult.rows[0];
                   ({ agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent);
-                  // Atualizar conversa com novo agente
-                  await pool.query(
-                    `UPDATE conversas SET agente_id = $1, controlado_por = 'ia', atualizado_em = NOW() WHERE id = $2`,
-                    [agente_id, conversa_id]
-                  );
-                  createLogger.info({ empresa_id, phone, destAgente: agente_nome }, 'Chatbot transferred to destination agent');
+                  // Atualizar conversa com novo agente + fila (se especificada)
+                  if (flowResult.queueId) {
+                    await pool.query(
+                      `UPDATE conversas SET agente_id = $1, fila_id = $3, controlado_por = 'ia', atualizado_em = NOW() WHERE id = $2`,
+                      [agente_id, conversa_id, flowResult.queueId]
+                    );
+                    createLogger.info({ empresa_id, phone, destAgente: agente_nome, destFila: flowResult.queueId }, 'Chatbot transferred to destination agent + queue');
+                  } else {
+                    await pool.query(
+                      `UPDATE conversas SET agente_id = $1, controlado_por = 'ia', atualizado_em = NOW() WHERE id = $2`,
+                      [agente_id, conversa_id]
+                    );
+                    createLogger.info({ empresa_id, phone, destAgente: agente_nome }, 'Chatbot transferred to destination agent');
+                  }
                 }
               }
 
