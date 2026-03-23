@@ -215,10 +215,11 @@ export async function processFlowNode(fluxoJson, state, userInput) {
 
     // Não bateu — fallback
     if (node.fallback === 'ai') {
-      const optionsList = options.map(o => o.label || o.value).join(', ');
+      const optionsList = options.map(o => `${o.value} - ${o.label || o.value}`).join(', ');
+      const varSummary = Object.keys(variables).length > 0 ? ` Dados já coletados: ${Object.entries(variables).map(([k, v]) => `${k}: ${v}`).join(', ')}.` : '';
       return {
         handled: false,
-        context: `O cliente está no passo "${node.title || nodeId}" do fluxo. As opções válidas são: ${optionsList}. O cliente escreveu: "${inputText}". Responda a dúvida do cliente de forma breve e peça para ele escolher uma das opções válidas.`,
+        context: `O cliente está no passo "${node.title || nodeId}" do fluxo.${varSummary} As opções válidas são: ${optionsList}. O cliente escreveu: "${inputText}". Responda a dúvida do cliente de forma breve e peça para ele escolher uma das opções válidas. NÃO peça dados que já foram coletados.`,
       };
     }
 
@@ -241,9 +242,10 @@ export async function processFlowNode(fluxoJson, state, userInput) {
 
     // Validação falhou
     if (node.fallback === 'ai') {
+      const varSummary = Object.keys(variables).length > 0 ? ` Dados já coletados: ${Object.entries(variables).map(([k, v]) => `${k}: ${v}`).join(', ')}.` : '';
       return {
         handled: false,
-        context: `O cliente está no passo "${node.title || nodeId}" do fluxo. Precisamos que ele informe um ${node.validation || 'texto'} válido. O cliente escreveu: "${inputText}". Responda de forma breve e peça o dado novamente no formato correto.`,
+        context: `O cliente está no passo "${node.title || nodeId}" do fluxo.${varSummary} Precisamos que ele informe um ${node.validation || 'texto'} válido. O cliente escreveu: "${inputText}". Responda de forma breve e peça o dado novamente no formato correto. NÃO peça dados que já foram coletados.`,
       };
     }
 
@@ -265,9 +267,10 @@ export async function processFlowNode(fluxoJson, state, userInput) {
     }
 
     if (node.fallback === 'ai') {
+      const varSummary = Object.keys(variables).length > 0 ? ` Dados já coletados: ${Object.entries(variables).map(([k, v]) => `${k}: ${v}`).join(', ')}.` : '';
       return {
         handled: false,
-        context: `O cliente está no passo "${node.title || nodeId}" do fluxo. Precisamos de uma confirmação (sim ou não). O cliente escreveu: "${inputText}". Responda de forma breve e peça para confirmar com sim ou não.`,
+        context: `O cliente está no passo "${node.title || nodeId}" do fluxo.${varSummary} Precisamos de uma confirmação (sim ou não). O cliente escreveu: "${inputText}". Responda de forma breve e peça para confirmar com sim ou não. NÃO peça dados que já foram coletados.`,
       };
     }
 
