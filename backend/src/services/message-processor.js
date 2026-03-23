@@ -826,6 +826,9 @@ async function processMessageCommon({
                 `, [conversa_id, empresa_id, flowResult.response, agente_nome, sendResult.wamid]);
               }
 
+              // Guardar agente antes da troca para saber se mudou
+              const agenteAntesDaTroca = agente_id;
+
               // Se tem agente destino específico, trocar o agente
               if (flowResult.agentId && flowResult.agentId !== agente_id) {
                 const destAgentResult = await pool.query(`
@@ -848,7 +851,10 @@ async function processMessageCommon({
               }
 
               // Verificar se o agente destino tem chatbot — iniciar fluxo em vez de IA
-              if (agent.chatbot_ativo && agent.chatbot_fluxo_id) {
+              // SÓ se o agente MUDOU (veio de outro agente, ex: Triagem → FGTS)
+              // Se é o mesmo agente, o fluxo dele acabou de completar — ir pra IA
+              const agenteMudou = agente_id !== agenteAntesDaTroca;
+              if (agent.chatbot_ativo && agent.chatbot_fluxo_id && agenteMudou) {
                 const destFluxoResult = await pool.query(
                   'SELECT fluxo_json FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2 AND ativo = true',
                   [agent.chatbot_fluxo_id, empresa_id]
