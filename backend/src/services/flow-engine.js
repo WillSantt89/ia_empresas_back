@@ -207,7 +207,7 @@ export async function processFlowNode(fluxoJson, state, userInput) {
 
     if (matched) {
       if (node.variable) {
-        variables[node.variable] = matched.value;
+        variables[node.variable] = matched.label || matched.value;
       }
       const nextNode = matched.next || node.next;
       return await resolveNextNode(nodes, nextNode, variables);

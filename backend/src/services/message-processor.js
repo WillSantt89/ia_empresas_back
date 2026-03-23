@@ -899,9 +899,9 @@ async function processMessageCommon({
 
               // Sem chatbot no destino — adicionar contexto e continuar pra IA
               if (flowResult.context) {
-                addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
+                await addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`);
               }
-              addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+              await addToHistory(empresa_id, conversationKey, 'user', historyText);
               createLogger.info({ empresa_id, phone, agente: agente_nome, variables: flowResult.variables }, 'Chatbot flow assigned to agent (no dest chatbot)');
               // Continua para processamento pela IA (não retorna)
             }
