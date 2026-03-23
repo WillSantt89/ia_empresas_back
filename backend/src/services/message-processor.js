@@ -847,12 +847,56 @@ async function processMessageCommon({
                 }
               }
 
-              // Adicionar contexto do fluxo ao histórico para IA usar
+              // Verificar se o agente destino tem chatbot — iniciar fluxo em vez de IA
+              if (agent.chatbot_ativo && agent.chatbot_fluxo_id) {
+                const destFluxoResult = await pool.query(
+                  'SELECT fluxo_json FROM chatbot_fluxos WHERE id = $1 AND empresa_id = $2 AND ativo = true',
+                  [agent.chatbot_fluxo_id, empresa_id]
+                );
+                let destFluxoJson = destFluxoResult.rows[0]?.fluxo_json;
+                if (typeof destFluxoJson === 'string') {
+                  try { destFluxoJson = JSON.parse(destFluxoJson); } catch { destFluxoJson = null; }
+                }
+
+                if (destFluxoJson && destFluxoJson.nodes && destFluxoJson.start_node) {
+                  // Iniciar chatbot do agente destino
+                  const destFlowResult = await startFlow(empresa_id, phone, agent.chatbot_fluxo_id, destFluxoJson);
+                  if (destFlowResult?.response) {
+                    const sendResult2 = await sendTextMessage(phoneNumberId, graphToken, phone, destFlowResult.response);
+                    const flowLogResult2 = await pool.query(`
+                      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+                      VALUES ($1, $2, 'saida', $3, 'chatbot', $4, 'text', $5, NOW())
+                      RETURNING id, criado_em
+                    `, [conversa_id, empresa_id, destFlowResult.response, agente_nome, sendResult2.wamid]);
+
+                    if (flowLogResult2.rows[0]) {
+                      const conversaForFluxo2 = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+                      emitNovaMensagem(conversa_id, conversaForFluxo2.rows[0]?.fila_id, {
+                        id: flowLogResult2.rows[0].id,
+                        conversa_id,
+                        conteudo: destFlowResult.response,
+                        direcao: 'saida',
+                        remetente_tipo: 'chatbot',
+                        remetente_nome: agente_nome,
+                        tipo_mensagem: 'text',
+                        criado_em: flowLogResult2.rows[0].criado_em,
+                      });
+                    }
+
+                    addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+                    addToHistory(empresa_id, conversationKey, 'model', destFlowResult.response).catch(() => {});
+                    createLogger.info({ empresa_id, phone, destAgente: agente_nome, fluxoId: agent.chatbot_fluxo_id }, 'Assign agent → destination chatbot started');
+                    return;
+                  }
+                }
+              }
+
+              // Sem chatbot no destino — adicionar contexto e continuar pra IA
               if (flowResult.context) {
                 addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`).catch(() => {});
               }
               addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
-              createLogger.info({ empresa_id, phone, agente: agente_nome, variables: flowResult.variables }, 'Chatbot flow assigned to agent');
+              createLogger.info({ empresa_id, phone, agente: agente_nome, variables: flowResult.variables }, 'Chatbot flow assigned to agent (no dest chatbot)');
               // Continua para processamento pela IA (não retorna)
             }
 
