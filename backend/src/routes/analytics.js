@@ -634,6 +634,191 @@ const analyticsRoutes = async (fastify) => {
       throw error;
     }
   });
+  /**
+   * GET /api/analytics/operacional
+   * Dashboard operacional: conversas, funil, operadores, por fila
+   */
+  fastify.get('/operacional', {
+    preHandler: fastify.authenticate,
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          data: { type: 'string', format: 'date' },
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const empresa_id = request.user.empresa_id;
+    const data = request.query.data || new Date().toISOString().split('T')[0];
+
+    try {
+      // 1. Resumo do dia
+      const resumoResult = await pool.query(`
+        SELECT
+          COUNT(*) as conversas_novas,
+          COUNT(DISTINCT c.contato_whatsapp) as telefones_unicos,
+          COUNT(CASE WHEN primeira.primeira_vez::date = $2::date THEN 1 END) as clientes_novos
+        FROM conversas c
+        LEFT JOIN (
+          SELECT contato_whatsapp, MIN(criado_em) as primeira_vez
+          FROM conversas WHERE empresa_id = $1
+          GROUP BY contato_whatsapp
+        ) primeira ON primeira.contato_whatsapp = c.contato_whatsapp
+        WHERE c.empresa_id = $1 AND c.criado_em::date = $2::date
+      `, [empresa_id, data]);
+
+      const resumo = resumoResult.rows[0];
+      resumo.clientes_retorno = resumo.conversas_novas - resumo.clientes_novos;
+
+      // 2. Engajamento (responderam vs abandonaram)
+      const engajamentoResult = await pool.query(`
+        SELECT
+          COUNT(*) as total,
+          COUNT(CASE WHEN msgs_cliente > 1 THEN 1 END) as responderam,
+          COUNT(CASE WHEN msgs_cliente <= 1 THEN 1 END) as abandonaram,
+          AVG(CASE WHEN finalizado_em IS NOT NULL THEN EXTRACT(EPOCH FROM (finalizado_em - c.criado_em)) END) as tempo_medio_seg
+        FROM conversas c
+        LEFT JOIN (
+          SELECT conversa_id, COUNT(*) as msgs_cliente
+          FROM mensagens_log WHERE direcao = 'entrada' AND empresa_id = $1
+          GROUP BY conversa_id
+        ) ml ON ml.conversa_id = c.id
+        WHERE c.empresa_id = $1 AND c.criado_em::date = $2::date
+      `, [empresa_id, data]);
+
+      const engajamento = engajamentoResult.rows[0];
+
+      // 3. Por fila
+      const filasResult = await pool.query(`
+        SELECT
+          COALESCE(f.nome, 'Sem fila') as fila_nome,
+          c.fila_id,
+          COUNT(*) as total,
+          COUNT(CASE WHEN ml.msgs_cliente > 1 THEN 1 END) as responderam,
+          COUNT(CASE WHEN ml.msgs_cliente <= 1 THEN 1 END) as abandonaram,
+          AVG(CASE WHEN c.finalizado_em IS NOT NULL THEN EXTRACT(EPOCH FROM (c.finalizado_em - c.criado_em)) END) as tempo_medio_seg
+        FROM conversas c
+        LEFT JOIN filas_atendimento f ON f.id = c.fila_id
+        LEFT JOIN (
+          SELECT conversa_id, COUNT(*) as msgs_cliente
+          FROM mensagens_log WHERE direcao = 'entrada' AND empresa_id = $1
+          GROUP BY conversa_id
+        ) ml ON ml.conversa_id = c.id
+        WHERE c.empresa_id = $1 AND c.criado_em::date = $2::date
+        GROUP BY f.nome, c.fila_id
+        ORDER BY total DESC
+      `, [empresa_id, data]);
+
+      // 4. Por hora
+      const porHoraResult = await pool.query(`
+        SELECT
+          EXTRACT(HOUR FROM criado_em) as hora,
+          COUNT(*) as total
+        FROM conversas
+        WHERE empresa_id = $1 AND criado_em::date = $2::date
+        GROUP BY EXTRACT(HOUR FROM criado_em)
+        ORDER BY hora
+      `, [empresa_id, data]);
+
+      // 5. Performance operadores
+      const operadoresResult = await pool.query(`
+        SELECT
+          u.id as operador_id,
+          u.nome as operador_nome,
+          COUNT(DISTINCT ml.conversa_id) as atendimentos,
+          COUNT(ml.id) as msgs_enviadas,
+          MIN(ml.criado_em) as primeira_msg,
+          MAX(ml.criado_em) as ultima_msg,
+          EXTRACT(EPOCH FROM (MAX(ml.criado_em) - MIN(ml.criado_em))) as tempo_ativo_seg
+        FROM mensagens_log ml
+        JOIN usuarios u ON u.id = ml.remetente_id
+        WHERE ml.empresa_id = $1
+          AND ml.criado_em::date = $2::date
+          AND ml.direcao = 'saida'
+          AND ml.remetente_tipo = 'operador'
+        GROUP BY u.id, u.nome
+        ORDER BY atendimentos DESC
+      `, [empresa_id, data]);
+
+      // 6. Funil chatbot
+      const funilResult = await pool.query(`
+        SELECT
+          COUNT(*) as total_conversas,
+          COUNT(CASE WHEN ml_total.msgs > 0 THEN 1 END) as receberam_resposta,
+          COUNT(CASE WHEN ml_bot.msgs_bot > 0 THEN 1 END) as passaram_chatbot,
+          COUNT(CASE WHEN ml_ia.msgs_ia > 0 THEN 1 END) as chegaram_ia
+        FROM conversas c
+        LEFT JOIN (
+          SELECT conversa_id, COUNT(*) as msgs FROM mensagens_log WHERE direcao = 'saida' AND empresa_id = $1 GROUP BY conversa_id
+        ) ml_total ON ml_total.conversa_id = c.id
+        LEFT JOIN (
+          SELECT conversa_id, COUNT(*) as msgs_bot FROM mensagens_log WHERE remetente_tipo = 'chatbot' AND empresa_id = $1 GROUP BY conversa_id
+        ) ml_bot ON ml_bot.conversa_id = c.id
+        LEFT JOIN (
+          SELECT conversa_id, COUNT(*) as msgs_ia FROM mensagens_log WHERE remetente_tipo = 'ia' AND empresa_id = $1 GROUP BY conversa_id
+        ) ml_ia ON ml_ia.conversa_id = c.id
+        WHERE c.empresa_id = $1 AND c.criado_em::date = $2::date
+      `, [empresa_id, data]);
+
+      // 7. Tabela de conversas (últimas 100)
+      const conversasResult = await pool.query(`
+        SELECT
+          c.id, c.numero_ticket, c.contato_whatsapp, c.contato_nome,
+          c.status, c.controlado_por, c.criado_em, c.finalizado_em,
+          f.nome as fila_nome,
+          COALESCE(ml_in.msgs, 0) as msgs_cliente,
+          COALESCE(ml_out.msgs, 0) as msgs_saida,
+          CASE WHEN c.finalizado_em IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (c.finalizado_em - c.criado_em))
+            ELSE EXTRACT(EPOCH FROM (NOW() - c.criado_em))
+          END as duracao_seg
+        FROM conversas c
+        LEFT JOIN filas_atendimento f ON f.id = c.fila_id
+        LEFT JOIN (SELECT conversa_id, COUNT(*) as msgs FROM mensagens_log WHERE direcao = 'entrada' GROUP BY conversa_id) ml_in ON ml_in.conversa_id = c.id
+        LEFT JOIN (SELECT conversa_id, COUNT(*) as msgs FROM mensagens_log WHERE direcao = 'saida' GROUP BY conversa_id) ml_out ON ml_out.conversa_id = c.id
+        WHERE c.empresa_id = $1 AND c.criado_em::date = $2::date
+        ORDER BY c.criado_em DESC
+        LIMIT 100
+      `, [empresa_id, data]);
+
+      return {
+        success: true,
+        data: {
+          data_filtro: data,
+          resumo: {
+            conversas_novas: parseInt(resumo.conversas_novas),
+            clientes_novos: parseInt(resumo.clientes_novos),
+            clientes_retorno: parseInt(resumo.clientes_retorno),
+            telefones_unicos: parseInt(resumo.telefones_unicos),
+            responderam: parseInt(engajamento.responderam || 0),
+            abandonaram: parseInt(engajamento.abandonaram || 0),
+            taxa_resposta: engajamento.total > 0 ? Math.round((engajamento.responderam / engajamento.total) * 100) : 0,
+            tempo_medio_min: engajamento.tempo_medio_seg ? Math.round(engajamento.tempo_medio_seg / 60) : 0,
+          },
+          funil: funilResult.rows[0],
+          por_fila: filasResult.rows.map(f => ({
+            ...f,
+            total: parseInt(f.total),
+            responderam: parseInt(f.responderam),
+            abandonaram: parseInt(f.abandonaram),
+            tempo_medio_min: f.tempo_medio_seg ? Math.round(f.tempo_medio_seg / 60) : 0,
+          })),
+          por_hora: porHoraResult.rows.map(h => ({ hora: parseInt(h.hora), total: parseInt(h.total) })),
+          operadores: operadoresResult.rows.map(op => ({
+            ...op,
+            atendimentos: parseInt(op.atendimentos),
+            msgs_enviadas: parseInt(op.msgs_enviadas),
+            tempo_ativo_min: op.tempo_ativo_seg ? Math.round(op.tempo_ativo_seg / 60) : 0,
+          })),
+          conversas: conversasResult.rows,
+        }
+      };
+    } catch (error) {
+      createLogger.error({ err: error, empresa_id }, 'Error in operacional analytics');
+      throw error;
+    }
+  });
 };
 
 export default analyticsRoutes;
