@@ -677,7 +677,7 @@ const analyticsRoutes = async (fastify) => {
           COUNT(*) as total,
           COUNT(CASE WHEN msgs_cliente > 1 THEN 1 END) as responderam,
           COUNT(CASE WHEN msgs_cliente <= 1 THEN 1 END) as abandonaram,
-          AVG(CASE WHEN finalizado_em IS NOT NULL THEN EXTRACT(EPOCH FROM (finalizado_em - c.criado_em)) END) as tempo_medio_seg
+          AVG(CASE WHEN c.status = 'finalizado' THEN EXTRACT(EPOCH FROM (c.atualizado_em - c.criado_em)) END) as tempo_medio_seg
         FROM conversas c
         LEFT JOIN (
           SELECT conversa_id, COUNT(*) as msgs_cliente
@@ -697,7 +697,7 @@ const analyticsRoutes = async (fastify) => {
           COUNT(*) as total,
           COUNT(CASE WHEN ml.msgs_cliente > 1 THEN 1 END) as responderam,
           COUNT(CASE WHEN ml.msgs_cliente <= 1 THEN 1 END) as abandonaram,
-          AVG(CASE WHEN c.finalizado_em IS NOT NULL THEN EXTRACT(EPOCH FROM (c.finalizado_em - c.criado_em)) END) as tempo_medio_seg
+          AVG(CASE WHEN c.status = 'finalizado' THEN EXTRACT(EPOCH FROM (c.atualizado_em - c.criado_em)) END) as tempo_medio_seg
         FROM conversas c
         LEFT JOIN filas_atendimento f ON f.id = c.fila_id
         LEFT JOIN (
@@ -765,12 +765,12 @@ const analyticsRoutes = async (fastify) => {
       const conversasResult = await pool.query(`
         SELECT
           c.id, c.numero_ticket, c.contato_whatsapp, c.contato_nome,
-          c.status, c.controlado_por, c.criado_em, c.finalizado_em,
+          c.status, c.controlado_por, c.criado_em, c.atualizado_em,
           f.nome as fila_nome,
           COALESCE(ml_in.msgs, 0) as msgs_cliente,
           COALESCE(ml_out.msgs, 0) as msgs_saida,
-          CASE WHEN c.finalizado_em IS NOT NULL
-            THEN EXTRACT(EPOCH FROM (c.finalizado_em - c.criado_em))
+          CASE WHEN c.atualizado_em IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (c.atualizado_em - c.criado_em))
             ELSE EXTRACT(EPOCH FROM (NOW() - c.criado_em))
           END as duracao_seg
         FROM conversas c
