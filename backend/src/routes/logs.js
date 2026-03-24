@@ -48,7 +48,10 @@ export default async function logsRoutes(fastify, opts) {
           ml.latencia_ms,
           ml.erro,
           ml.criado_em,
-                    c.contato_whatsapp,
+          ml.remetente_tipo,
+          c.contato_whatsapp,
+          c.contato_nome,
+          c.numero_ticket,
           a.nome as agente_nome,
           ak.nome_exibicao as api_key_nome
         FROM mensagens_log ml
