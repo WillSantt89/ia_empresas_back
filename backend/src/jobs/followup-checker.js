@@ -23,8 +23,8 @@ import { emitNovaMensagem, emitConversaAtualizada } from '../services/websocket.
 const flog = logger.child({ module: 'followup-checker' });
 
 let intervalId = null;
-const INTERVAL_MS = 2 * 60 * 1000; // 2 minutos
-const MAX_PER_CYCLE = 50; // Máximo de conversas por ciclo (evita sobrecarga)
+const INTERVAL_MS = 1 * 60 * 1000; // 1 minuto
+const MAX_PER_CYCLE = 3000; // Máximo de conversas por ciclo
 
 async function checkFollowups() {
   try {
