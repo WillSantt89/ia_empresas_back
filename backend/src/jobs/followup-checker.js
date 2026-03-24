@@ -126,13 +126,16 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
 
   // Buscar última mensagem de SAÍDA (do agente/ia) para esta conversa
   const ultimaSaidaResult = await pool.query(`
-    SELECT criado_em FROM mensagens_log
+    SELECT criado_em, remetente_tipo FROM mensagens_log
     WHERE conversa_id = $1 AND direcao = 'saida'
     ORDER BY criado_em DESC LIMIT 1
   `, [conversa_id]);
 
   if (ultimaSaidaResult.rows.length === 0) return;
   const ultimaSaidaEm = new Date(ultimaSaidaResult.rows[0].criado_em);
+
+  // Se última saída foi do CHATBOT, pular — fluxo de chatbot ativo, não interferir
+  if (ultimaSaidaResult.rows[0].remetente_tipo === 'chatbot') return;
 
   // Buscar última mensagem de ENTRADA (do cliente) depois da última saída
   const ultimaEntradaResult = await pool.query(`
