@@ -136,39 +136,22 @@ async function cleanOldLogs() {
 
 async function createResetNotification() {
   await pool.query(`
-    INSERT INTO notificacoes (
-      id, empresa_id, tipo, titulo, mensagem,
-      severidade, lida, criado_em
-    )
-    VALUES (
-      gen_random_uuid(),
-      NULL, -- notificação global
-      'daily_reset',
-      'Reset diário concluído',
+    INSERT INTO notificacoes (id, empresa_id, tipo, titulo, mensagem, severidade, lida, criado_em)
+    SELECT gen_random_uuid(), id, 'daily_reset', 'Reset diário concluído',
       'Os contadores diários foram resetados com sucesso às ' || TO_CHAR(NOW(), 'HH24:MI'),
-      'info',
-      false,
-      NOW()
-    )
+      'info', false, NOW()
+    FROM empresas WHERE ativo = true
   `);
 }
 
 async function createErrorNotification(error) {
   await pool.query(`
-    INSERT INTO notificacoes (
-      id, empresa_id, tipo, titulo, mensagem,
-      severidade, lida, criado_em
-    )
-    VALUES (
-      gen_random_uuid(),
-      NULL, -- notificação global
-      'daily_reset_error',
+    INSERT INTO notificacoes (id, empresa_id, tipo, titulo, mensagem, severidade, lida, criado_em)
+    SELECT gen_random_uuid(), id, 'daily_reset_error',
       'Erro no reset diário',
       'Falha ao executar reset diário: ' || $1,
-      'critical',
-      false,
-      NOW()
-    )
+      'critical', false, NOW()
+    FROM empresas WHERE ativo = true
   `, [error.message]);
 }
 
