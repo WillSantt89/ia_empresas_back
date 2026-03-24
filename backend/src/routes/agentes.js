@@ -75,6 +75,7 @@ const agentesRoutes = async (fastify) => {
           a.cache_enabled,
           a.gemini_cache_id,
           a.cache_expires_at,
+          a.cache_auto_renew,
           a.mensagem_midia_nao_suportada,
           a.fila_id,
           a.chatbot_fluxo_id,

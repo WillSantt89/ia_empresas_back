@@ -63,6 +63,7 @@ import { initializeWebSocket } from './services/websocket.js';
 import timeoutChecker from './jobs/timeout-checker.js';
 import dailyReset from './jobs/daily-reset.js';
 import followupChecker from './jobs/followup-checker.js';
+import cacheMonitor from './jobs/cache-monitor.js';
 
 // Import Bull Board (queue dashboard)
 import { createBullBoard } from '@bull-board/api';
@@ -416,6 +417,7 @@ async function start() {
     timeoutChecker.start();
     dailyReset.start();
     followupChecker.start();
+    cacheMonitor.start();
     logger.info('Background jobs started');
   } catch (error) {
     logger.fatal(error, 'Failed to start server');
