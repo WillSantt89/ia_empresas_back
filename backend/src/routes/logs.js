@@ -137,13 +137,15 @@ export default async function logsRoutes(fastify, opts) {
       // Estatísticas da página
       const statsResult = await pool.query(`
         SELECT
-          SUM(tokens_input + tokens_output) as total_tokens,
-          AVG(latencia_ms) as latencia_media,
-          COUNT(*) FILTER (WHERE erro IS NOT NULL) as total_erros,
-          COUNT(DISTINCT conversa_id) as conversas_unicas,
-          COUNT(DISTINCT modelo_usado) as modelos_unicos
-        FROM mensagens_log
-        WHERE empresa_id = $1
+          SUM(ml.tokens_input + ml.tokens_output) as total_tokens,
+          AVG(ml.latencia_ms) as latencia_media,
+          COUNT(*) FILTER (WHERE ml.erro IS NOT NULL) as total_erros,
+          COUNT(DISTINCT ml.conversa_id) as conversas_unicas,
+          COUNT(DISTINCT ml.modelo_usado) as modelos_unicos
+        FROM mensagens_log ml
+        JOIN conversas c ON c.id = ml.conversa_id
+        LEFT JOIN agentes a ON a.id = c.agente_id
+        WHERE ml.empresa_id = $1
           ${conditions.length > 0 ? 'AND ' + conditions.join(' AND ') : ''}
       `, params.slice(0, -2));
 
