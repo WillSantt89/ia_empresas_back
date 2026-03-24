@@ -23,10 +23,17 @@ import { emitNovaMensagem, emitConversaAtualizada } from '../services/websocket.
 const flog = logger.child({ module: 'followup-checker' });
 
 let intervalId = null;
+let isRunning = false;
 const INTERVAL_MS = 1 * 60 * 1000; // 1 minuto
 const MAX_PER_CYCLE = 3000; // Máximo de conversas por ciclo
 
 async function checkFollowups() {
+  // Lock para evitar execução paralela (ciclo anterior ainda rodando)
+  if (isRunning) {
+    flog.warn('Followup checker still running from previous cycle, skipping');
+    return;
+  }
+  isRunning = true;
   try {
     // 1. Buscar todas as configs ativas (por fila e padrão)
     const configsResult = await pool.query(`
@@ -37,7 +44,7 @@ async function checkFollowups() {
       WHERE cf.ativo = true
     `);
 
-    if (configsResult.rows.length === 0) return;
+    if (configsResult.rows.length === 0) { isRunning = false; return; }
 
     // Agrupar configs por empresa
     const configsPorEmpresa = {};
@@ -57,6 +64,8 @@ async function checkFollowups() {
     }
   } catch (error) {
     flog.error({ err: error }, 'Erro no followup checker');
+  } finally {
+    isRunning = false;
   }
 }
 
@@ -178,20 +187,36 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
     return;
   }
 
-  // Enviar followup conforme tipo
-  if (retryConfig.tipo === 'fixo') {
-    await enviarFollowupFixo(conversa, retryConfig.mensagem_fixa, retryNumero, totalRetries);
-  } else {
-    await enviarFollowupIA(conversa, retryNumero, totalRetries);
-  }
-
-  // Atualizar contadores
-  await pool.query(
-    `UPDATE conversas SET followup_count = followup_count + 1, followup_ultimo_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
-    [conversa_id]
+  // Reservar conversa atomicamente (incrementar ANTES de enviar para evitar duplicatas)
+  const reserveResult = await pool.query(
+    `UPDATE conversas SET followup_count = followup_count + 1, followup_ultimo_em = NOW(), atualizado_em = NOW()
+     WHERE id = $1 AND followup_count = $2
+     RETURNING id`,
+    [conversa_id, followup_count]
   );
 
-  flog.info({ conversa_id, empresa_id: conversa.empresa_id, retry: followup_count + 1 }, 'Follow-up enviado');
+  // Se não reservou (outro ciclo já processou), pular
+  if (reserveResult.rows.length === 0) {
+    flog.info({ conversa_id }, 'Followup already processed by another cycle, skipping');
+    return;
+  }
+
+  // Enviar followup conforme tipo
+  try {
+    if (retryConfig.tipo === 'fixo') {
+      await enviarFollowupFixo(conversa, retryConfig.mensagem_fixa, retryNumero, totalRetries);
+    } else {
+      await enviarFollowupIA(conversa, retryNumero, totalRetries);
+    }
+    flog.info({ conversa_id, empresa_id: conversa.empresa_id, retry: retryNumero }, 'Follow-up enviado');
+  } catch (sendErr) {
+    // Se falhar o envio, reverter o contador
+    await pool.query(
+      `UPDATE conversas SET followup_count = followup_count - 1, followup_ultimo_em = NULL, atualizado_em = NOW() WHERE id = $1`,
+      [conversa_id]
+    );
+    throw sendErr;
+  }
 }
 
 /**
