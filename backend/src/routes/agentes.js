@@ -36,6 +36,7 @@ const agentesRoutes = async (fastify) => {
       fila_id: { type: ['string', 'null'], format: 'uuid' },
       chatbot_fluxo_id: { type: ['string', 'null'], format: 'uuid' },
       chatbot_ativo: { type: 'boolean' },
+      cache_auto_renew: { type: 'boolean' },
     }
   };
 
