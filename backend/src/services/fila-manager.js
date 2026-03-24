@@ -114,6 +114,7 @@ export async function calcularStatsFilas(empresaId, filaIds = null) {
     `SELECT
        fa.id as fila_id,
        fa.nome,
+       COUNT(c.id) FILTER (WHERE c.status = 'ativo') as total_ativos,
        COUNT(c.id) FILTER (WHERE c.status = 'ativo' AND c.operador_id IS NULL) as aguardando,
        COUNT(c.id) FILTER (WHERE c.status = 'ativo' AND c.operador_id IS NOT NULL AND c.controlado_por = 'humano') as em_atendimento,
        COUNT(DISTINCT c.operador_id) FILTER (WHERE c.status = 'ativo') as operadores_atendendo,
@@ -131,6 +132,7 @@ export async function calcularStatsFilas(empresaId, filaIds = null) {
 
   return result.rows.map(r => ({
     ...r,
+    total_ativos: parseInt(r.total_ativos) || 0,
     aguardando: parseInt(r.aguardando) || 0,
     em_atendimento: parseInt(r.em_atendimento) || 0,
     operadores_atendendo: parseInt(r.operadores_atendendo) || 0,
@@ -145,6 +147,7 @@ export async function calcularStatsFilas(empresaId, filaIds = null) {
 export async function calcularStatsFila(filaId) {
   const result = await pool.query(
     `SELECT
+       COUNT(c.id) as total_ativos,
        COUNT(c.id) FILTER (WHERE c.operador_id IS NULL) as aguardando,
        COUNT(c.id) FILTER (WHERE c.operador_id IS NOT NULL AND c.controlado_por = 'humano') as em_atendimento,
        (SELECT COUNT(*) FROM fila_membros fm
@@ -156,9 +159,11 @@ export async function calcularStatsFila(filaId) {
     [filaId]
   );
 
-  const row = result.rows[0] || { aguardando: 0, em_atendimento: 0, membros_online: 0, membros_total: 0 };
+  const row = result.rows[0] || { total_ativos: 0, aguardando: 0, em_atendimento: 0, membros_online: 0, membros_total: 0 };
   return {
     ...row,
+    fila_id: filaId,
+    total_ativos: parseInt(row.total_ativos) || 0,
     aguardando: parseInt(row.aguardando) || 0,
     em_atendimento: parseInt(row.em_atendimento) || 0,
     membros_online: parseInt(row.membros_online) || 0,
