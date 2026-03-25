@@ -3077,10 +3077,25 @@ export default async function conversasRoutes(fastify, opts) {
           const result = await sendTextMessage(phone_number_id, graphToken, conversa.contato_whatsapp, mensagem);
 
           if (result.wamid) {
-            await pool.query(`
+            const logResult = await pool.query(`
               INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
-              VALUES ($1, $2, 'saida', $3, 'operador', $4, 'text', $5, NOW())
+              VALUES ($1, $2, 'saida', $3, 'mensagem_lote', $4, 'text', $5, NOW())
+              RETURNING id, criado_em
             `, [conversa.id, empresaId, mensagem, user.nome || user.email, result.wamid]);
+
+            // Emitir WebSocket para aparecer no chat
+            if (logResult.rows[0]) {
+              emitNovaMensagem(conversa.id, conversa.fila_id, {
+                id: logResult.rows[0].id,
+                conversa_id: conversa.id,
+                conteudo: mensagem,
+                direcao: 'saida',
+                remetente_tipo: 'mensagem_lote',
+                remetente_nome: user.nome || user.email,
+                tipo_mensagem: 'text',
+                criado_em: logResult.rows[0].criado_em,
+              });
+            }
 
             enviados.push({ id: conversa.id, phone: conversa.contato_whatsapp });
           } else {
