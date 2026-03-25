@@ -1764,6 +1764,60 @@ export default async function conversasRoutes(fastify, opts) {
     }
   });
 
+  // POST /nota-privada — Nota privada (não envia ao WhatsApp)
+  fastify.post('/nota-privada', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { user } = request;
+    const empresaId = request.empresaId || request.user.empresa_id;
+    const { conversa_id, conteudo } = request.body;
+
+    if (!conversa_id || !conteudo) {
+      return reply.code(400).send({ success: false, error: { message: 'conversa_id e conteudo são obrigatórios' } });
+    }
+
+    // Verificar conversa existe
+    const conversaResult = await pool.query(
+      'SELECT id, fila_id FROM conversas WHERE id = $1 AND empresa_id = $2',
+      [conversa_id, empresaId]
+    );
+    if (conversaResult.rows.length === 0) {
+      return reply.code(404).send({ success: false, error: { message: 'Conversa não encontrada' } });
+    }
+
+    try {
+      const result = await pool.query(`
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, tipo_mensagem, criado_em)
+        VALUES ($1, $2, 'saida', $3, 'nota_privada', $4, $5, 'text', NOW())
+        RETURNING id, criado_em
+      `, [conversa_id, empresaId, conteudo.trim(), user.id, user.nome || user.email]);
+
+      const nota = result.rows[0];
+      const fila_id = conversaResult.rows[0].fila_id;
+
+      // Emitir WebSocket para operadores verem em tempo real
+      emitNovaMensagem(conversa_id, fila_id, {
+        id: nota.id,
+        conversa_id,
+        conteudo: conteudo.trim(),
+        direcao: 'saida',
+        remetente_tipo: 'nota_privada',
+        remetente_nome: user.nome || user.email,
+        tipo_mensagem: 'text',
+        criado_em: nota.criado_em,
+      });
+
+      reply.send({ success: true, data: nota });
+    } catch (error) {
+      logger.error('Erro ao salvar nota privada:', error);
+      reply.code(500).send({ success: false, error: { message: 'Erro ao salvar nota privada' } });
+    }
+  });
+
   // ============================================
   // POST /enviar-template — Operador envia template WhatsApp
   // ============================================
