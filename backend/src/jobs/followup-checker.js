@@ -134,8 +134,20 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
   if (ultimaSaidaResult.rows.length === 0) return;
   const ultimaSaidaEm = new Date(ultimaSaidaResult.rows[0].criado_em);
 
+  const ultimoRemetente = ultimaSaidaResult.rows[0].remetente_tipo;
+
   // Se última saída foi do CHATBOT, pular — fluxo de chatbot ativo, não interferir
-  if (ultimaSaidaResult.rows[0].remetente_tipo === 'chatbot') return;
+  if (ultimoRemetente === 'chatbot') return;
+
+  // Se última saída foi da IA (não follow-up), resetar contador
+  // A IA acabou de responder, dar tempo ao cliente antes de fazer follow-up
+  if (ultimoRemetente === 'ia' && followup_count > 0) {
+    await pool.query(
+      `UPDATE conversas SET followup_count = 0, followup_ultimo_em = NULL, atualizado_em = NOW() WHERE id = $1`,
+      [conversa_id]
+    );
+    return;
+  }
 
   // Buscar última mensagem de ENTRADA (do cliente) depois da última saída
   const ultimaEntradaResult = await pool.query(`
@@ -153,10 +165,9 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
     return;
   }
 
-  // Verificar se já passou tempo suficiente desde a última saída (ou último followup)
-  const referencia = conversa.followup_ultimo_em
-    ? new Date(conversa.followup_ultimo_em)
-    : ultimaSaidaEm;
+  // Referência de tempo: SEMPRE a última saída (não o followup_ultimo_em)
+  // Garante que conta desde a última resposta real (IA ou follow-up)
+  const referencia = ultimaSaidaEm;
 
   const agora = new Date();
   if (agora - referencia < intervaloMs) return; // Ainda não é hora
