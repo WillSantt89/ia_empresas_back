@@ -33,7 +33,7 @@ const agentesRoutes = async (fastify) => {
       config_json: { type: 'object' },
       ativo: { type: 'boolean' },
       mensagem_midia_nao_suportada: { type: ['string', 'null'], maxLength: 1000 },
-      fila_id: { type: ['string', 'null'], format: 'uuid' },
+      fila_id: { type: ['string', 'null'] },
       chatbot_fluxo_id: { type: ['string', 'null'], format: 'uuid' },
       chatbot_ativo: { type: 'boolean' },
       cache_auto_renew: { type: 'boolean' },
