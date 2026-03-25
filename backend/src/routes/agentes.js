@@ -271,8 +271,9 @@ const agentesRoutes = async (fastify) => {
 
       // --- Vincular ou auto-criar fila ---
       let filaId = null;
+      const skipFila = agentData.fila_id === '__none__';
       try {
-        if (agentData.fila_id) {
+        if (!skipFila && agentData.fila_id) {
           // Vincular a fila existente
           const filaCheck = await pool.query(
             'SELECT id FROM filas_atendimento WHERE id = $1 AND empresa_id = $2 AND ativo = true',
@@ -285,7 +286,7 @@ const agentesRoutes = async (fastify) => {
           }
         }
 
-        if (!filaId) {
+        if (!filaId && !skipFila) {
           // Auto-criar fila com nome do agente
           const filaResult = await pool.query(`
             INSERT INTO filas_atendimento (empresa_id, nome, descricao, is_default, auto_assignment, cor, icone, ativo)
@@ -494,6 +495,9 @@ const agentesRoutes = async (fastify) => {
           cacheInvalidated = true;
         }
       }
+
+      // Converter __none__ para null (fila_id)
+      if (updates.fila_id === '__none__') updates.fila_id = null;
 
       const fields = [];
       const values = [];
