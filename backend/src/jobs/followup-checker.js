@@ -99,7 +99,7 @@ async function processEmpresaFollowups(empresa_id, configs) {
     const config = (conversa.fila_id && configs.porFila[conversa.fila_id]) || configs.padrao;
     if (!config || !config.ativo) continue;
 
-    const { retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento } = config;
+    const { retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento, agente_followup_id } = config;
     const retriesArr = Array.isArray(retries) ? retries : [];
     if (retriesArr.length === 0) continue;
     if (conversa.followup_count >= retriesArr.length) continue;
@@ -107,14 +107,14 @@ async function processEmpresaFollowups(empresa_id, configs) {
     // Verificar horário de funcionamento
     if (!isWithinBusinessHours(horario_inicio, horario_fim, dias_semana)) continue;
     try {
-      await processConversaFollowup(conversa, retriesArr, mensagem_encerramento);
+      await processConversaFollowup(conversa, retriesArr, mensagem_encerramento, agente_followup_id);
     } catch (error) {
       flog.error({ err: error, conversa_id: conversa.id }, 'Erro ao processar followup de conversa');
     }
   }
 }
 
-async function processConversaFollowup(conversa, retriesArr, mensagem_encerramento) {
+async function processConversaFollowup(conversa, retriesArr, mensagem_encerramento, agente_followup_id = null) {
   const { id: conversa_id, empresa_id, followup_count } = conversa;
 
   // Determinar qual retry estamos (0-based index)
@@ -220,7 +220,7 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
     if (retryConfig.tipo === 'fixo') {
       await enviarFollowupFixo(conversa, retryConfig.mensagem_fixa, retryNumero, totalRetries);
     } else {
-      await enviarFollowupIA(conversa, retryNumero, totalRetries);
+      await enviarFollowupIA(conversa, retryNumero, totalRetries, agente_followup_id);
     }
     flog.info({ conversa_id, empresa_id: conversa.empresa_id, retry: retryNumero }, 'Follow-up enviado');
   } catch (sendErr) {
@@ -282,21 +282,39 @@ async function enviarFollowupFixo(conversa, mensagem, retryNumero, totalRetries)
 /**
  * Envia follow-up via Gemini (IA gera a mensagem)
  */
-async function enviarFollowupIA(conversa, retryNumero, totalRetries) {
+async function enviarFollowupIA(conversa, retryNumero, totalRetries, agente_followup_id = null) {
   const { id: conversa_id, empresa_id, contato_whatsapp, contato_id, contato_nome, agente_id, fila_id, whatsapp_number_id } = conversa;
+
+  // Usar agente dedicado de follow-up se configurado, senão usa o da conversa
+  const agenteIdParaUsar = agente_followup_id || agente_id;
 
   // Buscar agente
   const agentResult = await pool.query(
     `SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
             cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
      FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
-    [agente_id, empresa_id]
+    [agenteIdParaUsar, empresa_id]
   );
-  if (agentResult.rows.length === 0) return;
-  const agent = agentResult.rows[0];
+  if (agentResult.rows.length === 0) {
+    // Fallback para agente da conversa se o dedicado não existir
+    if (agente_followup_id && agente_followup_id !== agente_id) {
+      flog.warn({ conversa_id, agente_followup_id }, 'Agente follow-up não encontrado, usando agente da conversa');
+      const fallbackResult = await pool.query(
+        `SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+                cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada
+         FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true`,
+        [agente_id, empresa_id]
+      );
+      if (fallbackResult.rows.length === 0) return;
+    } else {
+      return;
+    }
+  }
+  const agent = agentResult.rows.length > 0 ? agentResult.rows[0] : null;
+  if (!agent) return;
 
-  // Buscar API keys
-  const availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
+  // Buscar API keys do agente que vai processar
+  const availableKeys = await getActiveKeysForAgent(empresa_id, agent.agente_id);
   if (availableKeys.length === 0) return;
 
   // Buscar credenciais WhatsApp

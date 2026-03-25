@@ -134,21 +134,22 @@ const configFollowupRoutes = async (fastify) => {
           horario_fim: { type: 'string', pattern: '^\\d{2}:\\d{2}(:\\d{2})?$' },
           dias_semana: { type: 'array', minItems: 1, maxItems: 7, items: { type: 'integer', minimum: 0, maximum: 6 } },
           mensagem_encerramento: { type: 'string', maxLength: 1000 },
+          agente_followup_id: { type: ['string', 'null'], format: 'uuid' },
         }
       }
     }
   }, async (request, reply) => {
     try {
       const { empresaId } = request;
-      const { nome, fila_id, ativo, retries, mensagem_encerramento, dias_semana } = request.body;
+      const { nome, fila_id, ativo, retries, mensagem_encerramento, dias_semana, agente_followup_id } = request.body;
       const horario_inicio = request.body.horario_inicio ? request.body.horario_inicio.slice(0, 5) : '08:00';
       const horario_fim = request.body.horario_fim ? request.body.horario_fim.slice(0, 5) : '18:00';
 
       if (!validateRetries(retries, reply)) return;
 
       const result = await pool.query(`
-        INSERT INTO config_followup (empresa_id, nome, fila_id, ativo, retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO config_followup (empresa_id, nome, fila_id, ativo, retries, horario_inicio, horario_fim, dias_semana, mensagem_encerramento, agente_followup_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *
       `, [
         empresaId, nome, fila_id || null, ativo ?? false,
@@ -156,6 +157,7 @@ const configFollowupRoutes = async (fastify) => {
         horario_inicio, horario_fim,
         dias_semana || [1, 2, 3, 4, 5],
         mensagem_encerramento || 'Como não recebemos sua resposta, vou encerrar nosso atendimento por aqui. Caso precise, é só nos chamar novamente! 😊',
+        agente_followup_id || null,
       ]);
 
       logger.info({ empresaId, fila_id, nome }, 'Config followup criada');
@@ -187,6 +189,7 @@ const configFollowupRoutes = async (fastify) => {
           horario_fim: { type: 'string', pattern: '^\\d{2}:\\d{2}(:\\d{2})?$' },
           dias_semana: { type: 'array', minItems: 1, maxItems: 7, items: { type: 'integer', minimum: 0, maximum: 6 } },
           mensagem_encerramento: { type: 'string', maxLength: 1000 },
+          agente_followup_id: { type: ['string', 'null'], format: 'uuid' },
         }
       }
     }
@@ -194,7 +197,7 @@ const configFollowupRoutes = async (fastify) => {
     try {
       const { empresaId } = request;
       const { id } = request.params;
-      const { nome, ativo, retries, dias_semana, mensagem_encerramento } = request.body;
+      const { nome, ativo, retries, dias_semana, mensagem_encerramento, agente_followup_id } = request.body;
       const horario_inicio = request.body.horario_inicio ? request.body.horario_inicio.slice(0, 5) : null;
       const horario_fim = request.body.horario_fim ? request.body.horario_fim.slice(0, 5) : null;
 
@@ -209,6 +212,7 @@ const configFollowupRoutes = async (fastify) => {
           horario_fim = COALESCE($7, horario_fim),
           dias_semana = COALESCE($8, dias_semana),
           mensagem_encerramento = COALESCE($9, mensagem_encerramento),
+          agente_followup_id = $10,
           atualizado_em = NOW()
         WHERE id = $1 AND empresa_id = $2
         RETURNING *
@@ -217,6 +221,7 @@ const configFollowupRoutes = async (fastify) => {
         retries ? JSON.stringify(retries) : null,
         horario_inicio, horario_fim,
         dias_semana || null, mensagem_encerramento || null,
+        agente_followup_id !== undefined ? (agente_followup_id || null) : null,
       ]);
 
       if (result.rows.length === 0) {
@@ -248,6 +253,7 @@ const configFollowupRoutes = async (fastify) => {
           horario_fim: { type: 'string', pattern: '^\\d{2}:\\d{2}(:\\d{2})?$' },
           dias_semana: { type: 'array', minItems: 1, maxItems: 7, items: { type: 'integer', minimum: 0, maximum: 6 } },
           mensagem_encerramento: { type: 'string', maxLength: 1000 },
+          agente_followup_id: { type: ['string', 'null'], format: 'uuid' },
         }
       }
     }
