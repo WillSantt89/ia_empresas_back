@@ -1068,13 +1068,32 @@ export async function processAIResponse({
   const { modelo, temperatura, max_tokens, prompt_ativo } = agent;
 
   // --- Credit check (pool mensal por empresa) ---
-  const creditResult = await consumirCredito(empresa_id, `conversa:${conversa_id}`);
-  if (!creditResult.consumido) {
-    createLogger.warn('Créditos IA esgotados', { empresa_id, agente_id, motivo: creditResult.motivo });
-    return null;
-  }
-  if (creditResult.fonte !== 'sem_controle') {
-    createLogger.info('Crédito consumido', { empresa_id, fonte: creditResult.fonte, saldo: creditResult.saldo_restante });
+  // 1 crédito = 1 conversa (primeira chamada IA da conversa, não por mensagem)
+  const jaConsumiu = await pool.query(
+    `SELECT 1 FROM creditos_ia_historico WHERE empresa_id = $1 AND tipo = 'consumo' AND referencia = $2 LIMIT 1`,
+    [empresa_id, `conversa:${conversa_id}`]
+  );
+
+  if (jaConsumiu.rows.length === 0) {
+    // Primeira chamada IA desta conversa — consumir crédito
+    const creditResult = await consumirCredito(empresa_id, `conversa:${conversa_id}`);
+    if (!creditResult.consumido) {
+      createLogger.warn('Créditos IA esgotados', { empresa_id, agente_id, motivo: creditResult.motivo });
+      return null;
+    }
+    if (creditResult.fonte !== 'sem_controle') {
+      createLogger.info('Crédito consumido (nova conversa)', { empresa_id, fonte: creditResult.fonte, saldo: creditResult.saldo_restante });
+    }
+  } else {
+    // Já consumiu crédito para esta conversa — verificar se ainda tem saldo (não consumir de novo)
+    const creditos = await pool.query(
+      `SELECT bloqueado FROM creditos_ia WHERE empresa_id = $1`,
+      [empresa_id]
+    );
+    if (creditos.rows.length > 0 && creditos.rows[0].bloqueado) {
+      createLogger.warn('Créditos IA esgotados (conversa já consumida mas conta bloqueada)', { empresa_id, agente_id });
+      return null;
+    }
   }
 
   // --- Daily usage tracking (analytics, fire-and-forget) ---
