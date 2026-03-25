@@ -2878,4 +2878,168 @@ export default async function conversasRoutes(fastify, opts) {
       throw error;
     }
   });
+
+  // GET /janela-aberta — Conversas ativas com janela 24h aberta
+  fastify.get('/janela-aberta', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'read')
+    ],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          fila_id: { type: 'string', format: 'uuid' },
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const empresaId = request.empresaId;
+    const { fila_id } = request.query;
+
+    try {
+      if (!empresaId) {
+        return reply.code(400).send({ success: false, error: 'empresa_id não identificado' });
+      }
+
+      let query = `
+        SELECT
+          c.id, c.numero_ticket, c.contato_whatsapp, c.contato_nome,
+          c.fila_id, c.agente_id, c.whatsapp_number_id,
+          c.ultima_msg_entrada_em,
+          f.nome as fila_nome,
+          a.nome as agente_nome,
+          EXTRACT(EPOCH FROM (NOW() - c.ultima_msg_entrada_em)) / 3600 as horas_desde_ultima,
+          (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'entrada') as total_msgs_cliente,
+          (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'saida') as total_msgs_saida
+        FROM conversas c
+        LEFT JOIN filas_atendimento f ON f.id = c.fila_id
+        LEFT JOIN agentes a ON a.id = c.agente_id
+        WHERE c.empresa_id = $1
+          AND c.status = 'ativo'
+          AND c.ultima_msg_entrada_em IS NOT NULL
+          AND c.ultima_msg_entrada_em > NOW() - INTERVAL '24 hours'
+      `;
+      const params = [empresaId];
+
+      if (fila_id) {
+        params.push(fila_id);
+        query += ` AND c.fila_id = $${params.length}`;
+      }
+
+      query += ` ORDER BY c.ultima_msg_entrada_em DESC`;
+
+      const result = await pool.query(query, params);
+      const rows = result.rows;
+
+      // Stats por fila
+      const statsPorFila = {};
+      for (const row of rows) {
+        const key = row.fila_id || 'sem_fila';
+        if (!statsPorFila[key]) {
+          statsPorFila[key] = { fila_id: row.fila_id, fila_nome: row.fila_nome || 'Sem fila', total: 0 };
+        }
+        statsPorFila[key].total++;
+      }
+
+      return {
+        success: true,
+        data: rows,
+        stats: {
+          total: rows.length,
+          por_fila: Object.values(statsPorFila),
+        }
+      };
+    } catch (error) {
+      logger.error('Error listing janela-aberta:', error);
+      throw error;
+    }
+  });
+
+  // POST /mensagem-lote — Enviar mensagem livre em lote
+  fastify.post('/mensagem-lote', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['conversa_ids', 'mensagem', 'whatsapp_number_id'],
+        properties: {
+          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 500 },
+          mensagem: { type: 'string', minLength: 1, maxLength: 5000 },
+          whatsapp_number_id: { type: 'string', format: 'uuid' },
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const empresaId = request.empresaId;
+    const { user } = request;
+    const { conversa_ids, mensagem, whatsapp_number_id } = request.body;
+
+    if (!['master', 'admin', 'supervisor'].includes(user.role)) {
+      return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
+    }
+
+    try {
+      // Buscar conexão WhatsApp
+      const wnResult = await pool.query(
+        'SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true',
+        [whatsapp_number_id, empresaId]
+      );
+      if (wnResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: 'Conexão WhatsApp não encontrada' });
+      }
+      const { phone_number_id, token_graph_api } = wnResult.rows[0];
+      const graphToken = decrypt(token_graph_api);
+
+      // Buscar conversas ativas com janela aberta
+      const conversasResult = await pool.query(`
+        SELECT c.id, c.contato_whatsapp, c.fila_id, c.ultima_msg_entrada_em
+        FROM conversas c
+        WHERE c.id = ANY($1) AND c.empresa_id = $2 AND c.status = 'ativo'
+          AND c.ultima_msg_entrada_em > NOW() - INTERVAL '24 hours'
+      `, [conversa_ids, empresaId]);
+
+      const enviados = [];
+      const erros = [];
+
+      for (const conversa of conversasResult.rows) {
+        try {
+          const result = await sendTextMessage(phone_number_id, graphToken, conversa.contato_whatsapp, mensagem);
+
+          if (result.wamid) {
+            await pool.query(`
+              INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, criado_em)
+              VALUES ($1, $2, 'saida', $3, 'operador', $4, 'text', $5, NOW())
+            `, [conversa.id, empresaId, mensagem, user.nome || user.email, result.wamid]);
+
+            enviados.push({ id: conversa.id, phone: conversa.contato_whatsapp });
+          } else {
+            erros.push({ phone: conversa.contato_whatsapp, motivo: result.error || 'Falha no envio' });
+          }
+        } catch (err) {
+          erros.push({ phone: conversa.contato_whatsapp, motivo: err.message });
+        }
+      }
+
+      const ignorados = conversa_ids.length - conversasResult.rows.length;
+
+      logger.info(`Mensagem lote: ${enviados.length} enviados, ${erros.length} erros, ${ignorados} ignorados (janela expirada) — por ${user.email}`);
+      return {
+        success: true,
+        data: {
+          enviados: enviados.length,
+          erros,
+          ignorados,
+        }
+      };
+    } catch (error) {
+      logger.error('Error sending bulk message:', error);
+      throw error;
+    }
+  });
 }
