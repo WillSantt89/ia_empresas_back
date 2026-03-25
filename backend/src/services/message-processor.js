@@ -649,6 +649,12 @@ async function processMessageCommon({
     }
   }
 
+  // --- Se conversa existente em fila humana (agente_id null, controlado_por fila), não processar IA ---
+  if (conversaResult.rows.length > 0 && !conversaResult.rows[0].conversa_agente_id && conversaResult.rows[0].controlado_por === 'fila') {
+    createLogger.info({ empresa_id, phone, conversa_id, fila_id: conversaResult.rows[0].fila_id }, 'Conversa em fila humana sem agente, skipping AI');
+    return;
+  }
+
   // --- Override agent if conversation already has one ---
   if (conversaResult.rows.length > 0 && conversaResult.rows[0].conversa_agente_id) {
     const conversaAgenteId = conversaResult.rows[0].conversa_agente_id;
