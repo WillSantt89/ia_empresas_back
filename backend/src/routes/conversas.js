@@ -2895,7 +2895,7 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
   }, async (request, reply) => {
-    const empresaId = request.empresaId;
+    const empresaId = request.empresaId || request.user.empresa_id;
     const { fila_id } = request.query;
 
     try {
@@ -2975,13 +2975,19 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
   }, async (request, reply) => {
-    const empresaId = request.empresaId;
+    const empresaId = request.empresaId || request.user.empresa_id;
     const { user } = request;
     const { conversa_ids, mensagem } = request.body;
 
     if (!['master', 'admin', 'supervisor'].includes(user.role)) {
       return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
     }
+
+    if (!empresaId) {
+      return reply.code(400).send({ success: false, error: 'empresa_id não identificado' });
+    }
+
+    logger.info(`Mensagem lote: ${conversa_ids.length} conversas, empresa ${empresaId}, user ${user.email}`);
 
     try {
       // Buscar conversas ativas com janela aberta + dados da conexão WhatsApp
@@ -2994,6 +3000,8 @@ export default async function conversasRoutes(fastify, opts) {
           AND c.ultima_msg_entrada_em > NOW() - INTERVAL '24 hours'
           AND c.whatsapp_number_id IS NOT NULL
       `, [conversa_ids, empresaId]);
+
+      logger.info(`Mensagem lote: ${conversasResult.rows.length} conversas encontradas de ${conversa_ids.length} enviadas`);
 
       const enviados = [];
       const erros = [];
