@@ -2957,7 +2957,7 @@ export default async function conversasRoutes(fastify, opts) {
     }
   });
 
-  // POST /mensagem-lote — Enviar mensagem livre em lote
+  // POST /mensagem-lote — Enviar mensagem livre em lote (usa conexão de cada conversa)
   fastify.post('/mensagem-lote', {
     preHandler: [
       fastify.authenticate,
@@ -2967,48 +2967,51 @@ export default async function conversasRoutes(fastify, opts) {
     schema: {
       body: {
         type: 'object',
-        required: ['conversa_ids', 'mensagem', 'whatsapp_number_id'],
+        required: ['conversa_ids', 'mensagem'],
         properties: {
           conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 500 },
           mensagem: { type: 'string', minLength: 1, maxLength: 5000 },
-          whatsapp_number_id: { type: 'string', format: 'uuid' },
         }
       }
     }
   }, async (request, reply) => {
     const empresaId = request.empresaId;
     const { user } = request;
-    const { conversa_ids, mensagem, whatsapp_number_id } = request.body;
+    const { conversa_ids, mensagem } = request.body;
 
     if (!['master', 'admin', 'supervisor'].includes(user.role)) {
       return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
     }
 
     try {
-      // Buscar conexão WhatsApp
-      const wnResult = await pool.query(
-        'SELECT phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND empresa_id = $2 AND ativo = true',
-        [whatsapp_number_id, empresaId]
-      );
-      if (wnResult.rows.length === 0) {
-        return reply.code(404).send({ success: false, error: 'Conexão WhatsApp não encontrada' });
-      }
-      const { phone_number_id, token_graph_api } = wnResult.rows[0];
-      const graphToken = decrypt(token_graph_api);
-
-      // Buscar conversas ativas com janela aberta
+      // Buscar conversas ativas com janela aberta + dados da conexão WhatsApp
       const conversasResult = await pool.query(`
-        SELECT c.id, c.contato_whatsapp, c.fila_id, c.ultima_msg_entrada_em
+        SELECT c.id, c.contato_whatsapp, c.fila_id, c.ultima_msg_entrada_em,
+               c.whatsapp_number_id, wn.phone_number_id, wn.token_graph_api
         FROM conversas c
+        JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id AND wn.ativo = true
         WHERE c.id = ANY($1) AND c.empresa_id = $2 AND c.status = 'ativo'
           AND c.ultima_msg_entrada_em > NOW() - INTERVAL '24 hours'
+          AND c.whatsapp_number_id IS NOT NULL
       `, [conversa_ids, empresaId]);
 
       const enviados = [];
       const erros = [];
 
+      // Cache de tokens descriptografados por conexão
+      const tokenCache = {};
+
       for (const conversa of conversasResult.rows) {
         try {
+          // Cache do token para não descriptografar repetidamente
+          if (!tokenCache[conversa.whatsapp_number_id]) {
+            tokenCache[conversa.whatsapp_number_id] = {
+              phone_number_id: conversa.phone_number_id,
+              graphToken: decrypt(conversa.token_graph_api),
+            };
+          }
+          const { phone_number_id, graphToken } = tokenCache[conversa.whatsapp_number_id];
+
           const result = await sendTextMessage(phone_number_id, graphToken, conversa.contato_whatsapp, mensagem);
 
           if (result.wamid) {
