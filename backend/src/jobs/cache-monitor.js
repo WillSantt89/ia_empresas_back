@@ -14,7 +14,7 @@ import { buildToolDeclarations } from '../services/gemini.js';
 const clog = logger.child({ module: 'cache-monitor' });
 
 let intervalId = null;
-const INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 horas
+const INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 horas (6x por dia)
 
 async function checkCaches() {
   try {
