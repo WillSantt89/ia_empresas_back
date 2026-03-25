@@ -13,7 +13,10 @@ async function performDailyReset() {
 
   try {
     // 1. Resetar contadores diários das API keys
-    await apiKeyManager.resetDailyCounters();
+    await pool.query(`
+      UPDATE api_keys SET total_requests_hoje = 0, total_tokens_hoje = 0, atualizado_em = NOW()
+      WHERE total_requests_hoje > 0 OR total_tokens_hoje > 0
+    `);
     logger.info('✓ API key daily counters reset');
 
     // 2. Reativar keys que estavam rate limited
