@@ -912,6 +912,41 @@ async function processMessageCommon({
               }
 
               // Sem chatbot no destino — adicionar contexto e continuar pra IA
+              // Salvar variáveis coletadas no contato (cpf, nome_completo, etc.)
+              if (flowResult.variables && Object.keys(flowResult.variables).length > 0 && contato_id) {
+                try {
+                  const vars = flowResult.variables;
+                  // Atualizar nome do contato se coletado
+                  if (vars.nome_completo || vars.nome) {
+                    const nomeContato = vars.nome_completo || vars.nome;
+                    await pool.query(
+                      `UPDATE contatos SET nome = $1, atualizado_em = NOW() WHERE id = $2 AND empresa_id = $3`,
+                      [String(nomeContato), contato_id, empresa_id]
+                    );
+                    // Atualizar também na conversa
+                    pool.query(`UPDATE conversas SET contato_nome = $1 WHERE id = $2`, [String(nomeContato), conversa_id]).catch(() => {});
+                  }
+                  // Salvar todas as variáveis em dados_json do contato
+                  const contatoResult = await pool.query(
+                    `SELECT dados_json FROM contatos WHERE id = $1 AND empresa_id = $2`,
+                    [contato_id, empresa_id]
+                  );
+                  if (contatoResult.rows.length > 0) {
+                    const dadosAtuais = contatoResult.rows[0].dados_json || {};
+                    for (const [chave, valor] of Object.entries(vars)) {
+                      dadosAtuais[chave] = String(valor);
+                    }
+                    await pool.query(
+                      `UPDATE contatos SET dados_json = $1, atualizado_em = NOW() WHERE id = $2`,
+                      [JSON.stringify(dadosAtuais), contato_id]
+                    );
+                  }
+                  createLogger.info({ conversa_id, contato_id, variables: vars }, 'Chatbot variables saved to contact');
+                } catch (saveErr) {
+                  createLogger.error({ err: saveErr, conversa_id }, 'Error saving chatbot variables to contact');
+                }
+              }
+
               if (flowResult.context) {
                 await addToHistory(empresa_id, conversationKey, 'user', `[CONTEXTO DO FLUXO]: ${flowResult.context}`);
               }
