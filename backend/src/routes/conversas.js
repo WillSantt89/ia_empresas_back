@@ -2,7 +2,7 @@ import { pool } from '../config/database.js';
 import { logger } from '../config/logger.js';
 import { isMembroDaFila, verificarCapacidadeOperador, calcularStatsFila } from '../services/fila-manager.js';
 import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
-import { sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
+import { sendTextMessage, sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
 import { decrypt } from '../config/encryption.js';
 import { saveMedia } from '../services/media-storage.js';
 import { addToHistory, archiveConversation } from '../services/memory.js';
