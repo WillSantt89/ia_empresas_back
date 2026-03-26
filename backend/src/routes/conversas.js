@@ -2245,7 +2245,7 @@ export default async function conversasRoutes(fastify, opts) {
   // para evitar conflito com rotas parametricas /:id
   // ============================================
   fastify.register(async function bulkRoutes(bulk) {
-    const BULK_LIMIT = 25;
+    const BULK_LIMIT = 500;
 
     function validateBulkIds(conversa_ids, reply) {
       if (!Array.isArray(conversa_ids) || conversa_ids.length === 0) {
