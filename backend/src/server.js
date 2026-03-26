@@ -69,7 +69,7 @@ import cacheMonitor from './jobs/cache-monitor.js';
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter.js';
 import { FastifyAdapter } from '@bull-board/fastify';
-import { whatsappQueue, n8nQueue, deadLetterQueue, waitForQueues } from './queues/queues.js';
+import { whatsappQueue, n8nQueue, bulkOperationsQueue, deadLetterQueue, waitForQueues } from './queues/queues.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -356,6 +356,7 @@ async function start() {
       queues: [
         new BullMQAdapter(whatsappQueue),
         new BullMQAdapter(n8nQueue),
+        new BullMQAdapter(bulkOperationsQueue),
         new BullMQAdapter(deadLetterQueue),
       ],
       serverAdapter,

@@ -16,6 +16,16 @@ export const n8nQueue = new Queue(QUEUE_NAMES.N8N_MESSAGE, {
   defaultJobOptions: DEFAULT_JOB_OPTIONS,
 });
 
+// Bulk operations queue (finalizar, template, transferir em lote)
+export const bulkOperationsQueue = new Queue(QUEUE_NAMES.BULK_OPERATIONS, {
+  connection: REDIS_CONNECTION,
+  defaultJobOptions: {
+    ...DEFAULT_JOB_OPTIONS,
+    attempts: 1, // Sem retry — operações em lote não devem ser repetidas
+    removeOnComplete: { age: 3600, count: 100 },
+  },
+});
+
 // Dead letter queue for failed jobs (after all retries exhausted)
 export const deadLetterQueue = new Queue(QUEUE_NAMES.DEAD_LETTER, {
   connection: REDIS_CONNECTION,
@@ -26,7 +36,7 @@ export const deadLetterQueue = new Queue(QUEUE_NAMES.DEAD_LETTER, {
 });
 
 // Log queue connection events
-for (const [name, queue] of [['whatsapp', whatsappQueue], ['n8n', n8nQueue], ['dead-letter', deadLetterQueue]]) {
+for (const [name, queue] of [['whatsapp', whatsappQueue], ['n8n', n8nQueue], ['bulk-operations', bulkOperationsQueue], ['dead-letter', deadLetterQueue]]) {
   queue.on('error', (err) => {
     queueLogger.error(`Queue "${name}" error: ${err.message}`, { stack: err.stack });
   });
@@ -38,10 +48,11 @@ export async function waitForQueues() {
     const clients = await Promise.all([
       whatsappQueue.client,
       n8nQueue.client,
+      bulkOperationsQueue.client,
       deadLetterQueue.client,
     ]);
     queueLogger.info('All BullMQ queues connected to Redis', {
-      queues: [QUEUE_NAMES.WHATSAPP_MESSAGE, QUEUE_NAMES.N8N_MESSAGE, QUEUE_NAMES.DEAD_LETTER],
+      queues: [QUEUE_NAMES.WHATSAPP_MESSAGE, QUEUE_NAMES.N8N_MESSAGE, QUEUE_NAMES.BULK_OPERATIONS, QUEUE_NAMES.DEAD_LETTER],
     });
     return true;
   } catch (err) {
@@ -54,5 +65,6 @@ export async function waitForQueues() {
 export async function closeQueues() {
   await whatsappQueue.close();
   await n8nQueue.close();
+  await bulkOperationsQueue.close();
   await deadLetterQueue.close();
 }

@@ -38,9 +38,10 @@ async function startWorker() {
 
   // Import and start workers (auto-registers with BullMQ)
   const { whatsappWorker, n8nWorker, closeWorkers } = await import('./workers/message-worker.js');
+  const { bulkOperationsWorker, closeBulkOperationsWorker } = await import('./workers/bulk-operations-worker.js');
 
   createLogger.info('Workers started and listening for jobs', {
-    queues: ['whatsapp-message', 'n8n-message'],
+    queues: ['whatsapp-message', 'n8n-message', 'bulk-operations'],
   });
 
   // Graceful shutdown
@@ -48,6 +49,7 @@ async function startWorker() {
     createLogger.info('Starting graceful shutdown...');
     try {
       await closeWorkers();
+      await closeBulkOperationsWorker();
       await closeQueues();
       await closePool();
       await closeRedis();

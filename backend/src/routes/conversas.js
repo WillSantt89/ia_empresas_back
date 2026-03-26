@@ -3,6 +3,7 @@ import { logger } from '../config/logger.js';
 import { isMembroDaFila, verificarCapacidadeOperador, calcularStatsFila } from '../services/fila-manager.js';
 import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
 import { sendTextMessage, sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
+import { bulkOperationsQueue } from '../queues/queues.js';
 import { decrypt } from '../config/encryption.js';
 import { saveMedia } from '../services/media-storage.js';
 import { addToHistory, archiveConversation } from '../services/memory.js';
@@ -2593,10 +2594,26 @@ export default async function conversasRoutes(fastify, opts) {
       const { conversa_ids } = request.body;
       if (!validateBulkIds(conversa_ids, reply)) return;
 
-      const { empresaId, user } = request;
+      const empresaId = request.empresaId || request.user.empresa_id;
+      const { user } = request;
 
       if (!['master', 'admin', 'supervisor'].includes(user.role)) {
         return reply.status(403).send({ success: false, error: { message: 'Apenas admin, master ou supervisor' } });
+      }
+
+      // Lotes grandes → enfileirar no BullMQ
+      if (conversa_ids.length > 50) {
+        await bulkOperationsQueue.add('finalizar', {
+          empresa_id: empresaId,
+          operation: 'finalizar',
+          data: { conversa_ids },
+          user: { id: user.id, nome: user.nome || user.email },
+        }, { jobId: `bulk-fin:${empresaId}:${Date.now()}` });
+
+        return reply.send({
+          success: true,
+          data: { enfileirado: true, total: conversa_ids.length, message: 'Processando em background. Você será notificado quando concluir.' }
+        });
       }
 
       const client = await pool.connect();
@@ -2797,6 +2814,21 @@ export default async function conversasRoutes(fastify, opts) {
 
     if (!['master', 'admin', 'supervisor'].includes(user.role)) {
       return reply.status(403).send({ success: false, error: { message: 'Sem permissão' } });
+    }
+
+    // Lotes grandes → enfileirar
+    if (conversa_ids.length > 50) {
+      await bulkOperationsQueue.add('template', {
+        empresa_id: empresaId,
+        operation: 'template',
+        data: { conversa_ids, template_name, whatsapp_number_id, language_code },
+        user: { id: user.id, nome: user.nome || user.email },
+      }, { jobId: `bulk-tpl:${empresaId}:${Date.now()}` });
+
+      return reply.send({
+        success: true,
+        data: { enfileirado: true, total: conversa_ids.length, message: 'Processando em background. Você será notificado quando concluir.' }
+      });
     }
 
     try {
@@ -3023,7 +3055,7 @@ export default async function conversasRoutes(fastify, opts) {
         type: 'object',
         required: ['conversa_ids', 'mensagem'],
         properties: {
-          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1, maxItems: 500 },
+          conversa_ids: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1 },
           mensagem: { type: 'string', minLength: 1, maxLength: 5000 },
         }
       }
@@ -3039,6 +3071,21 @@ export default async function conversasRoutes(fastify, opts) {
 
     if (!empresaId) {
       return reply.code(400).send({ success: false, error: 'empresa_id não identificado' });
+    }
+
+    // Lotes grandes → enfileirar
+    if (conversa_ids.length > 50) {
+      await bulkOperationsQueue.add('mensagem', {
+        empresa_id: empresaId,
+        operation: 'mensagem',
+        data: { conversa_ids, mensagem },
+        user: { id: user.id, nome: user.nome || user.email },
+      }, { jobId: `bulk-msg:${empresaId}:${Date.now()}` });
+
+      return reply.send({
+        success: true,
+        data: { enfileirado: true, total: conversa_ids.length, message: 'Processando em background. Você será notificado quando concluir.' }
+      });
     }
 
     logger.info(`Mensagem lote: ${conversa_ids.length} conversas, empresa ${empresaId}, user ${user.email}`);

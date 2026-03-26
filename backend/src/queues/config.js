@@ -26,6 +26,7 @@ export const REDIS_CONNECTION = parseRedisForBullMQ(config.REDIS_URL);
 export const QUEUE_NAMES = {
   WHATSAPP_MESSAGE: 'whatsapp-message',
   N8N_MESSAGE: 'n8n-message',
+  BULK_OPERATIONS: 'bulk-operations',
   DEAD_LETTER: 'dead-letter',
 };
 
