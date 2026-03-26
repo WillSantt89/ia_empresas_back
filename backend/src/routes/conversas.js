@@ -2977,12 +2977,14 @@ export default async function conversasRoutes(fastify, opts) {
         type: 'object',
         properties: {
           fila_id: { type: 'string', format: 'uuid' },
+          atribuicao: { type: 'string', enum: ['todos', 'atribuidos', 'nao_atribuidos'] },
+          whatsapp_number_id: { type: 'string', format: 'uuid' },
         }
       }
     }
   }, async (request, reply) => {
     const empresaId = request.empresaId || request.user.empresa_id;
-    const { fila_id } = request.query;
+    const { fila_id, atribuicao, whatsapp_number_id } = request.query;
 
     try {
       if (!empresaId) {
@@ -2992,16 +2994,18 @@ export default async function conversasRoutes(fastify, opts) {
       let query = `
         SELECT
           c.id, c.numero_ticket, c.contato_whatsapp, c.contato_nome,
-          c.fila_id, c.agente_id, c.whatsapp_number_id,
+          c.fila_id, c.agente_id, c.whatsapp_number_id, c.operador_id, c.operador_nome,
           c.ultima_msg_entrada_em,
           f.nome as fila_nome,
           a.nome as agente_nome,
+          wn.nome_exibicao as conexao_nome,
           EXTRACT(EPOCH FROM (NOW() - c.ultima_msg_entrada_em)) / 3600 as horas_desde_ultima,
           (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'entrada') as total_msgs_cliente,
           (SELECT COUNT(*) FROM mensagens_log ml WHERE ml.conversa_id = c.id AND ml.direcao = 'saida') as total_msgs_saida
         FROM conversas c
         LEFT JOIN filas_atendimento f ON f.id = c.fila_id
         LEFT JOIN agentes a ON a.id = c.agente_id
+        LEFT JOIN whatsapp_numbers wn ON wn.id = c.whatsapp_number_id
         WHERE c.empresa_id = $1
           AND c.status = 'ativo'
           AND c.ultima_msg_entrada_em IS NOT NULL
@@ -3012,6 +3016,17 @@ export default async function conversasRoutes(fastify, opts) {
       if (fila_id) {
         params.push(fila_id);
         query += ` AND c.fila_id = $${params.length}`;
+      }
+
+      if (atribuicao === 'atribuidos') {
+        query += ` AND c.operador_id IS NOT NULL`;
+      } else if (atribuicao === 'nao_atribuidos') {
+        query += ` AND c.operador_id IS NULL`;
+      }
+
+      if (whatsapp_number_id) {
+        params.push(whatsapp_number_id);
+        query += ` AND c.whatsapp_number_id = $${params.length}`;
       }
 
       query += ` ORDER BY c.ultima_msg_entrada_em DESC`;
@@ -3029,12 +3044,25 @@ export default async function conversasRoutes(fastify, opts) {
         statsPorFila[key].total++;
       }
 
+      // Stats por conexão
+      const statsPorConexao = {};
+      for (const row of rows) {
+        const key = row.whatsapp_number_id || 'sem_conexao';
+        if (!statsPorConexao[key]) {
+          statsPorConexao[key] = { whatsapp_number_id: row.whatsapp_number_id, conexao_nome: row.conexao_nome || 'Sem conexão', total: 0 };
+        }
+        statsPorConexao[key].total++;
+      }
+
       return {
         success: true,
         data: rows,
         stats: {
           total: rows.length,
           por_fila: Object.values(statsPorFila),
+          por_conexao: Object.values(statsPorConexao),
+          atribuidos: rows.filter(r => r.operador_id).length,
+          nao_atribuidos: rows.filter(r => !r.operador_id).length,
         }
       };
     } catch (error) {
