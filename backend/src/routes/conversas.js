@@ -1967,6 +1967,7 @@ export default async function conversasRoutes(fastify, opts) {
     const conversaId = data.fields?.conversa_id?.value;
     const caption = data.fields?.caption?.value || '';
     const forceMediaType = data.fields?.media_type?.value || null; // 'sticker' para forçar envio como figurinha
+    const isNotaPrivada = data.fields?.nota_privada?.value === 'true';
 
     if (!conversaId) {
       return reply.code(400).send({ success: false, error: { message: 'conversa_id obrigatorio' } });
@@ -1986,19 +1987,22 @@ export default async function conversasRoutes(fastify, opts) {
       return reply.code(400).send({ success: false, error: { message: 'Conversa sem contato WhatsApp' } });
     }
 
-    // Validar janela 24h do WhatsApp (null = cliente nunca respondeu)
-    if (!conversa.ultima_msg_entrada_em) {
-      return reply.code(403).send({
-        success: false,
-        error: { code: 'WINDOW_NOT_OPEN', message: 'Aguardando resposta do cliente. Envie um template para iniciar.' }
-      });
-    } else {
-      const diffMs = Date.now() - new Date(conversa.ultima_msg_entrada_em).getTime();
-      if (diffMs > 24 * 60 * 60 * 1000) {
+    // Nota privada não precisa de janela 24h nem WhatsApp
+    if (!isNotaPrivada) {
+      // Validar janela 24h do WhatsApp (null = cliente nunca respondeu)
+      if (!conversa.ultima_msg_entrada_em) {
         return reply.code(403).send({
           success: false,
-          error: { code: 'WINDOW_EXPIRED', message: 'Janela de 24h expirada. Envie um template para reabrir.' }
+          error: { code: 'WINDOW_NOT_OPEN', message: 'Aguardando resposta do cliente. Envie um template para iniciar.' }
         });
+      } else {
+        const diffMs = Date.now() - new Date(conversa.ultima_msg_entrada_em).getTime();
+        if (diffMs > 24 * 60 * 60 * 1000) {
+          return reply.code(403).send({
+            success: false,
+            error: { code: 'WINDOW_EXPIRED', message: 'Janela de 24h expirada. Envie um template para reabrir.' }
+          });
+        }
       }
     }
 
@@ -2010,29 +2014,12 @@ export default async function conversasRoutes(fastify, opts) {
       }
     }
 
-    // Buscar numero WhatsApp — conexao_ativa_id > whatsapp_number_id > fallback FIFO
-    const wnIdEscolhido2 = conversa.conexao_ativa_id || conversa.whatsapp_number_id;
-    const wnQuery = wnIdEscolhido2
-      ? `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
-      : `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
-    const wnParam = wnIdEscolhido2 || conversa.empresa_id;
-    const whatsappResult = await pool.query(wnQuery, [wnParam]);
-    if (whatsappResult.rows.length === 0) {
-      return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
-    }
-
-    const whatsappNumber = whatsappResult.rows[0];
-    const token = decrypt(whatsappNumber.token_graph_api);
-    if (!token) {
-      return reply.code(500).send({ success: false, error: { message: 'Token WhatsApp invalido' } });
-    }
-
     try {
       const buffer = await data.toBuffer();
       const mimeType = data.mimetype;
       const fileName = data.filename;
 
-      // Determinar tipo WhatsApp
+      // Determinar tipo mídia
       let mediaType = 'document';
       if (forceMediaType === 'sticker') mediaType = 'sticker';
       else if (mimeType.startsWith('image/')) mediaType = 'image';
@@ -2041,6 +2028,58 @@ export default async function conversasRoutes(fastify, opts) {
 
       // 1. Salvar arquivo localmente
       const saved = await saveMedia(buffer, conversa.empresa_id, mimeType, fileName);
+
+      // --- NOTA PRIVADA: salvar no banco sem enviar ao WhatsApp ---
+      if (isNotaPrivada) {
+        const conteudo = caption || `[${mediaType}: ${fileName}]`;
+        const msgResult = await pool.query(
+          `INSERT INTO mensagens_log
+             (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome,
+              tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes)
+           VALUES ($1, $2, 'saida', $3, 'nota_privada', $4, $5, $6, $7, $8, $9, $10)
+           RETURNING *`,
+          [conversaId, conversa.empresa_id, conteudo, user.id, user.nome,
+           mediaType, saved.relativePath, mimeType, fileName, saved.sizeBytes]
+        );
+        const mensagem = msgResult.rows[0];
+
+        await pool.query(`UPDATE conversas SET atualizado_em = NOW() WHERE id = $1`, [conversaId]);
+
+        emitNovaMensagem(conversaId, conversa.fila_id, {
+          id: mensagem.id,
+          conversa_id: conversaId,
+          conteudo,
+          direcao: 'saida',
+          remetente_tipo: 'nota_privada',
+          remetente_id: user.id,
+          remetente_nome: user.nome,
+          tipo_mensagem: mediaType,
+          midia_url: saved.relativePath,
+          midia_mime_type: mimeType,
+          midia_nome_arquivo: fileName,
+          criado_em: mensagem.criado_em,
+        });
+
+        return reply.send({ success: true, data: mensagem });
+      }
+
+      // --- ENVIO NORMAL: upload para Meta e enviar ao cliente ---
+      // Buscar numero WhatsApp — conexao_ativa_id > whatsapp_number_id > fallback FIFO
+      const wnIdEscolhido2 = conversa.conexao_ativa_id || conversa.whatsapp_number_id;
+      const wnQuery = wnIdEscolhido2
+        ? `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+        : `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+      const wnParam = wnIdEscolhido2 || conversa.empresa_id;
+      const whatsappResult = await pool.query(wnQuery, [wnParam]);
+      if (whatsappResult.rows.length === 0) {
+        return reply.code(400).send({ success: false, error: { message: 'Nenhum numero WhatsApp ativo' } });
+      }
+
+      const whatsappNumber = whatsappResult.rows[0];
+      const token = decrypt(whatsappNumber.token_graph_api);
+      if (!token) {
+        return reply.code(500).send({ success: false, error: { message: 'Token WhatsApp invalido' } });
+      }
 
       // 2. Upload para Meta e obter media_id (necessário para áudio PTT)
       const uploadResult = await uploadMediaToMeta(
