@@ -192,7 +192,7 @@ export async function executeTransferTool(tool, context) {
   const { conversa_id, empresa_id } = context;
 
   try {
-    // --- Transfer to queue (no agent) ---
+    // --- Transfer to queue (keep same agent, only change queue) ---
     if (tool.fila_destino_id) {
       const filaResult = await pool.query(`
         SELECT id, nome, ativo FROM filas_atendimento
@@ -209,18 +209,18 @@ export async function executeTransferTool(tool, context) {
         return { success: false, error: `Fila "${fila.nome}" está inativa` };
       }
 
-      // Buscar fila de origem ANTES de atualizar
+      // Buscar fila de origem e agente atual ANTES de atualizar
       const origemResult = await pool.query(
-        `SELECT fila_id FROM conversas WHERE id = $1 AND empresa_id = $2`,
+        `SELECT fila_id, agente_id FROM conversas WHERE id = $1 AND empresa_id = $2`,
         [conversa_id, empresa_id]
       );
       const filaOrigemId = origemResult.rows[0]?.fila_id;
+      const agenteAtualId = origemResult.rows[0]?.agente_id;
 
+      // Mantém o agente atual e controlado_por = 'ia' (só muda a fila)
       await pool.query(`
         UPDATE conversas
-        SET agente_id = NULL,
-            fila_id = $1,
-            controlado_por = 'fila',
+        SET fila_id = $1,
             atualizado_em = NOW()
         WHERE id = $2 AND empresa_id = $3
       `, [fila.id, conversa_id, empresa_id]);
@@ -232,7 +232,7 @@ export async function executeTransferTool(tool, context) {
         WHERE id = $2
       `, [
         JSON.stringify([{
-          agente_id: null,
+          agente_id: agenteAtualId,
           agente_nome: null,
           fila_id: fila.id,
           fila_nome: fila.nome,
@@ -244,11 +244,11 @@ export async function executeTransferTool(tool, context) {
 
       const duration = Date.now() - startTime;
 
-      createLogger.info({ conversa_id, empresa_id, fila_origem: filaOrigemId, fila_destino: fila.nome, duration_ms: duration }, 'Transfer to queue executed');
+      createLogger.info({ conversa_id, empresa_id, fila_origem: filaOrigemId, fila_destino: fila.nome, agente_mantido: agenteAtualId, duration_ms: duration }, 'Transfer to queue executed (agent kept)');
 
       // Buscar dados da conversa para emitir WebSocket
       const conversaData = await pool.query(
-        `SELECT id, contato_whatsapp, contato_nome, status, controlado_por, fila_id, numero_ticket, criado_em
+        `SELECT id, contato_whatsapp, contato_nome, status, controlado_por, agente_id, fila_id, numero_ticket, criado_em
          FROM conversas WHERE id = $1`, [conversa_id]
       );
       const conv = conversaData.rows[0];
@@ -258,8 +258,8 @@ export async function executeTransferTool(tool, context) {
         const updateData = {
           id: conversa_id,
           fila_id: fila.id,
-          controlado_por: 'fila',
-          agente_id: null,
+          controlado_por: conv.controlado_por,
+          agente_id: conv.agente_id,
         };
         emitConversaAtualizada(conversa_id, fila.id, updateData);
         if (filaOrigemId && filaOrigemId !== fila.id) {
@@ -272,7 +272,7 @@ export async function executeTransferTool(tool, context) {
           contato_whatsapp: conv.contato_whatsapp,
           contato_nome: conv.contato_nome,
           status: conv.status,
-          controlado_por: 'fila',
+          controlado_por: conv.controlado_por,
           fila_id: fila.id,
           numero_ticket: conv.numero_ticket,
           criado_em: conv.criado_em,
@@ -294,7 +294,7 @@ export async function executeTransferTool(tool, context) {
           transferido_para: fila.nome,
           fila: fila.nome,
           tipo: 'fila',
-          mensagem: `Atendimento transferido para a fila ${fila.nome}. Um atendente humano irá continuar o atendimento.`
+          mensagem: `Atendimento transferido para a fila ${fila.nome}. O agente IA continua atendendo.`
         },
         duration_ms: duration
       };
