@@ -649,9 +649,45 @@ async function processMessageCommon({
     }
   }
 
-  // --- Se conversa existente em fila humana (agente_id null, controlado_por fila), não processar IA ---
+  // --- Se conversa existente em fila humana (agente_id null, controlado_por fila), salvar mensagem mas não processar IA ---
   if (conversaResult.rows.length > 0 && !conversaResult.rows[0].conversa_agente_id && conversaResult.rows[0].controlado_por === 'fila') {
-    createLogger.info({ empresa_id, phone, conversa_id, fila_id: conversaResult.rows[0].fila_id }, 'Conversa em fila humana sem agente, skipping AI');
+    createLogger.info({ empresa_id, phone, conversa_id, fila_id: conversaResult.rows[0].fila_id }, 'Conversa em fila humana sem agente, saving message but skipping AI');
+
+    addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+
+    const filaMsgsToLog = _batchMessages || [{
+      messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
+    }];
+
+    const filaId = conversaResult.rows[0].fila_id;
+
+    for (const msg of filaMsgsToLog) {
+      const logMsgResult = await pool.query(`
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
+        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
+        RETURNING id, criado_em
+      `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
+          msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
+          msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
+          wnId || null]);
+
+      if (logMsgResult.rows[0]) {
+        emitNovaMensagem(conversa_id, filaId, {
+          id: logMsgResult.rows[0].id,
+          conversa_id,
+          conteudo: msg.historyText,
+          direcao: 'entrada',
+          remetente_tipo: 'cliente',
+          tipo_mensagem: msg.parsed.type,
+          midia_url: msg.mediaSaved?.relativePath || null,
+          midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
+          midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
+          criado_em: logMsgResult.rows[0].criado_em,
+        });
+      }
+    }
+
+    pool.query(`UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW(), lida = false, lida_em = NULL, lida_por = NULL WHERE id = $1`, [conversa_id]).catch(() => {});
     return;
   }
 
