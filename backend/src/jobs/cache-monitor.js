@@ -18,7 +18,7 @@ const INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 horas (6x por dia)
 
 async function checkCaches() {
   try {
-    // Buscar agentes com auto-renew ativo que precisam de renovação
+    // Buscar agentes com auto-renew ativo que precisam de criação ou renovação
     const result = await pool.query(`
       SELECT a.id, a.empresa_id, a.nome, a.modelo, a.prompt_ativo,
              a.cache_enabled, a.gemini_cache_id, a.cache_expires_at,
@@ -26,11 +26,11 @@ async function checkCaches() {
       FROM agentes a
       WHERE a.ativo = true
         AND a.cache_auto_renew = true
-        AND a.cache_enabled = true
         AND a.prompt_ativo IS NOT NULL
         AND LENGTH(a.prompt_ativo) >= 4096
         AND (
-          a.cache_expires_at IS NULL
+          a.cache_enabled = false
+          OR a.cache_expires_at IS NULL
           OR a.cache_expires_at < NOW() + INTERVAL '2 hours'
         )
     `);
@@ -102,9 +102,10 @@ async function renewAgentCache(agent) {
     ttlSeconds: 86400, // 24 horas
   });
 
-  // Atualizar no banco
+  // Atualizar no banco (ativa cache se estava desativado)
   await pool.query(`
     UPDATE agentes SET
+      cache_enabled = true,
       gemini_cache_id = $1,
       cache_expires_at = $2,
       cache_api_key_id = $3,
