@@ -1263,9 +1263,9 @@ export async function processAIResponse({
       contato_whatsapp: logContato.contato_whatsapp,
       contato_nome: logContato.contato_nome,
       parametros: args,
-      resultado: result?.data || result?.error,
+      resultado: result?.data || result?.message || result?.error,
       sucesso: result?.success ?? false,
-      erro: result?.success ? null : (result?.error || result?.message),
+      erro: result?.success ? null : [result?.error, result?.message, result?.statusText].filter(Boolean).join(' | '),
       tempo_ms: result?.duration_ms,
     });
 
