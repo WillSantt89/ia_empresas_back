@@ -180,6 +180,12 @@ export async function processMessage(options) {
           throw err;
         }
 
+        if (status === 400 || msg.includes('INVALID_ARGUMENT')) {
+          const err = new Error(error.message || 'Invalid request data');
+          err.code = 'DATA_ERROR';
+          throw err;
+        }
+
         if (status === 500 || msg.includes('INTERNAL')) {
           const err = new Error('API server error');
           err.code = 'API_ERROR';

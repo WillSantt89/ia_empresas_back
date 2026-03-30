@@ -8,7 +8,7 @@ import { logger } from '../config/logger.js';
 import { pool } from '../config/database.js';
 import { decrypt } from '../config/encryption.js';
 import { getActiveKeysForAgent, recordKeyError, recordKeySuccess } from './api-key-manager.js';
-import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini } from './memory.js';
+import { getHistory, addToHistory, addToolCallToHistory, formatHistoryForGemini, clearHistory } from './memory.js';
 import { processMessageWithTools, buildToolDeclarations } from './gemini.js';
 import { executeTool, executeTransferTool, executeFinalizarTool, executeAtributoTool, transformResultForLLM, logToolExecution } from './tool-runner.js';
 import { parseMetaMessage, buildGeminiParts } from './media-handler.js';
@@ -1282,6 +1282,8 @@ export async function processAIResponse({
 
   let result = null;
   let usedKeyId = availableKeys[0]?.id;
+  let historyForGemini = formatHistoryForGemini(history);
+  let historyCleared = false;
 
   for (let keyIndex = 0; keyIndex < availableKeys.length; keyIndex++) {
     const currentKey = availableKeys[keyIndex];
@@ -1294,7 +1296,7 @@ export async function processAIResponse({
           model: modelo,
           systemPrompt: prompt_ativo,
           tools: toolDeclarations,
-          history: formatHistoryForGemini(history),
+          history: historyForGemini,
           message: messageWithContext,
           parts: partsWithContext,
           temperature: temperatura,
@@ -1308,7 +1310,18 @@ export async function processAIResponse({
       break;
     } catch (error) {
       const isRetryable = error.code === 'RATE_LIMITED' || error.code === 'INVALID_KEY' || error.code === 'API_ERROR';
-      if (currentKey.id) recordKeyError(currentKey.id, error.message || 'Unknown error').catch(() => {});
+      const isDataError = error.code === 'DATA_ERROR';
+      if (currentKey.id && !isDataError) recordKeyError(currentKey.id, error.message || 'Unknown error').catch(() => {});
+
+      // DATA_ERROR (INVALID_ARGUMENT): corrupted history — clear and retry once with same key
+      if (isDataError && !historyCleared && historyForGemini.length > 0) {
+        createLogger.warn('Corrupted history detected, clearing and retrying', { empresa_id, conversa_id, agente_id });
+        await clearHistory(empresa_id, conversationKey).catch(() => {});
+        historyForGemini = [];
+        historyCleared = true;
+        keyIndex--; // Retry same key with empty history
+        continue;
+      }
 
       createLogger.warn('API key failed', { empresa_id, agente_id, key_index: keyIndex, error_code: error.code });
 

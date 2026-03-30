@@ -355,9 +355,10 @@ const chatRoutes = async (fastify) => {
 
         } catch (error) {
           const isRetryable = error.code === 'RATE_LIMITED' || error.code === 'INVALID_KEY' || error.code === 'API_ERROR';
+          const isDataError = error.code === 'DATA_ERROR';
 
-          // Record error on this key
-          if (currentKey.id) {
+          // Record error on this key (skip data errors — they are not key issues)
+          if (currentKey.id && !isDataError) {
             recordKeyError(currentKey.id, error.message || error.code || 'Unknown error').catch(() => {});
           }
 

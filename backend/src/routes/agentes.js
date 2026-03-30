@@ -896,7 +896,8 @@ const agentesRoutes = async (fastify) => {
           if (currentKey.id) recordKeySuccess(currentKey.id).catch(() => {});
           break;
         } catch (error) {
-          if (currentKey.id) recordKeyError(currentKey.id, error.message).catch(() => {});
+          const isDataError = error.code === 'DATA_ERROR';
+          if (currentKey.id && !isDataError) recordKeyError(currentKey.id, error.message).catch(() => {});
           if (keyIndex >= availableKeys.length - 1) throw error;
           createLogger.warn('Test: API key failed, trying next', {
             key_index: keyIndex, error: error.message

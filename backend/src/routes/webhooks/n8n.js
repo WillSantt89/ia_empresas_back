@@ -541,8 +541,9 @@ const n8nWebhookRoutes = async (fastify) => {
           break;
         } catch (error) {
           const isRetryable = error.code === 'RATE_LIMITED' || error.code === 'INVALID_KEY' || error.code === 'API_ERROR';
+          const isDataError = error.code === 'DATA_ERROR';
 
-          if (currentKey.id) {
+          if (currentKey.id && !isDataError) {
             recordKeyError(currentKey.id, error.message || error.code || 'Unknown error').catch(() => {});
           }
 
