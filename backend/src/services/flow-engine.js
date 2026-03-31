@@ -195,15 +195,33 @@ export async function processFlowNode(fluxoJson, state, userInput) {
   if (node.type === 'input_options') {
     const options = node.options || [];
 
-    // Tenta match por valor ou label
+    // Extrair possível número do input ("01 FGTS" → "1", "1 saque fgts" → "1")
+    const inputDigits = inputText.replace(/\D/g, '');
+    // Palavras significativas do input (sem artigos/preposições curtas)
+    const inputWords = inputLower.split(/\s+/).filter(w => w.length > 2);
+
+    // Tenta match por valor ou label (múltiplas estratégias)
     const matched = options.find(opt => {
       const val = String(opt.value).toLowerCase();
       const label = (opt.label || '').toLowerCase();
-      return inputLower === val || inputLower === label
-        || inputText === String(opt.value)
-        || label.startsWith(inputLower)
-        // Match "1" contra "1 - Consignado"
-        || label.match(new RegExp(`^${inputLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[-–]`));
+      const labelWords = label.split(/\s+/).filter(w => w.length > 2);
+
+      // Match exato
+      if (inputLower === val || inputLower === label || inputText === String(opt.value)) return true;
+      // Label começa com input ("saque" → "saque fgts")
+      if (label.startsWith(inputLower)) return true;
+      // Input começa com valor ("1 - ..." formato)
+      if (label.match(new RegExp(`^${inputLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[-–]`))) return true;
+      // Match por número extraído ("01 FGTS" → "1" match value "1")
+      if (inputDigits && (inputDigits === val || String(parseInt(inputDigits, 10)) === val)) return true;
+      // Label contém input ("CLT" encontrado em "CRÉDITO CLT")
+      if (inputLower.length >= 3 && label.includes(inputLower)) return true;
+      // Input contém label ou palavra-chave do label ("1 saque fgts" contém "fgts")
+      if (labelWords.some(w => w.length >= 3 && inputLower.includes(w))) return true;
+      // Alguma palavra do input bate com palavra do label ("fgts" === "fgts")
+      if (inputWords.some(iw => labelWords.some(lw => iw === lw && lw.length >= 3))) return true;
+
+      return false;
     });
 
     if (matched) {
