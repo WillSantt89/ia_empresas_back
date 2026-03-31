@@ -80,7 +80,27 @@ async function processEmpresaFollowups(empresa_id, configs) {
   const globalMaxRetries = Math.max(...allConfigs.map(c => (Array.isArray(c.retries) ? c.retries.length : 0)));
   if (globalMaxRetries === 0) return;
 
-  // 2. Buscar conversas elegíveis
+  // Filas com config ativa (filtrar na query para não buscar conversas de filas sem config)
+  const filasComConfig = Object.keys(configs.porFila).filter(fid => configs.porFila[fid]?.ativo);
+  const temPadrao = configs.padrao?.ativo;
+
+  // 2. Buscar conversas elegíveis — SOMENTE de filas com config de follow-up
+  let filaFilter;
+  const params = [empresa_id, globalMaxRetries, MAX_PER_CYCLE];
+  if (filasComConfig.length > 0 && temPadrao) {
+    // Tem configs por fila + padrão: buscar todas
+    filaFilter = '';
+  } else if (filasComConfig.length > 0) {
+    // Só configs por fila: filtrar apenas essas filas
+    filaFilter = `AND c.fila_id = ANY($4::uuid[])`;
+    params.push(filasComConfig);
+  } else if (temPadrao) {
+    // Só config padrão: buscar todas (padrão cobre tudo)
+    filaFilter = '';
+  } else {
+    return; // Nenhuma config ativa
+  }
+
   const conversasResult = await pool.query(`
     SELECT
       c.id, c.empresa_id, c.contato_whatsapp, c.contato_nome, c.contato_id,
@@ -95,9 +115,10 @@ async function processEmpresaFollowups(empresa_id, configs) {
       AND c.followup_count < $2
       AND c.agente_id IS NOT NULL
       AND c.whatsapp_number_id IS NOT NULL
+      ${filaFilter}
     ORDER BY c.atualizado_em ASC
     LIMIT $3
-  `, [empresa_id, globalMaxRetries, MAX_PER_CYCLE]);
+  `, params);
 
   for (const conversa of conversasResult.rows) {
     // Resolver config: específica da fila ou padrão
