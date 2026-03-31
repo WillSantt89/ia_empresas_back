@@ -162,13 +162,21 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
 
   const ultimoRemetente = ultimaSaidaResult.rows[0].remetente_tipo;
 
-  // Se última saída foi do CHATBOT, verificar se fluxo ainda está ativo
-  // Se o fluxo ainda existe no Redis, não interferir; se expirou/completou, permitir follow-up
+  // Se última saída foi do CHATBOT, verificar se o intervalo do follow-up já passou
+  // Se já passou, limpar flow state e prosseguir com follow-up
+  // Se não passou, deixar o chatbot aguardar resposta do cliente
   if (ultimoRemetente === 'chatbot') {
-    const { getFlowState } = await import('../services/flow-engine.js');
+    const agora = new Date();
+    if (agora - ultimaSaidaEm < intervaloMs) {
+      return; // Ainda dentro do intervalo — chatbot aguarda resposta
+    }
+    // Intervalo excedido — limpar flow state se existir e prosseguir com follow-up
+    const { getFlowState, clearFlowState } = await import('../services/flow-engine.js');
     const flowState = await getFlowState(conversa.empresa_id, conversa.contato_whatsapp);
-    if (flowState) return; // Fluxo ativo — não interferir
-    // Fluxo expirou ou completou — seguir com follow-up
+    if (flowState) {
+      await clearFlowState(conversa.empresa_id, conversa.contato_whatsapp);
+      flog.info({ conversa_id, phone: conversa.contato_whatsapp }, 'Flow chatbot limpo por inatividade, prosseguindo com follow-up');
+    }
   }
 
   // Se última saída foi da IA (não follow-up), resetar contador
