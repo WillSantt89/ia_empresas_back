@@ -141,8 +141,14 @@ async function processConversaFollowup(conversa, retriesArr, mensagem_encerramen
 
   const ultimoRemetente = ultimaSaidaResult.rows[0].remetente_tipo;
 
-  // Se última saída foi do CHATBOT, pular — fluxo de chatbot ativo, não interferir
-  if (ultimoRemetente === 'chatbot') return;
+  // Se última saída foi do CHATBOT, verificar se fluxo ainda está ativo
+  // Se o fluxo ainda existe no Redis, não interferir; se expirou/completou, permitir follow-up
+  if (ultimoRemetente === 'chatbot') {
+    const { getFlowState } = await import('../services/flow-engine.js');
+    const flowState = await getFlowState(conversa.empresa_id, conversa.contato_whatsapp);
+    if (flowState) return; // Fluxo ativo — não interferir
+    // Fluxo expirou ou completou — seguir com follow-up
+  }
 
   // Se última saída foi da IA (não follow-up), resetar contador
   // A IA acabou de responder, dar tempo ao cliente antes de fazer follow-up
