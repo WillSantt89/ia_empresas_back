@@ -59,6 +59,11 @@ async function checkFollowups() {
       }
     }
 
+    // Batch: finalizar conversas com janela 24h expirada ANTES dos follow-ups
+    for (const [empresa_id] of Object.entries(configsPorEmpresa)) {
+      await finalizarConversasExpiradas(empresa_id);
+    }
+
     for (const [empresa_id, configs] of Object.entries(configsPorEmpresa)) {
       await processEmpresaFollowups(empresa_id, configs);
     }
@@ -387,6 +392,52 @@ async function enviarFollowupIA(conversa, retryNumero, totalRetries, agente_foll
       tipo_mensagem: 'text',
       criado_em: logResult.rows[0].criado_em,
     });
+  }
+}
+
+/**
+ * Finaliza em batch todas as conversas com janela 24h expirada.
+ * Muito mais eficiente do que processar uma a uma no loop de follow-ups.
+ */
+async function finalizarConversasExpiradas(empresa_id) {
+  try {
+    const result = await pool.query(`
+      UPDATE conversas SET status = 'finalizado', atualizado_em = NOW()
+      WHERE empresa_id = $1
+        AND status = 'ativo'
+        AND controlado_por IN ('ia', 'fila')
+        AND ultima_msg_entrada_em < NOW() - INTERVAL '24 hours'
+        AND ultima_msg_entrada_em IS NOT NULL
+      RETURNING id, contato_whatsapp, fila_id
+    `, [empresa_id]);
+
+    if (result.rows.length > 0) {
+      // Log batch de histórico de controle
+      const values = result.rows.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2}, 'finalizado', 'ia', NULL, 'Janela 24h expirada (batch)')`).join(',');
+      const params = result.rows.flatMap(r => [r.id, empresa_id]);
+      await pool.query(
+        `INSERT INTO controle_historico (conversa_id, empresa_id, acao, de_controlador, para_controlador, motivo) VALUES ${values}`,
+        params
+      ).catch(() => {});
+
+      // Finalizar atendimentos ativos
+      const ids = result.rows.map(r => r.id);
+      await pool.query(
+        `UPDATE atendimentos SET status = 'finalizado', finalizado_em = NOW() WHERE conversa_id = ANY($1) AND status = 'ativo'`,
+        [ids]
+      ).catch(() => {});
+
+      // Arquivar Redis e emitir WebSocket
+      for (const row of result.rows) {
+        const conversationKey = `whatsapp:${row.contato_whatsapp}`;
+        archiveConversation(empresa_id, conversationKey).catch(() => {});
+        emitConversaAtualizada(row.id, row.fila_id, { id: row.id, status: 'finalizado' });
+      }
+
+      flog.info({ empresa_id, count: result.rows.length }, 'Conversas com janela 24h expirada finalizadas em batch');
+    }
+  } catch (error) {
+    flog.error({ err: error, empresa_id }, 'Erro ao finalizar conversas expiradas em batch');
   }
 }
 
