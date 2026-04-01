@@ -774,7 +774,11 @@ async function processMessageCommon({
         });
       }
     }
-    return;
+    // Se é conversa nova e tem chatbot, não retornar — continuar para iniciar o fluxo do chatbot
+    if (!(isNewConversation && agent.chatbot_ativo && agent.chatbot_fluxo_id)) {
+      return;
+    }
+    // Conversa nova com chatbot: rejeição enviada, agora continua para iniciar menu do chatbot
   }
 
   // --- Chatbot Flow Engine ---
@@ -802,8 +806,12 @@ async function processMessageCommon({
       }
 
       if (fluxoJson && fluxoJson.nodes && fluxoJson.start_node) {
-        if (!flowState && isNewConversation) {
-          // Nova conversa sem fluxo ativo — iniciar fluxo
+        if (isNewConversation) {
+          // Nova conversa — sempre iniciar fluxo do zero (limpar flow state residual se existir)
+          if (flowState) {
+            await clearFlowState(empresa_id, phone);
+            createLogger.info({ empresa_id, phone }, 'Flow state residual limpo para nova conversa');
+          }
           createLogger.info({ empresa_id, phone, isNewConversation }, 'CHATBOT starting flow');
           const flowResult = await startFlow(empresa_id, phone, agent.chatbot_fluxo_id, fluxoJson);
           if (flowResult?.response) {
