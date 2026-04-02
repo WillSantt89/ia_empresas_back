@@ -18,6 +18,7 @@ import { atribuirConversaAutomatica, calcularStatsFila } from './fila-manager.js
 import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats, emitStatusEntrega } from './websocket.js';
 import { getFlowState, startFlow, processFlowInput, clearFlowState } from './flow-engine.js';
 import { consumirCredito } from './creditos-ia.js';
+import { checkAutomacoesEntrada } from './automacao-entrada.js';
 
 const createLogger = logger.child({ module: 'message-processor' });
 
@@ -779,6 +780,98 @@ async function processMessageCommon({
       return;
     }
     // Conversa nova com chatbot: rejeição enviada, agora continua para iniciar menu do chatbot
+  }
+
+  // --- Automações de Entrada (só para conversas novas) ---
+  if (isNewConversation) {
+    const matchAutomacao = await checkAutomacoesEntrada(empresa_id, phone);
+    if (matchAutomacao) {
+      createLogger.info({
+        empresa_id, phone, conversa_id,
+        automacao: matchAutomacao.automacao_nome,
+        agente_destino_id: matchAutomacao.agente_destino_id,
+      }, 'Automação de entrada: match encontrado, redirecionando para agente destino');
+
+      // Buscar agente destino
+      const destResult = await pool.query(`
+        SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+               cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+               chatbot_fluxo_id, chatbot_ativo
+        FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true
+      `, [matchAutomacao.agente_destino_id, empresa_id]);
+
+      if (destResult.rows.length > 0) {
+        // Trocar agente na conversa
+        agent = destResult.rows[0];
+        ({ agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent);
+
+        await pool.query(
+          `UPDATE conversas SET agente_id = $1, atualizado_em = NOW() WHERE id = $2`,
+          [agente_id, conversa_id]
+        );
+
+        // Injetar dados da automação como contexto no histórico Redis
+        const dadosTexto = Object.entries(matchAutomacao.dados)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(', ');
+        const contexto = `[AUTOMAÇÃO DE ENTRADA - ${matchAutomacao.automacao_nome}]: Cliente identificado com dados pré-aprovados. ${dadosTexto}`;
+        await addToHistory(empresa_id, conversationKey, 'user', contexto);
+        await addToHistory(empresa_id, conversationKey, 'user', historyText);
+
+        // Buscar API keys do agente destino
+        const destKeys = await getActiveKeysForAgent(empresa_id, agente_id);
+        if (destKeys.length > 0) {
+          // Processar direto com IA (pular chatbot)
+          const result = await processAIResponse({
+            empresa_id, conversa_id, contato_id, agente_id, agent,
+            availableKeys: destKeys, conversationKey,
+            messageText: historyText, parts, startTime,
+          });
+
+          if (result) {
+            const sendResult = await sendTextMessage(phoneNumberId, graphToken, phone, result.text);
+            const outgoingMsgResult = await pool.query(`
+              INSERT INTO mensagens_log (
+                conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem,
+                tokens_input, tokens_output, tools_invocadas_json,
+                modelo_usado, api_key_usada_id, latencia_ms,
+                whatsapp_message_id, status_entrega, criado_em
+              ) VALUES ($1, $2, 'saida', $3, 'ia', $4, 'text', $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+              RETURNING id, criado_em
+            `, [
+              conversa_id, empresa_id, result.text, agente_nome,
+              result.tokensInput, result.tokensOutput,
+              result.toolsCalled.length > 0 ? JSON.stringify(result.toolsCalled.map(tc => tc.name)) : null,
+              result.modelo, result.usedKeyId, result.processingTime,
+              sendResult.wamid, sendResult.success ? 'sent' : 'failed',
+            ]);
+
+            if (outgoingMsgResult.rows[0]) {
+              const conversaForFila = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+              emitNovaMensagem(conversa_id, conversaForFila.rows[0]?.fila_id, {
+                id: outgoingMsgResult.rows[0].id, conversa_id,
+                conteudo: result.text, direcao: 'saida',
+                remetente_tipo: 'ia', remetente_nome: agente_nome,
+                tipo_mensagem: 'text', criado_em: outgoingMsgResult.rows[0].criado_em,
+              });
+            }
+
+            pool.query(`
+              UPDATE uso_diario_agente SET total_atendimentos = total_atendimentos + 1,
+                limite_atingido = CASE WHEN total_atendimentos + 1 >= limite_diario THEN true ELSE false END,
+                atualizado_em = CURRENT_TIMESTAMP
+              WHERE empresa_id = $1 AND agente_id = $2 AND data = CURRENT_DATE
+            `, [empresa_id, agente_id]).catch(() => {});
+
+            pool.query(`
+              INSERT INTO conversacao_analytics (empresa_id, agente_id, conversation_id, tokens_input, tokens_output, iteracoes, tools_chamadas, tempo_processamento_ms, modelo, sucesso)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            `, [empresa_id, agente_id, conversationKey, result.tokensInput, result.tokensOutput, result.iteracoes, result.toolsCalled.length, result.processingTime, result.modelo, true]).catch(() => {});
+          }
+        }
+        return; // Automação tratou a conversa, não continua pro chatbot
+      }
+    }
   }
 
   // --- Chatbot Flow Engine ---
