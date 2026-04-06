@@ -53,7 +53,9 @@ export async function checkAutomacoesEntrada(empresa_id, phone) {
           continue;
         }
 
-        const data = await response.json();
+        const rawData = await response.json();
+        // Tolera resposta como objeto {match,dados} OU array [{match,dados}] (n8n costuma embrulhar em array)
+        const data = Array.isArray(rawData) ? (rawData[0] || {}) : rawData;
 
         if (data.match === true) {
           createLogger.info({

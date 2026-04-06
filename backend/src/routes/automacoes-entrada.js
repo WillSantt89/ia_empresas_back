@@ -258,14 +258,16 @@ const automacoesEntradaRoutes = async (fastify) => {
       const startTime = Date.now();
       const response = await fetch(auto.url_api, fetchOptions);
       const latency = Date.now() - startTime;
-      const data = await response.json();
+      const rawData = await response.json();
+      // Tolera resposta como objeto OU array (n8n costuma embrulhar em array)
+      const data = Array.isArray(rawData) ? (rawData[0] || {}) : rawData;
 
       return {
         success: true,
         data: {
           status_code: response.status,
           latencia_ms: latency,
-          resposta: data,
+          resposta: rawData,
           match: data.match === true,
         },
       };
