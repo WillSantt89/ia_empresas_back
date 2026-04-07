@@ -172,8 +172,8 @@ export async function sendTemplateMessage(phoneNumberId, token, recipientPhone, 
  */
 async function convertToOggOpus(buffer, sourceExt = 'webm') {
   const id = randomUUID();
-  const inputPath = join(tmpdir(), `${id}.${sourceExt}`);
-  const outputPath = join(tmpdir(), `${id}.ogg`);
+  const inputPath = join(tmpdir(), `${id}_in.${sourceExt}`);
+  const outputPath = join(tmpdir(), `${id}_out.ogg`);
 
   try {
     await writeFile(inputPath, buffer);
