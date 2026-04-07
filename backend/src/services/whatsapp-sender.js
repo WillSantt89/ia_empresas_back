@@ -153,31 +153,60 @@ export async function sendTemplateMessage(phoneNumberId, token, recipientPhone, 
  * @returns {Promise<{media_id: string|null, success: boolean, error?: string}>}
  */
 /**
- * Convert audio buffer from webm to ogg/opus using ffmpeg
+ * Convert audio buffer to ogg/opus voice note compatible with WhatsApp Cloud API.
+ *
+ * Use case: Chrome/Firefox MediaRecorder produz webm/opus que a Meta API ate aceita
+ * mas o WhatsApp Android nao reproduz consistentemente. Re-encodamos pra opus em
+ * container ogg, parametros otimizados para voz (PTT).
+ *
+ * Parametros:
+ *  -vn               descarta qualquer stream de video (webm pode ter ambos)
+ *  -map 0:a:0        pega so o primeiro stream de audio
+ *  -map_metadata -1  remove tags do encoder (Chrome tags)
+ *  -c:a libopus      re-encode em opus
+ *  -b:a 24k          24 kbps (PTT do whatsapp ~16-24k)
+ *  -ar 48000         opus exige 48kHz internamente (libopus aceita outros e converte)
+ *  -ac 1             mono (Meta exige mono)
+ *  -application voip otimiza pra fala humana
+ *  -frame_duration 60 frame longo, mais eficiente pra voz
  */
-async function convertWebmToOgg(buffer) {
+async function convertToOggOpus(buffer, sourceExt = 'webm') {
   const id = randomUUID();
-  const inputPath = join(tmpdir(), `${id}.webm`);
+  const inputPath = join(tmpdir(), `${id}.${sourceExt}`);
   const outputPath = join(tmpdir(), `${id}.ogg`);
 
   try {
     await writeFile(inputPath, buffer);
 
+    const ffmpegArgs = [
+      '-y',
+      '-i', inputPath,
+      '-vn',
+      '-map', '0:a:0',
+      '-map_metadata', '-1',
+      '-c:a', 'libopus',
+      '-b:a', '24k',
+      '-ar', '48000',
+      '-ac', '1',
+      '-application', 'voip',
+      '-frame_duration', '60',
+      outputPath,
+    ];
+
     await new Promise((resolve, reject) => {
-      execFile('ffmpeg', [
-        '-i', inputPath,
-        '-c:a', 'libopus',
-        '-b:a', '48k',
-        '-ar', '48000',
-        '-ac', '1',
-        '-y', outputPath,
-      ], { timeout: 15000 }, (error, stdout, stderr) => {
-        if (error) reject(new Error(`ffmpeg error: ${error.message}`));
-        else resolve(stdout);
+      execFile('ffmpeg', ffmpegArgs, { timeout: 30000 }, (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`ffmpeg failed: ${error.message} | stderr: ${(stderr || '').slice(-500)}`));
+        } else {
+          resolve(stdout);
+        }
       });
     });
 
     const oggBuffer = await readFile(outputPath);
+    if (!oggBuffer || oggBuffer.length === 0) {
+      throw new Error('ffmpeg produced empty output file');
+    }
     return oggBuffer;
   } finally {
     unlink(inputPath).catch(() => {});
@@ -188,25 +217,29 @@ async function convertWebmToOgg(buffer) {
 export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/media`;
 
-  // Meta API doesn't accept audio/webm — convert to real ogg/opus via ffmpeg
   let uploadBuffer = buffer;
   let uploadMimeType = mimeType;
   let uploadFileName = 'file';
 
-  if (mimeType === 'audio/webm' || mimeType.startsWith('audio/webm;')) {
+  // --- Audio: Meta API so aceita opus em container ogg pra PTT ---
+  // Convertemos webm/opus (Chrome/Firefox MediaRecorder) pra ogg/opus.
+  // Tambem re-encodamos audio/ogg vindo do navegador pra garantir compatibilidade
+  // de header (alguns ogg gerados pelo browser tem packets que o WhatsApp rejeita).
+  const isWebmAudio = mimeType === 'audio/webm' || mimeType.startsWith('audio/webm;') || mimeType.startsWith('audio/webm ');
+  const isOggAudio = mimeType === 'audio/ogg' || mimeType.startsWith('audio/ogg;') || mimeType.startsWith('audio/ogg ');
+
+  if (isWebmAudio || isOggAudio) {
     try {
-      uploadBuffer = await convertWebmToOgg(buffer);
-      uploadMimeType = 'audio/ogg; codecs=opus';
+      const sourceExt = isWebmAudio ? 'webm' : 'ogg';
+      uploadBuffer = await convertToOggOpus(buffer, sourceExt);
+      uploadMimeType = 'audio/ogg';
       uploadFileName = 'audio.ogg';
-      createLogger.info('Audio converted from webm to ogg/opus');
+      createLogger.info(`Audio converted to ogg/opus voip (source=${mimeType}, size=${buffer.length}->${uploadBuffer.length})`);
     } catch (err) {
-      createLogger.error(`Failed to convert webm to ogg: ${err.message}`);
-      // Fallback: try sending as-is with ogg mime type
-      uploadMimeType = 'audio/ogg; codecs=opus';
-      uploadFileName = 'audio.ogg';
+      createLogger.error(`Failed to convert audio to ogg/opus: ${err.message}`);
+      // SEM FALLBACK INSEGURO: abortamos. Enviar webm rotulado como ogg corrompe o audio.
+      return { media_id: null, success: false, error: `Falha ao converter audio: ${err.message}` };
     }
-  } else if (mimeType.startsWith('audio/ogg')) {
-    uploadFileName = 'audio.ogg';
   }
 
   try {
