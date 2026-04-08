@@ -23,6 +23,31 @@ import { checkAutomacoesEntrada } from './automacao-entrada.js';
 const createLogger = logger.child({ module: 'message-processor' });
 
 /**
+ * Resolve o wamid de uma mensagem citada (reply) no nosso banco e retorna o id local.
+ * Usado quando o cliente envia uma reply: Meta nos da o wamid via context.id, e a gente
+ * tenta achar a mensagem local correspondente pra criar o vinculo no FK.
+ * Retorna { reply_to_message_id: uuid|null, reply_to_wamid: string|null }.
+ */
+async function resolveReplyTo(empresa_id, replyToWamid) {
+  if (!replyToWamid) return { reply_to_message_id: null, reply_to_wamid: null };
+  try {
+    const r = await pool.query(
+      `SELECT id FROM mensagens_log
+       WHERE whatsapp_message_id = $1 AND empresa_id = $2
+       ORDER BY criado_em DESC LIMIT 1`,
+      [replyToWamid, empresa_id]
+    );
+    return {
+      reply_to_message_id: r.rows[0]?.id || null,
+      reply_to_wamid: replyToWamid,
+    };
+  } catch {
+    // Em qualquer falha, salvamos o wamid bruto pra nao perder o vinculo
+    return { reply_to_message_id: null, reply_to_wamid: replyToWamid };
+  }
+}
+
+/**
  * Adiciona/atualiza uma conexão WhatsApp no JSONB conexoes_whatsapp da conversa.
  */
 async function atualizarConexoesWhatsApp(conversa_id, wnId) {
@@ -551,14 +576,15 @@ async function processMessageCommon({
         const fila_id = conversaResult.rows[0].fila_id;
 
         for (const msg of humanMsgsToLog) {
+          const replyInfo = await resolveReplyTo(empresa_id, msg.parsed.replyToWamid);
           const logMsgResult = await pool.query(`
-            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
-            VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
+            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, reply_to_message_id, reply_to_wamid, criado_em)
+            VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
             RETURNING id, criado_em
           `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
               msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
               msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
-              wnId || null]);
+              wnId || null, replyInfo.reply_to_message_id, replyInfo.reply_to_wamid]);
 
           if (logMsgResult.rows[0]) {
             emitNovaMensagem(conversa_id, fila_id, {
@@ -572,6 +598,7 @@ async function processMessageCommon({
               midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
               midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
               criado_em: logMsgResult.rows[0].criado_em,
+              reply_to_message_id: replyInfo.reply_to_message_id,
             });
           }
         }
@@ -635,12 +662,14 @@ async function processMessageCommon({
           messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
         }];
         for (const msg of autoAssignMsgs) {
+          const replyInfo = await resolveReplyTo(empresa_id, msg.parsed.replyToWamid);
           await pool.query(
-            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, criado_em)
-             VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, NOW())`,
+            `INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, reply_to_message_id, reply_to_wamid, criado_em)
+             VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, $11, NOW())`,
             [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
              msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
-             msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null]
+             msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
+             replyInfo.reply_to_message_id, replyInfo.reply_to_wamid]
           );
         }
         return;
@@ -663,14 +692,15 @@ async function processMessageCommon({
     const filaId = conversaResult.rows[0].fila_id;
 
     for (const msg of filaMsgsToLog) {
+      const replyInfo = await resolveReplyTo(empresa_id, msg.parsed.replyToWamid);
       const logMsgResult = await pool.query(`
-        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
-        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, reply_to_message_id, reply_to_wamid, criado_em)
+        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
         RETURNING id, criado_em
       `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
           msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
           msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
-          wnId || null]);
+          wnId || null, replyInfo.reply_to_message_id, replyInfo.reply_to_wamid]);
 
       if (logMsgResult.rows[0]) {
         emitNovaMensagem(conversa_id, filaId, {
@@ -684,6 +714,7 @@ async function processMessageCommon({
           midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
           midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
           criado_em: logMsgResult.rows[0].criado_em,
+          reply_to_message_id: replyInfo.reply_to_message_id,
         });
       }
     }
@@ -720,14 +751,15 @@ async function processMessageCommon({
   const currentFilaId = conversaForFila.rows[0]?.fila_id;
 
   for (const msg of messagesToLog) {
+    const replyInfo = await resolveReplyTo(empresa_id, msg.parsed.replyToWamid);
     const incomingMsgResult = await pool.query(`
-      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, criado_em)
-      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, NOW())
+      INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, reply_to_message_id, reply_to_wamid, criado_em)
+      VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
       RETURNING id, criado_em
     `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
         msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
         msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
-        wnId || null]);
+        wnId || null, replyInfo.reply_to_message_id, replyInfo.reply_to_wamid]);
 
     // Emit WebSocket for each incoming message
     if (incomingMsgResult.rows[0]) {
@@ -742,6 +774,7 @@ async function processMessageCommon({
         midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
         midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
         criado_em: incomingMsgResult.rows[0].criado_em,
+        reply_to_message_id: replyInfo.reply_to_message_id,
       });
     }
   }

@@ -7,8 +7,15 @@ import { sendTextMessage } from './whatsapp-sender.js';
 
 /**
  * Envia mensagem do operador para o cliente via WhatsApp (envio direto Meta API)
+ *
+ * @param {string} conversaId
+ * @param {string} conteudo
+ * @param {{id: string, nome: string}} operador
+ * @param {{replyToMessageId?: string}} [opts] - replyToMessageId: id local da mensagem
+ *   sendo respondida (cria reply/quote no WhatsApp)
  */
-export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
+export async function enviarMensagemWhatsApp(conversaId, conteudo, operador, opts = {}) {
+  const { replyToMessageId = null } = opts;
   // 1. Buscar conversa + empresa
   const conversaResult = await pool.query(
     `SELECT c.*, c.conexao_ativa_id, e.n8n_response_url, e.webhook_token
@@ -47,13 +54,28 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
     throw new Error('Token WhatsApp invalido ou nao configurado');
   }
 
-  // 3. Salvar em mensagens_log (com whatsapp_number_id da conexão usada)
+  // 3a. Resolver mensagem sendo respondida (reply/quote) — opcional
+  let replyToWamid = null;
+  if (replyToMessageId) {
+    const replyResult = await pool.query(
+      `SELECT whatsapp_message_id FROM mensagens_log
+       WHERE id = $1 AND conversa_id = $2 AND empresa_id = $3`,
+      [replyToMessageId, conversaId, conversa.empresa_id]
+    );
+    if (replyResult.rows.length > 0 && replyResult.rows[0].whatsapp_message_id) {
+      replyToWamid = replyResult.rows[0].whatsapp_message_id;
+    }
+    // Se nao achou ou nao tem wamid, ignoramos silenciosamente: a mensagem ainda
+    // sera enviada, so sem o context/reply.
+  }
+
+  // 3b. Salvar em mensagens_log (com whatsapp_number_id da conexão usada)
   const msgResult = await pool.query(
     `INSERT INTO mensagens_log
-       (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega, whatsapp_number_id)
-     VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending', $6)
+       (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome, status_entrega, whatsapp_number_id, reply_to_message_id, reply_to_wamid)
+     VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, 'sending', $6, $7, $8)
      RETURNING *`,
-    [conversaId, conversa.empresa_id, conteudo, operador.id, operador.nome, whatsappNumber.id || null]
+    [conversaId, conversa.empresa_id, conteudo, operador.id, operador.nome, whatsappNumber.id || null, replyToMessageId || null, replyToWamid]
   );
 
   const mensagem = msgResult.rows[0];
@@ -78,7 +100,8 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
       whatsappNumber.phone_number_id,
       token,
       conversa.contato_whatsapp,
-      conteudo
+      conteudo,
+      replyToWamid
     );
 
     if (result.success) {
@@ -117,6 +140,7 @@ export async function enviarMensagemWhatsApp(conversaId, conteudo, operador) {
     remetente_nome: operador.nome,
     status_entrega: mensagem.status_entrega,
     criado_em: mensagem.criado_em,
+    reply_to_message_id: mensagem.reply_to_message_id || null,
   });
 
   return mensagem;

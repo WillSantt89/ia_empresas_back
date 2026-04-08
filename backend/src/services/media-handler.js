@@ -19,6 +19,17 @@ export function parseMetaMessage(messageObj) {
     return { type: 'unknown', text: null };
   }
 
+  // Reply/quote: Meta envia messageObj.context.id quando o cliente respondeu
+  // uma mensagem nossa. Captura aqui e o caller anexa via parsed.replyToWamid
+  // (feito apos esse switch retornar — vide wrapper abaixo).
+  const result = parseMetaMessageInternal(messageObj);
+  if (messageObj.context?.id && result) {
+    result.replyToWamid = messageObj.context.id;
+  }
+  return result;
+}
+
+function parseMetaMessageInternal(messageObj) {
   const type = messageObj.type;
 
   switch (type) {

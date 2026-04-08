@@ -20,24 +20,30 @@ const GRAPH_API_BASE = 'https://graph.facebook.com/v21.0';
  * @param {string} token - Graph API access token (decrypted)
  * @param {string} recipientPhone - Recipient phone number (e.g., "5511999999999")
  * @param {string} text - Message text
+ * @param {string} [contextMessageId] - Optional wamid of the message being replied to (creates a quote/reply in WhatsApp)
  * @returns {Promise<{wamid: string, success: boolean}>}
  */
-export async function sendTextMessage(phoneNumberId, token, recipientPhone, text) {
+export async function sendTextMessage(phoneNumberId, token, recipientPhone, text, contextMessageId = null) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/messages`;
 
   try {
+    const body = {
+      messaging_product: 'whatsapp',
+      to: recipientPhone,
+      type: 'text',
+      text: { body: text },
+    };
+    if (contextMessageId) {
+      body.context = { message_id: contextMessageId };
+    }
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to: recipientPhone,
-        type: 'text',
-        text: { body: text },
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
 
@@ -284,7 +290,7 @@ export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) 
  * @param {string} [fileName] - Optional filename (documents)
  * @returns {Promise<{wamid: string|null, success: boolean, error?: string}>}
  */
-export async function sendMediaMessage(phoneNumberId, token, recipientPhone, mediaType, mediaIdOrLink, caption, fileName) {
+export async function sendMediaMessage(phoneNumberId, token, recipientPhone, mediaType, mediaIdOrLink, caption, fileName, contextMessageId = null) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/messages`;
 
   try {
@@ -304,6 +310,9 @@ export async function sendMediaMessage(phoneNumberId, token, recipientPhone, med
       type: mediaType,
       [mediaType]: mediaObj,
     };
+    if (contextMessageId) {
+      body.context = { message_id: contextMessageId };
+    }
 
     const response = await fetch(url, {
       method: 'POST',

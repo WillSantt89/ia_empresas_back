@@ -311,35 +311,63 @@ export default async function conversasRoutes(fastify, opts) {
 
       conversa.estatisticas = statsResult.rows[0];
 
-      // Mensagens recentes
+      // Mensagens recentes (com dados da mensagem citada via LEFT JOIN)
       if (include_messages) {
         const messagesResult = await pool.query(`
           SELECT
-            id,
-            direcao,
-            conteudo,
-            remetente_tipo,
-            remetente_id,
-            remetente_nome,
-            status_entrega,
-            tokens_input,
-            tokens_output,
-            tools_invocadas_json,
-            modelo_usado,
-            latencia_ms,
-            erro,
-            tipo_mensagem,
-            midia_url,
-            midia_mime_type,
-            midia_nome_arquivo,
-            criado_em
-          FROM mensagens_log
-          WHERE conversa_id = $1
-          ORDER BY criado_em DESC
+            ml.id,
+            ml.direcao,
+            ml.conteudo,
+            ml.remetente_tipo,
+            ml.remetente_id,
+            ml.remetente_nome,
+            ml.status_entrega,
+            ml.tokens_input,
+            ml.tokens_output,
+            ml.tools_invocadas_json,
+            ml.modelo_usado,
+            ml.latencia_ms,
+            ml.erro,
+            ml.tipo_mensagem,
+            ml.midia_url,
+            ml.midia_mime_type,
+            ml.midia_nome_arquivo,
+            ml.criado_em,
+            ml.reply_to_message_id,
+            ml.reply_to_wamid,
+            rep.id              AS reply_to_id,
+            rep.conteudo        AS reply_to_conteudo,
+            rep.tipo_mensagem   AS reply_to_tipo_mensagem,
+            rep.midia_mime_type AS reply_to_midia_mime_type,
+            rep.midia_nome_arquivo AS reply_to_midia_nome_arquivo,
+            rep.direcao         AS reply_to_direcao,
+            rep.remetente_tipo  AS reply_to_remetente_tipo,
+            rep.remetente_nome  AS reply_to_remetente_nome
+          FROM mensagens_log ml
+          LEFT JOIN mensagens_log rep ON rep.id = ml.reply_to_message_id
+          WHERE ml.conversa_id = $1
+          ORDER BY ml.criado_em DESC
           LIMIT $2
         `, [id, messages_limit]);
 
-        conversa.mensagens_recentes = messagesResult.rows.reverse();
+        // Reagrupa colunas reply_to_* num objeto aninhado pra facilitar consumo no front
+        conversa.mensagens_recentes = messagesResult.rows.reverse().map(row => {
+          const { reply_to_id, reply_to_conteudo, reply_to_tipo_mensagem, reply_to_midia_mime_type,
+            reply_to_midia_nome_arquivo, reply_to_direcao, reply_to_remetente_tipo, reply_to_remetente_nome, ...rest } = row;
+          return {
+            ...rest,
+            reply_to: reply_to_id ? {
+              id: reply_to_id,
+              conteudo: reply_to_conteudo,
+              tipo_mensagem: reply_to_tipo_mensagem,
+              midia_mime_type: reply_to_midia_mime_type,
+              midia_nome_arquivo: reply_to_midia_nome_arquivo,
+              direcao: reply_to_direcao,
+              remetente_tipo: reply_to_remetente_tipo,
+              remetente_nome: reply_to_remetente_nome,
+            } : null,
+          };
+        });
       }
 
       // Histórico de agentes
@@ -1695,7 +1723,7 @@ export default async function conversasRoutes(fastify, opts) {
     ]
   }, async (request, reply) => {
     const { user } = request;
-    const { conversa_id, conteudo } = request.body;
+    const { conversa_id, conteudo, reply_to_message_id } = request.body;
 
     if (!conversa_id || !conteudo) {
       return reply.code(400).send({ success: false, error: { message: 'conversa_id e conteudo sao obrigatorios' } });
@@ -1756,7 +1784,7 @@ export default async function conversasRoutes(fastify, opts) {
       const mensagem = await enviarMensagemWhatsApp(conversa_id, conteudo.trim(), {
         id: user.id,
         nome: user.nome,
-      });
+      }, { replyToMessageId: reply_to_message_id || null });
 
       reply.send({ success: true, data: mensagem });
     } catch (error) {
@@ -1968,6 +1996,7 @@ export default async function conversasRoutes(fastify, opts) {
     const caption = data.fields?.caption?.value || '';
     const forceMediaType = data.fields?.media_type?.value || null; // 'sticker' para forçar envio como figurinha
     const isNotaPrivada = data.fields?.nota_privada?.value === 'true';
+    const replyToMessageId = data.fields?.reply_to_message_id?.value || null;
 
     if (!conversaId) {
       return reply.code(400).send({ success: false, error: { message: 'conversa_id obrigatorio' } });
@@ -2089,16 +2118,31 @@ export default async function conversasRoutes(fastify, opts) {
         return reply.code(502).send({ success: false, error: { message: `Falha ao enviar mídia para Meta: ${uploadResult.error}` } });
       }
 
+      // 2b. Resolver mensagem sendo respondida (reply/quote) — opcional
+      let replyToWamid = null;
+      if (replyToMessageId) {
+        const replyRes = await pool.query(
+          `SELECT whatsapp_message_id FROM mensagens_log
+           WHERE id = $1 AND conversa_id = $2 AND empresa_id = $3`,
+          [replyToMessageId, conversaId, conversa.empresa_id]
+        );
+        if (replyRes.rows.length > 0 && replyRes.rows[0].whatsapp_message_id) {
+          replyToWamid = replyRes.rows[0].whatsapp_message_id;
+        }
+      }
+
       // 3. Salvar em mensagens_log
       const conteudo = caption || `[${mediaType}: ${fileName}]`;
       const msgResult = await pool.query(
         `INSERT INTO mensagens_log
            (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_id, remetente_nome,
-            tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, status_entrega)
-         VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, $6, $7, $8, $9, $10, 'sending')
+            tipo_mensagem, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, status_entrega,
+            reply_to_message_id, reply_to_wamid)
+         VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, $6, $7, $8, $9, $10, 'sending', $11, $12)
          RETURNING *`,
         [conversaId, conversa.empresa_id, conteudo, user.id, user.nome,
-         mediaType, saved.relativePath, mimeType, fileName, saved.sizeBytes]
+         mediaType, saved.relativePath, mimeType, fileName, saved.sizeBytes,
+         replyToMessageId || null, replyToWamid]
       );
       const mensagem = msgResult.rows[0];
 
@@ -2111,7 +2155,7 @@ export default async function conversasRoutes(fastify, opts) {
       // 5. Enviar via Meta API usando media_id (upload direto = áudio chega como PTT)
       const sendResult = await sendMediaMessage(
         whatsappNumber.phone_number_id, token, conversa.contato_whatsapp,
-        mediaType, uploadResult.media_id, caption || undefined, fileName
+        mediaType, uploadResult.media_id, caption || undefined, fileName, replyToWamid
       );
 
       if (sendResult.success) {
@@ -2147,6 +2191,7 @@ export default async function conversasRoutes(fastify, opts) {
         midia_nome_arquivo: fileName,
         status_entrega: mensagem.status_entrega,
         criado_em: mensagem.criado_em,
+        reply_to_message_id: mensagem.reply_to_message_id || null,
       });
 
       reply.send({ success: true, data: mensagem });
