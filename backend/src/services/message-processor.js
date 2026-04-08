@@ -19,6 +19,7 @@ import { emitNovaMensagem, emitNovaConversaNaFila, emitFilaStats, emitStatusEntr
 import { getFlowState, startFlow, processFlowInput, clearFlowState } from './flow-engine.js';
 import { consumirCredito } from './creditos-ia.js';
 import { checkAutomacoesEntrada } from './automacao-entrada.js';
+import { matchRegraRoteamento } from './roteamento-inicial.js';
 
 const createLogger = logger.child({ module: 'message-processor' });
 
@@ -609,6 +610,115 @@ async function processMessageCommon({
     }
   } else {
     // New conversation
+
+    // --- Roteamento Inteligente: avalia regras de palavra-chave APENAS na 1a msg ---
+    // Se uma regra ativa bater, cria o ticket direto na fila configurada,
+    // sem chatbot e sem IA, e opcionalmente envia uma resposta automatica.
+    const matchRoteamento = await matchRegraRoteamento(empresa_id, historyText);
+    if (matchRoteamento) {
+      const { rows: [{ get_next_ticket_number: nt }] } = await pool.query(
+        `SELECT get_next_ticket_number($1)`, [empresa_id]
+      );
+
+      const insertConversaRot = await pool.query(`
+        INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, agente_inicial_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id, conexoes_whatsapp, conexao_ativa_id)
+        VALUES ($1, $2, $3, $4, NULL, NULL, 'ativo', 'fila', $5, $6, $7, $8::uuid,
+          CASE WHEN $8 IS NOT NULL THEN jsonb_build_array(jsonb_build_object('wn_id', $8::text, 'first_seen', NOW(), 'last_seen', NOW())) ELSE '[]'::jsonb END,
+          $8::uuid)
+        ON CONFLICT (empresa_id, contato_whatsapp, whatsapp_number_id) WHERE status = 'ativo' AND whatsapp_number_id IS NOT NULL
+        DO UPDATE SET atualizado_em = NOW()
+        RETURNING id, (xmax = 0) as is_new
+      `, [
+        empresa_id, phone, contactName || null, contato_id,
+        matchRoteamento.fila_id,
+        JSON.stringify({ name: contactName || null, source, roteamento_regra_id: matchRoteamento.regra_id, roteamento_regra_nome: matchRoteamento.regra_nome }),
+        nt,
+        wnId || null,
+      ]);
+
+      conversa_id = insertConversaRot.rows[0].id;
+      const isNewRot = insertConversaRot.rows[0].is_new;
+
+      if (isNewRot) {
+        createLogger.info({
+          empresa_id, phone, conversa_id, regra: matchRoteamento.regra_nome, fila_id: matchRoteamento.fila_id,
+        }, 'Roteamento Inteligente: nova conversa criada direto na fila');
+
+        addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+
+        const rotMsgs = _batchMessages || [{
+          messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
+        }];
+        for (const msg of rotMsgs) {
+          const replyInfo = await resolveReplyTo(empresa_id, msg.parsed.replyToWamid);
+          const logRes = await pool.query(`
+            INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, reply_to_message_id, reply_to_wamid, criado_em)
+            VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+            RETURNING id, criado_em
+          `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
+              msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
+              msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
+              wnId || null, replyInfo.reply_to_message_id, replyInfo.reply_to_wamid]);
+
+          if (logRes.rows[0]) {
+            emitNovaMensagem(conversa_id, matchRoteamento.fila_id, {
+              id: logRes.rows[0].id,
+              conversa_id,
+              conteudo: msg.historyText,
+              direcao: 'entrada',
+              remetente_tipo: 'cliente',
+              tipo_mensagem: msg.parsed.type,
+              midia_url: msg.mediaSaved?.relativePath || null,
+              midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
+              midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
+              criado_em: logRes.rows[0].criado_em,
+              reply_to_message_id: replyInfo.reply_to_message_id,
+            });
+          }
+        }
+
+        pool.query(
+          `UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
+          [conversa_id]
+        ).catch(() => {});
+
+        emitNovaConversaNaFila(matchRoteamento.fila_id, {
+          id: conversa_id,
+          contato_whatsapp: phone,
+          contato_nome: contactName || null,
+          status: 'ativo',
+          controlado_por: 'fila',
+          fila_id: matchRoteamento.fila_id,
+          numero_ticket: nt,
+          criado_em: new Date().toISOString(),
+        });
+
+        atribuirConversaAutomatica(conversa_id, matchRoteamento.fila_id).catch(() => null);
+        calcularStatsFila(matchRoteamento.fila_id).then(stats => emitFilaStats(matchRoteamento.fila_id, stats)).catch(() => {});
+
+        // Resposta automatica opcional
+        if (matchRoteamento.resposta_automatica && phoneNumberId && graphToken) {
+          try {
+            const sendRes = await sendTextMessage(
+              phoneNumberId, graphToken, phone, matchRoteamento.resposta_automatica
+            );
+            if (sendRes.success) {
+              await pool.query(`
+                INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, status_entrega, whatsapp_number_id, criado_em)
+                VALUES ($1, $2, 'saida', $3, 'sistema', 'Roteamento Inteligente', 'text', $4, 'sent', $5, NOW())
+              `, [conversa_id, empresa_id, matchRoteamento.resposta_automatica, sendRes.wamid, wnId || null]);
+            }
+          } catch (err) {
+            createLogger.warn({ err: err.message }, 'Falha ao enviar resposta automatica do roteamento');
+          }
+        }
+
+        return; // bypass total: chatbot e IA nao atuam
+      }
+      // se nao foi nova (race condition), nada a fazer aqui — segue fluxo existente
+      createLogger.info('Roteamento: conversa ja existia (ON CONFLICT), seguindo fluxo padrao', { empresa_id, phone, conversa_id });
+    }
+
     const filaResult = await pool.query(
       `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY is_default DESC, criado_em ASC LIMIT 1`,
       [empresa_id]
