@@ -574,6 +574,87 @@ const usuariosRoutes = async (fastify) => {
   });
 
   /**
+   * PATCH /api/usuarios/:id/toggle
+   * Ativar/desativar usuario (soft delete reversivel)
+   */
+  fastify.patch('/:id/toggle', {
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin', 'supervisor'])],
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { empresa_id, id: currentUserId, role: currentUserRole } = request.user;
+    const { id } = request.params;
+
+    try {
+      // Nao pode desativar a si mesmo
+      if (id === currentUserId) {
+        return reply.code(400).send({
+          success: false,
+          error: { code: 'CANNOT_TOGGLE_SELF', message: 'Voce nao pode desativar sua propria conta' }
+        });
+      }
+
+      // Buscar usuario alvo
+      const targetResult = await pool.query(
+        'SELECT id, role, ativo FROM usuarios WHERE empresa_id = $1 AND id = $2',
+        [empresa_id, id]
+      );
+
+      if (targetResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          error: { code: 'USER_NOT_FOUND', message: 'Usuario nao encontrado' }
+        });
+      }
+
+      const target = targetResult.rows[0];
+
+      // Hierarquia de permissao
+      if (currentUserRole === 'admin' && target.role === 'master') {
+        return reply.code(403).send({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'Admin nao pode alterar master' }
+        });
+      }
+      if (currentUserRole === 'supervisor' && !['operador', 'viewer'].includes(target.role)) {
+        return reply.code(403).send({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'Supervisor so pode alterar operador e viewer' }
+        });
+      }
+
+      const result = await pool.query(
+        `UPDATE usuarios SET ativo = NOT ativo, atualizado_em = CURRENT_TIMESTAMP
+         WHERE empresa_id = $1 AND id = $2
+         RETURNING id, nome, email, ativo`,
+        [empresa_id, id]
+      );
+
+      createLogger.info('User toggled', {
+        empresa_id,
+        user_id: id,
+        ativo: result.rows[0].ativo,
+        toggled_by: currentUserId,
+      });
+
+      return { success: true, data: result.rows[0] };
+    } catch (error) {
+      createLogger.error('Failed to toggle user', {
+        empresa_id,
+        user_id: id,
+        error: error.message,
+      });
+      throw error;
+    }
+  });
+
+  /**
    * POST /api/usuarios/change-password
    * Change own password
    */
