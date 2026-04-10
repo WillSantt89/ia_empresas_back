@@ -508,9 +508,11 @@ async function processMessageCommon({
 
   // --- Get API keys with failover ---
   const availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
-  if (availableKeys.length === 0) {
-    createLogger.warn('No API keys for agent', { empresa_id, agente_id });
-    return;
+  const noApiKeys = availableKeys.length === 0;
+  if (noApiKeys) {
+    createLogger.warn('No API keys for agent — ticket será criado mas IA não vai atuar', { empresa_id, agente_id });
+    // NÃO retorna: continua criando contato, conversa, chatbot, roteamento.
+    // Apenas a chamada final ao Gemini (processAIResponse) será pulada.
   }
 
   const conversationKey = `whatsapp:${phone}`;
@@ -1293,6 +1295,50 @@ async function processMessageCommon({
       createLogger.error({ err: flowError, empresa_id, phone }, 'Flow engine error, falling back to AI');
       // Em caso de erro, continua para processamento normal pela IA
     }
+  }
+
+  // --- Se sem API keys, salvar mensagem na fila e retornar (sem IA) ---
+  if (noApiKeys) {
+    createLogger.warn({ empresa_id, phone, conversa_id }, 'Sem API keys — mensagem salva, cliente fica na fila aguardando');
+
+    addToHistory(empresa_id, conversationKey, 'user', historyText).catch(() => {});
+
+    const noKeyMsgs = _batchMessages || [{
+      messageId, parsed, historyText, mediaSaved, mediaMimeType, mediaFileName,
+    }];
+    const conversaForFilaNoKey = await pool.query('SELECT fila_id FROM conversas WHERE id = $1', [conversa_id]);
+    const filaIdNoKey = conversaForFilaNoKey.rows[0]?.fila_id;
+
+    for (const msg of noKeyMsgs) {
+      const replyInfo = await resolveReplyTo(empresa_id, msg.parsed.replyToWamid);
+      const logRes = await pool.query(`
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, midia_url, midia_mime_type, midia_nome_arquivo, midia_tamanho_bytes, whatsapp_number_id, reply_to_message_id, reply_to_wamid, criado_em)
+        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        RETURNING id, criado_em
+      `, [conversa_id, empresa_id, msg.historyText, msg.parsed.type, msg.messageId,
+          msg.mediaSaved?.relativePath || null, msg.mediaSaved ? msg.mediaMimeType : null,
+          msg.mediaSaved ? (msg.mediaFileName || null) : null, msg.mediaSaved?.sizeBytes || null,
+          wnId || null, replyInfo.reply_to_message_id, replyInfo.reply_to_wamid]);
+
+      if (logRes.rows[0]) {
+        emitNovaMensagem(conversa_id, filaIdNoKey, {
+          id: logRes.rows[0].id,
+          conversa_id,
+          conteudo: msg.historyText,
+          direcao: 'entrada',
+          remetente_tipo: 'cliente',
+          tipo_mensagem: msg.parsed.type,
+          midia_url: msg.mediaSaved?.relativePath || null,
+          midia_mime_type: msg.mediaSaved ? msg.mediaMimeType : null,
+          midia_nome_arquivo: msg.mediaSaved ? (msg.mediaFileName || null) : null,
+          criado_em: logRes.rows[0].criado_em,
+          reply_to_message_id: replyInfo.reply_to_message_id,
+        });
+      }
+    }
+
+    pool.query(`UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW(), lida = false WHERE id = $1`, [conversa_id]).catch(() => {});
+    return;
   }
 
   // --- Process with AI ---
