@@ -75,6 +75,88 @@ async function atualizarConexoesWhatsApp(conversa_id, wnId) {
 }
 
 /**
+ * Cria um ticket de emergência quando o fluxo normal não pode prosseguir
+ * (WA number não encontrado, token inválido, etc.). Garante que a mensagem
+ * do cliente não se perca — o ticket aparece na fila do operador.
+ */
+async function createFallbackTicket(empresa_id, phone, contactName, wnId, batch, motivo) {
+  try {
+    // Upsert contato
+    let contato_id = null;
+    try {
+      const contatoRes = await pool.query(`
+        INSERT INTO contatos (empresa_id, whatsapp, nome)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (empresa_id, whatsapp) DO UPDATE SET
+          nome = COALESCE(NULLIF($3, ''), contatos.nome), atualizado_em = NOW()
+        RETURNING id
+      `, [empresa_id, phone, contactName || null]);
+      contato_id = contatoRes.rows[0].id;
+    } catch {}
+
+    // Fila padrão
+    const filaRes = await pool.query(
+      `SELECT id FROM filas_atendimento WHERE empresa_id = $1 AND ativo = true ORDER BY is_default DESC, criado_em ASC LIMIT 1`,
+      [empresa_id]
+    );
+    const filaId = filaRes.rows[0]?.id || null;
+
+    // Número do ticket
+    const { rows: [{ get_next_ticket_number: numero_ticket }] } = await pool.query(
+      `SELECT get_next_ticket_number($1)`, [empresa_id]
+    );
+
+    // Criar conversa sem agente, na fila, controlado_por fila
+    const conversaRes = await pool.query(`
+      INSERT INTO conversas (empresa_id, contato_whatsapp, contato_nome, contato_id, agente_id, status, controlado_por, fila_id, dados_json, numero_ticket, whatsapp_number_id, conexao_ativa_id)
+      VALUES ($1, $2, $3, $4, NULL, 'ativo', 'fila', $5, $6, $7, $8::uuid, $8::uuid)
+      ON CONFLICT (empresa_id, contato_whatsapp, whatsapp_number_id) WHERE status = 'ativo' AND whatsapp_number_id IS NOT NULL
+      DO UPDATE SET atualizado_em = NOW()
+      RETURNING id, (xmax = 0) as is_new
+    `, [empresa_id, phone, contactName || null, contato_id, filaId,
+        JSON.stringify({ fallback: true, motivo }), numero_ticket, wnId || null]);
+
+    const conversa_id = conversaRes.rows[0].id;
+
+    // Salvar mensagens do batch
+    for (const item of batch) {
+      const msg = item.message;
+      const parsed = parseMetaMessage(msg);
+      const texto = parsed.text || parsed.caption || `[${parsed.type || 'mensagem'}]`;
+
+      await pool.query(`
+        INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, tipo_mensagem, whatsapp_message_id, whatsapp_number_id, criado_em)
+        VALUES ($1, $2, 'entrada', $3, 'cliente', $4, $5, $6, NOW())
+      `, [conversa_id, empresa_id, texto, parsed.type || 'text', msg.id, wnId || null]);
+    }
+
+    // Atualizar janela 24h
+    await pool.query(
+      `UPDATE conversas SET ultima_msg_entrada_em = NOW(), atualizado_em = NOW() WHERE id = $1`,
+      [conversa_id]
+    );
+
+    // Emitir WS
+    if (filaId) {
+      emitNovaConversaNaFila(filaId, {
+        id: conversa_id,
+        contato_whatsapp: phone,
+        contato_nome: contactName || null,
+        status: 'ativo',
+        controlado_por: 'fila',
+        fila_id: filaId,
+        numero_ticket,
+        criado_em: new Date().toISOString(),
+      });
+    }
+
+    createLogger.warn({ empresa_id, phone, conversa_id, motivo }, 'Fallback ticket criado — cliente salvo na fila sem IA');
+  } catch (err) {
+    createLogger.error({ err: err.message, empresa_id, phone, motivo }, 'Falha ao criar fallback ticket — CLIENTE PERDIDO');
+  }
+}
+
+/**
  * Process a batch of WhatsApp messages from the same contact (debounce).
  * All messages are parsed/logged individually, but sent to Gemini as one combined message.
  * This prevents the AI from responding multiple times when a client sends rapid messages.
@@ -100,13 +182,16 @@ export async function processWhatsAppBatch(batch) {
   );
 
   if (wnResult.rows.length === 0) {
-    createLogger.error('WhatsApp number not found in worker', { wnId, empresa_id });
+    createLogger.error('WhatsApp number not found — criando ticket sem IA', { wnId, empresa_id, phone });
+    // Fallback: criar ticket na fila padrão sem token (não consegue enviar msgs mas salva o cliente)
+    await createFallbackTicket(empresa_id, phone, contactName, wnId, batch, 'WhatsApp number não encontrado no banco');
     return;
   }
 
   const graphToken = decrypt(wnResult.rows[0].token_graph_api);
   if (!graphToken) {
-    createLogger.error('No valid Graph API token in worker', { wnId, empresa_id });
+    createLogger.error('Token Graph API inválido — criando ticket sem IA', { wnId, empresa_id, phone });
+    await createFallbackTicket(empresa_id, phone, contactName, wnId, batch, 'Token Graph API inválido ou corrompido');
     return;
   }
 
@@ -498,21 +583,28 @@ async function processMessageCommon({
     LIMIT 1
   `, [empresa_id]);
 
-  if (agentResult.rows.length === 0) {
-    createLogger.warn('No active agent for company', { empresa_id });
-    return;
+  const noActiveAgent = agentResult.rows.length === 0;
+  if (noActiveAgent) {
+    createLogger.warn('No active agent for company — ticket será criado na fila sem IA', { empresa_id });
   }
 
-  let agent = agentResult.rows[0];
-  let { agente_id, agente_nome, modelo, temperatura, max_tokens, prompt_ativo } = agent;
+  let agent = noActiveAgent ? {} : agentResult.rows[0];
+  let agente_id = agent.agente_id || null;
+  let agente_nome = agent.agente_nome || null;
+  let modelo = agent.modelo || null;
+  let temperatura = agent.temperatura || null;
+  let max_tokens = agent.max_tokens || null;
+  let prompt_ativo = agent.prompt_ativo || null;
 
   // --- Get API keys with failover ---
-  const availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
-  const noApiKeys = availableKeys.length === 0;
-  if (noApiKeys) {
-    createLogger.warn('No API keys for agent — ticket será criado mas IA não vai atuar', { empresa_id, agente_id });
-    // NÃO retorna: continua criando contato, conversa, chatbot, roteamento.
-    // Apenas a chamada final ao Gemini (processAIResponse) será pulada.
+  let availableKeys = [];
+  let noApiKeys = noActiveAgent; // sem agente = sem keys também
+  if (!noActiveAgent) {
+    availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
+    noApiKeys = availableKeys.length === 0;
+    if (noApiKeys) {
+      createLogger.warn('No API keys for agent — ticket será criado mas IA não vai atuar', { empresa_id, agente_id });
+    }
   }
 
   const conversationKey = `whatsapp:${phone}`;
