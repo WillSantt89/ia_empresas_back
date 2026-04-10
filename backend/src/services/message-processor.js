@@ -232,24 +232,34 @@ export async function processWhatsAppBatch(batch) {
     });
   }
 
-  if (processedMessages.length === 0) {
+  // Dedup: Meta pode enviar o mesmo webhook 2x com ~3ms de diferença.
+  // O debounce agrupa ambos no mesmo batch → mesmo messageId duplicado.
+  // Remover duplicatas por messageId antes de processar.
+  const seenIds = new Set();
+  const dedupedMessages = processedMessages.filter(m => {
+    if (seenIds.has(m.messageId)) return false;
+    seenIds.add(m.messageId);
+    return true;
+  });
+
+  if (dedupedMessages.length === 0) {
     createLogger.debug('All messages in batch were skipped', { phone, empresa_id });
     return;
   }
 
   // Combine all text messages into one for the AI
-  const combinedHistoryText = processedMessages.map(m => m.historyText).join('\n');
+  const combinedHistoryText = dedupedMessages.map(m => m.historyText).join('\n');
 
   // Combine parts for Gemini (text + media from all messages)
-  const combinedParts = processedMessages.flatMap(m => m.parts || []);
+  const combinedParts = dedupedMessages.flatMap(m => m.parts || []);
 
   // Use the last message's data for the main record
-  const lastMsg = processedMessages[processedMessages.length - 1];
+  const lastMsg = dedupedMessages[dedupedMessages.length - 1];
 
   createLogger.info('Processing WhatsApp batch', {
     empresa_id, phone,
     batchSize: batch.length,
-    processedCount: processedMessages.length,
+    processedCount: dedupedMessages.length,
     combinedText: combinedHistoryText.substring(0, 150),
   });
 
@@ -271,7 +281,7 @@ export async function processWhatsAppBatch(batch) {
     wnId,
     source: 'whatsapp_direct',
     // Extra: log individual messages before AI processing
-    _batchMessages: processedMessages,
+    _batchMessages: dedupedMessages,
   });
 }
 
