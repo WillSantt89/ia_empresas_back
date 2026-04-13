@@ -1443,19 +1443,37 @@ async function processMessageCommon({
     return;
   }
 
-  // --- Process with AI ---
-  const result = await processAIResponse({
-    empresa_id,
-    conversa_id,
-    contato_id,
-    agente_id,
-    agent,
-    availableKeys,
-    conversationKey,
-    messageText: historyText,
-    parts,
-    startTime,
-  });
+  // --- Process with AI (com 1 retry se falhar) ---
+  let result = null;
+  try {
+    result = await processAIResponse({
+      empresa_id, conversa_id, contato_id, agente_id, agent,
+      availableKeys, conversationKey,
+      messageText: historyText, parts, startTime,
+    });
+  } catch (err) {
+    createLogger.warn({ empresa_id, phone, conversa_id, error: err.message }, 'IA falhou na 1a tentativa');
+  }
+
+  // Retry 1x: espera 2s, busca keys frescas, tenta de novo
+  if (!result) {
+    try {
+      await new Promise(r => setTimeout(r, 2000));
+      const freshKeys = await getActiveKeysForAgent(empresa_id, agente_id);
+      if (freshKeys.length > 0) {
+        result = await processAIResponse({
+          empresa_id, conversa_id, contato_id, agente_id, agent,
+          availableKeys: freshKeys, conversationKey,
+          messageText: historyText, parts, startTime: Date.now(),
+        });
+        if (result) {
+          createLogger.info({ empresa_id, phone, conversa_id }, 'IA respondeu no retry');
+        }
+      }
+    } catch (retryErr) {
+      createLogger.warn({ empresa_id, phone, conversa_id, error: retryErr.message }, 'IA falhou tambem no retry');
+    }
+  }
 
   if (!result) return;
 
