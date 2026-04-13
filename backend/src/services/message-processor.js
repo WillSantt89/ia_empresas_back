@@ -654,6 +654,42 @@ async function processMessageCommon({
     // Atualizar conexões WhatsApp (multi-conexão por ticket)
     atualizarConexoesWhatsApp(conversa_id, wnId).catch(() => {});
 
+    // --- Recarregar o agente REAL da conversa (não o default) ---
+    // O default resolve sempre Triagem (is_triagem=true). Mas conversas existentes
+    // podem ter sido transferidas pra outro agente (ex: CREDITO CLT, SAQUE FGTS).
+    // Sem esse reload, TODA mensagem subsequente usaria o prompt do Triagem.
+    const conversaAgenteId = conversaResult.rows[0].conversa_agente_id;
+    if (conversaAgenteId && conversaAgenteId !== agente_id) {
+      try {
+        const realAgentResult = await pool.query(`
+          SELECT id as agente_id, nome as agente_nome, modelo, temperatura, max_tokens, prompt_ativo,
+                 cache_enabled, gemini_cache_id, cache_expires_at, mensagem_midia_nao_suportada,
+                 chatbot_fluxo_id, chatbot_ativo
+          FROM agentes WHERE id = $1 AND empresa_id = $2 AND ativo = true
+        `, [conversaAgenteId, empresa_id]);
+
+        if (realAgentResult.rows.length > 0) {
+          agent = realAgentResult.rows[0];
+          agente_id = agent.agente_id;
+          agente_nome = agent.agente_nome;
+          modelo = agent.modelo;
+          temperatura = agent.temperatura;
+          max_tokens = agent.max_tokens;
+          prompt_ativo = agent.prompt_ativo;
+
+          // Recarregar API keys pro agente correto
+          availableKeys = await getActiveKeysForAgent(empresa_id, agente_id);
+          noApiKeys = availableKeys.length === 0;
+
+          createLogger.info({ empresa_id, phone, conversa_id, agente_real: agente_nome },
+            'Agente recarregado da conversa (diferente do default)');
+        }
+      } catch (err) {
+        createLogger.error({ err: err.message, conversa_id }, 'Erro ao recarregar agente da conversa');
+        // Continua com o agente default — melhor que crashar
+      }
+    }
+
     // --- Check human control ---
     if (conversaResult.rows[0].controlado_por === 'humano') {
       // Se nunca recebeu mensagem do cliente (resposta a template), ativar IA
