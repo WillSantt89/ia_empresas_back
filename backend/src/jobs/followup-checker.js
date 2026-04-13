@@ -17,7 +17,7 @@ import { logger } from '../config/logger.js';
 import { decrypt } from '../config/encryption.js';
 import { sendTextMessage } from '../services/whatsapp-sender.js';
 import { getActiveKeysForAgent } from '../services/api-key-manager.js';
-import { addToHistory, archiveConversation } from '../services/memory.js';
+import { archiveConversation } from '../services/memory.js';
 import { emitNovaMensagem, emitConversaAtualizada } from '../services/websocket.js';
 
 const flog = logger.child({ module: 'followup-checker' });
@@ -288,16 +288,15 @@ async function enviarFollowupFixo(conversa, mensagem, retryNumero, totalRetries)
 
   const nomeFollowup = `Follow-up ${retryNumero}/${totalRetries}`;
 
-  // Logar mensagem
+  // Logar mensagem no banco (aparece no chat do operador)
   const logResult = await pool.query(`
     INSERT INTO mensagens_log (conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem, whatsapp_message_id, status_entrega, criado_em)
     VALUES ($1, $2, 'saida', $3, 'followup', $4, 'text', $5, $6, NOW())
     RETURNING id, criado_em
   `, [conversa_id, empresa_id, mensagem, nomeFollowup, sendResult.wamid, sendResult.success ? 'sent' : 'failed']);
 
-  // Salvar no Redis history
-  const conversationKey = `whatsapp:${contato_whatsapp}`;
-  await addToHistory(empresa_id, conversationKey, 'model', mensagem);
+  // NÃO salvar no Redis history — follow-up polui o contexto do agente principal
+  // e causa "No text response" do Gemini (histórico corrompido com msgs fake de user/model)
 
   // WebSocket
   if (logResult.rows[0]) {
@@ -363,40 +362,63 @@ async function enviarFollowupIA(conversa, retryNumero, totalRetries, agente_foll
   const graphToken = decrypt(wnResult.rows[0].token_graph_api);
   if (!graphToken) return;
 
-  // Montar mensagem de contexto para o Gemini
+  // Gerar mensagem de follow-up via Gemini SEM poluir o Redis history.
+  // O follow-up lê o histórico (read-only) e chama o Gemini diretamente.
+  // NÃO adiciona nada ao Redis — o agente principal mantém contexto limpo.
+
   const conversationKey = `whatsapp:${contato_whatsapp}`;
   const followupInstruction = `[Sistema] O cliente não respondeu. Esta é a tentativa de follow-up ${retryNumero} de ${totalRetries}. Envie uma mensagem gentil perguntando se o cliente ainda precisa de ajuda. Seja breve e natural, não mencione que é um follow-up automático.`;
 
-  await addToHistory(empresa_id, conversationKey, 'user', followupInstruction);
+  // Ler histórico do Redis (read-only — não salva nada)
+  const { getHistory, formatHistoryForGemini } = await import('../services/memory.js');
+  const { processMessageWithTools } = await import('../services/gemini.js');
 
-  // Import dinâmico para evitar circular dependency
-  const { processAIResponse } = await import('../services/message-processor.js');
+  const history = await getHistory(empresa_id, conversationKey);
+  const historyForGemini = formatHistoryForGemini(history);
 
   const startTime = Date.now();
-  const result = await processAIResponse({
-    empresa_id,
-    conversa_id,
-    contato_id,
-    agente_id,
-    agent,
-    availableKeys,
-    conversationKey,
-    messageText: followupInstruction,
-    parts: [{ text: followupInstruction }],
-    startTime,
-  });
+  let responseText = null;
+  let tokensIn = 0, tokensOut = 0;
 
-  if (!result || !result.text) {
-    flog.warn({ conversa_id }, 'Gemini não produziu resposta para followup');
+  // Tentar gerar resposta com cada key disponível (failover)
+  for (let i = 0; i < availableKeys.length; i++) {
+    try {
+      const result = await processMessageWithTools(
+        {
+          apiKey: availableKeys[i].gemini_api_key,
+          model: agent.modelo,
+          systemPrompt: agent.prompt_ativo,
+          tools: [], // follow-up não precisa de tools
+          history: historyForGemini,
+          message: followupInstruction,
+          temperature: agent.temperatura,
+          maxTokens: agent.max_tokens,
+        },
+        null // sem tool executor
+      );
+      if (result?.text) {
+        responseText = result.text;
+        tokensIn = result.tokensInput || 0;
+        tokensOut = result.tokensOutput || 0;
+        break;
+      }
+    } catch (err) {
+      flog.warn({ conversa_id, key_index: i, error: err.message }, 'Follow-up Gemini falhou, tentando próxima key');
+    }
+  }
+
+  if (!responseText) {
+    flog.warn({ conversa_id }, 'Gemini não produziu resposta para followup (todas keys falharam)');
     return;
   }
 
   // Enviar para WhatsApp
-  const sendResult = await sendTextMessage(phoneNumberId, graphToken, contato_whatsapp, result.text);
+  const sendResult = await sendTextMessage(phoneNumberId, graphToken, contato_whatsapp, responseText);
 
   const nomeFollowup = `Follow-up ${retryNumero}/${totalRetries}`;
+  const processingTime = Date.now() - startTime;
 
-  // Logar
+  // Logar no banco (aparece no chat do operador) — NÃO no Redis
   const logResult = await pool.query(`
     INSERT INTO mensagens_log (
       conversa_id, empresa_id, direcao, conteudo, remetente_tipo, remetente_nome, tipo_mensagem,
@@ -405,9 +427,9 @@ async function enviarFollowupIA(conversa, retryNumero, totalRetries, agente_foll
     ) VALUES ($1, $2, 'saida', $3, 'followup', $4, 'text', $5, $6, $7, $8, $9, $10, NOW())
     RETURNING id, criado_em
   `, [
-    conversa_id, empresa_id, result.text, nomeFollowup,
-    result.tokensInput, result.tokensOutput, result.modelo,
-    result.processingTime, sendResult.wamid, sendResult.success ? 'sent' : 'failed',
+    conversa_id, empresa_id, responseText, nomeFollowup,
+    tokensIn, tokensOut, agent.modelo,
+    processingTime, sendResult.wamid, sendResult.success ? 'sent' : 'failed',
   ]);
 
   // WebSocket
@@ -415,7 +437,7 @@ async function enviarFollowupIA(conversa, retryNumero, totalRetries, agente_foll
     emitNovaMensagem(conversa_id, fila_id, {
       id: logResult.rows[0].id,
       conversa_id,
-      conteudo: result.text,
+      conteudo: responseText,
       direcao: 'saida',
       remetente_tipo: 'followup',
       remetente_nome: nomeFollowup,
