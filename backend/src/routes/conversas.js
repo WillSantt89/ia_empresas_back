@@ -5,7 +5,8 @@ import { enviarMensagemWhatsApp } from '../services/chat-sender.js';
 import { sendTextMessage, sendTemplateMessage, uploadMediaToMeta, sendMediaMessage } from '../services/whatsapp-sender.js';
 import { bulkOperationsQueue } from '../queues/queues.js';
 import { decrypt } from '../config/encryption.js';
-import { saveMedia } from '../services/media-storage.js';
+import { saveMedia, UPLOAD_DIR } from '../services/media-storage.js';
+import { readFile } from 'fs/promises';
 import { addToHistory, archiveConversation } from '../services/memory.js';
 import { clearFlowState } from '../services/flow-engine.js';
 import {
@@ -2197,6 +2198,128 @@ export default async function conversasRoutes(fastify, opts) {
       reply.send({ success: true, data: mensagem });
     } catch (error) {
       logger.error('Erro enviando midia:', error);
+      reply.code(500).send({ success: false, error: { message: error.message } });
+    }
+  });
+
+  // ============================================
+  // POST /reenviar-midia/:mensagemId — Reenviar mídia que falhou
+  // ============================================
+  fastify.post('/reenviar-midia/:mensagemId', {
+    preHandler: [
+      fastify.authenticate,
+      fastify.addTenantFilter,
+      fastify.requirePermission('conversas', 'write')
+    ]
+  }, async (request, reply) => {
+    const { user } = request;
+    const { mensagemId } = request.params;
+
+    try {
+      // 1. Buscar mensagem original
+      const msgResult = await pool.query(`
+        SELECT ml.*, c.contato_whatsapp, c.fila_id, c.conexao_ativa_id, c.whatsapp_number_id as conversa_wn_id
+        FROM mensagens_log ml
+        JOIN conversas c ON c.id = ml.conversa_id AND c.empresa_id = $2
+        WHERE ml.id = $1 AND ml.empresa_id = $2
+      `, [mensagemId, request.empresaId]);
+
+      if (msgResult.rows.length === 0) {
+        return reply.code(404).send({ success: false, error: { message: 'Mensagem não encontrada' } });
+      }
+
+      const msg = msgResult.rows[0];
+
+      if (msg.direcao !== 'saida') {
+        return reply.code(400).send({ success: false, error: { message: 'Só é possível reenviar mensagens de saída' } });
+      }
+
+      if (!msg.midia_url) {
+        return reply.code(400).send({ success: false, error: { message: 'Mensagem não contém mídia' } });
+      }
+
+      // 2. Ler arquivo do disco
+      const { join } = await import('path');
+      const filePath = join(UPLOAD_DIR, msg.midia_url);
+      let buffer;
+      try {
+        buffer = await readFile(filePath);
+      } catch {
+        return reply.code(404).send({ success: false, error: { message: 'Arquivo de mídia não encontrado no disco' } });
+      }
+
+      // 3. Buscar credenciais WhatsApp
+      const wnId = msg.conversa_wn_id || msg.conexao_ativa_id;
+      const wnQuery = wnId
+        ? `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE id = $1 AND ativo = true`
+        : `SELECT id, phone_number_id, token_graph_api FROM whatsapp_numbers WHERE empresa_id = $1 AND ativo = true ORDER BY criado_em ASC LIMIT 1`;
+      const wnParam = wnId || request.empresaId;
+      const whatsappResult = await pool.query(wnQuery, [wnParam]);
+
+      if (whatsappResult.rows.length === 0) {
+        return reply.code(400).send({ success: false, error: { message: 'Nenhum número WhatsApp ativo' } });
+      }
+
+      const whatsappNumber = whatsappResult.rows[0];
+      const token = decrypt(whatsappNumber.token_graph_api);
+      if (!token) {
+        return reply.code(500).send({ success: false, error: { message: 'Token WhatsApp inválido' } });
+      }
+
+      // 4. Re-upload pra Meta
+      const mimeType = msg.midia_mime_type || 'application/octet-stream';
+      const uploadResult = await uploadMediaToMeta(
+        whatsappNumber.phone_number_id, token, buffer, mimeType
+      );
+      if (!uploadResult.success) {
+        return reply.code(502).send({ success: false, error: { message: `Falha no upload: ${uploadResult.error}` } });
+      }
+
+      // 5. Determinar tipo de mídia
+      let mediaType = 'document';
+      if (mimeType.startsWith('image/')) mediaType = 'image';
+      else if (mimeType.startsWith('audio/')) mediaType = 'audio';
+      else if (mimeType.startsWith('video/')) mediaType = 'video';
+
+      // 6. Reenviar via Meta API
+      const sendResult = await sendMediaMessage(
+        whatsappNumber.phone_number_id, token, msg.contato_whatsapp,
+        mediaType, uploadResult.media_id, undefined, msg.midia_nome_arquivo
+      );
+
+      // 7. Atualizar status no banco
+      if (sendResult.success) {
+        await pool.query(
+          `UPDATE mensagens_log SET status_entrega = 'sent', whatsapp_message_id = $1, erro = NULL WHERE id = $2`,
+          [sendResult.wamid, mensagemId]
+        );
+      } else {
+        await pool.query(
+          `UPDATE mensagens_log SET erro = $1 WHERE id = $2`,
+          [sendResult.error, mensagemId]
+        );
+        return reply.code(502).send({ success: false, error: { message: `Falha ao enviar: ${sendResult.error}` } });
+      }
+
+      // 8. Emitir WebSocket (atualiza status no chat)
+      emitNovaMensagem(msg.conversa_id, msg.fila_id, {
+        id: msg.id,
+        conversa_id: msg.conversa_id,
+        conteudo: msg.conteudo,
+        direcao: 'saida',
+        remetente_tipo: msg.remetente_tipo,
+        remetente_nome: msg.remetente_nome,
+        tipo_mensagem: msg.tipo_mensagem,
+        midia_url: msg.midia_url,
+        midia_mime_type: msg.midia_mime_type,
+        midia_nome_arquivo: msg.midia_nome_arquivo,
+        status_entrega: 'sent',
+        criado_em: msg.criado_em,
+      });
+
+      reply.send({ success: true, data: { wamid: sendResult.wamid, status_entrega: 'sent' } });
+    } catch (error) {
+      logger.error('Erro reenviando midia:', error);
       reply.code(500).send({ success: false, error: { message: error.message } });
     }
   });
