@@ -57,6 +57,7 @@ import respostasProntasRoutes from './routes/respostas-prontas.js';
 import creditosIaRoutes from './routes/creditos-ia.js';
 import automacoesEntradaRoutes from './routes/automacoes-entrada.js';
 import regrasRoteamentoRoutes from './routes/regras-roteamento.js';
+import metaOficialRoutes from './routes/meta-oficial.js';
 
 // Import WebSocket
 import { initializeWebSocket } from './services/websocket.js';
@@ -71,7 +72,7 @@ import cacheMonitor from './jobs/cache-monitor.js';
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter.js';
 import { FastifyAdapter } from '@bull-board/fastify';
-import { whatsappQueue, n8nQueue, bulkOperationsQueue, deadLetterQueue, waitForQueues } from './queues/queues.js';
+import { whatsappQueue, n8nQueue, metaQueue, bulkOperationsQueue, deadLetterQueue, waitForQueues } from './queues/queues.js';
 
 // Create Fastify instance
 const fastify = Fastify({
@@ -353,6 +354,7 @@ async function start() {
     await fastify.register(respostasProntasRoutes, { prefix: '/api/respostas-prontas' });
     await fastify.register(automacoesEntradaRoutes, { prefix: '/api/automacoes-entrada' });
     await fastify.register(regrasRoteamentoRoutes, { prefix: '/api/regras-roteamento' });
+    await fastify.register(metaOficialRoutes, { prefix: '/api/meta' });
 
     // Bull Board dashboard (queue monitoring) — master only
     const serverAdapter = new FastifyAdapter();
@@ -360,6 +362,7 @@ async function start() {
       queues: [
         new BullMQAdapter(whatsappQueue),
         new BullMQAdapter(n8nQueue),
+        new BullMQAdapter(metaQueue),
         new BullMQAdapter(bulkOperationsQueue),
         new BullMQAdapter(deadLetterQueue),
       ],
