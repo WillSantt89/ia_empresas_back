@@ -3,6 +3,7 @@
 // User Roles
 export const USER_ROLES = {
   MASTER: 'master',
+  ADMIN_SUPORTE: 'admin_suporte',  // perfil técnico wschat — entre master e admin
   ADMIN: 'admin',
   SUPERVISOR: 'supervisor',
   OPERADOR: 'operador',
@@ -11,7 +12,8 @@ export const USER_ROLES = {
 
 // Role hierarchy for permission checks
 export const ROLE_HIERARCHY = {
-  [USER_ROLES.MASTER]: 5,
+  [USER_ROLES.MASTER]: 6,
+  [USER_ROLES.ADMIN_SUPORTE]: 5,
   [USER_ROLES.ADMIN]: 4,
   [USER_ROLES.SUPERVISOR]: 3,
   [USER_ROLES.OPERADOR]: 2,

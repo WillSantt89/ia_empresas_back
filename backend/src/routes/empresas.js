@@ -420,6 +420,17 @@ const empresasRoutes = async (fastify) => {
 
       const empresa = empresaResult.rows[0];
 
+      // Auto-cria admin_suporte default da wschat (perfil interno de suporte tecnico).
+      // Email determinístico por empresa, senha fixa compartilhada (alteravel pelo master).
+      // Idempotente — se ja existir, ignora silenciosamente.
+      const SUPORTE_EMAIL = `suportemaster+${slug}@wschat.com.br`;
+      const SUPORTE_SENHA_HASH = '$2b$10$krvwyIrWH1s99knMGK0AWOLs7CKG4x8rcrZ3yCkxYUBqMVhHeEtF2';
+      await client.query(`
+        INSERT INTO usuarios (empresa_id, nome, email, senha_hash, role, ativo, email_verified)
+        VALUES ($1, 'Suporte WSChat', $2, $3, 'admin_suporte', true, true)
+        ON CONFLICT (email) DO NOTHING
+      `, [empresa.id, SUPORTE_EMAIL, SUPORTE_SENHA_HASH]);
+
       // Hash password and create user
       const hashedPassword = await hash(user.senha);
       const userResult = await client.query(`

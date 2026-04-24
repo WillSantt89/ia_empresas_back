@@ -19,11 +19,21 @@ const usuariosRoutes = async (fastify) => {
       email: { type: 'string', format: 'email' },
       senha: { type: 'string' },
       telefone: { type: 'string', maxLength: 20 },
-      role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
+      role: { type: 'string', enum: ['master', 'admin_suporte', 'admin', 'supervisor', 'operador', 'viewer'] },
       ativo: { type: 'boolean' },
       max_conversas_simultaneas: { type: 'integer', minimum: 1, maximum: 999 }
     }
   };
+
+  // Helper: bloqueia operações em admin_suporte por usuários que não sejam master
+  async function blockIfTargetIsAdminSuporte(client, targetId, currentUserRole) {
+    if (currentUserRole === 'master') return null;
+    const r = await client.query('SELECT role FROM usuarios WHERE id = $1 LIMIT 1', [targetId]);
+    if (r.rows[0]?.role === 'admin_suporte') {
+      return { code: 'FORBIDDEN', message: 'Apenas master pode editar/excluir usuário admin_suporte' };
+    }
+    return null;
+  }
 
   /**
    * GET /api/usuarios
@@ -38,7 +48,7 @@ const usuariosRoutes = async (fastify) => {
           page: { type: 'integer', minimum: 1, default: 1 },
           limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
           search: { type: 'string' },
-          role: { type: 'string', enum: ['master', 'admin', 'supervisor', 'operador', 'viewer'] },
+          role: { type: 'string', enum: ['master', 'admin_suporte', 'admin', 'supervisor', 'operador', 'viewer'] },
           ativo: { type: 'boolean' }
         }
       }
@@ -56,6 +66,11 @@ const usuariosRoutes = async (fastify) => {
       // Supervisor can only see operador and viewer
       if (request.user.role === 'supervisor') {
         whereExtra += ` AND role IN ('operador', 'viewer')`;
+      }
+
+      // admin_suporte só é visível para master — esconder dos demais
+      if (request.user.role !== 'master') {
+        whereExtra += ` AND role != 'admin_suporte'`;
       }
 
       // Add filters
@@ -143,6 +158,17 @@ const usuariosRoutes = async (fastify) => {
           error: {
             code: 'FORBIDDEN',
             message: 'Admin users cannot create master users'
+          }
+        });
+      }
+
+      // Apenas master pode criar admin_suporte
+      if (role === 'admin_suporte' && userRole !== 'master') {
+        return reply.code(403).send({
+          success: false,
+          error: {
+            code: 'FORBIDDEN',
+            message: 'Apenas master pode criar usuário admin_suporte'
           }
         });
       }
@@ -333,6 +359,20 @@ const usuariosRoutes = async (fastify) => {
     const updates = request.body;
 
     try {
+      // Bloqueio universal: ninguem alem de master toca em admin_suporte
+      const blockReason = await blockIfTargetIsAdminSuporte(pool, id, currentUserRole);
+      if (blockReason) {
+        return reply.code(403).send({ success: false, error: blockReason });
+      }
+
+      // Tambem nao deixar elevar role pra admin_suporte (somente master)
+      if (updates.role === 'admin_suporte' && currentUserRole !== 'master') {
+        return reply.code(403).send({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'Apenas master pode definir role admin_suporte' }
+        });
+      }
+
       // Check permissions
       if (id !== currentUserId) {
         // User can only update themselves unless they're admin/master/supervisor
@@ -513,6 +553,12 @@ const usuariosRoutes = async (fastify) => {
         });
       }
 
+      // Bloqueio universal: admin_suporte só pode ser deletado por master
+      const blockReason = await blockIfTargetIsAdminSuporte(pool, id, currentUserRole);
+      if (blockReason) {
+        return reply.code(403).send({ success: false, error: blockReason });
+      }
+
       // Check role hierarchy
       if (currentUserRole === 'admin') {
         const targetUserQuery = 'SELECT role FROM usuarios WHERE empresa_id = $1 AND id = $2';
@@ -614,6 +660,14 @@ const usuariosRoutes = async (fastify) => {
       }
 
       const target = targetResult.rows[0];
+
+      // admin_suporte só pode ser ativado/desativado por master
+      if (target.role === 'admin_suporte' && currentUserRole !== 'master') {
+        return reply.code(403).send({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'Apenas master pode ativar/desativar admin_suporte' }
+        });
+      }
 
       // Hierarquia de permissao
       if (currentUserRole === 'admin' && target.role === 'master') {
