@@ -1,9 +1,5 @@
 import { logger } from '../config/logger.js';
-import { execFile } from 'child_process';
-import { writeFile, readFile, unlink } from 'fs/promises';
-import { randomUUID } from 'crypto';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { convertToOggOpus } from './audio-converter.js';
 
 /**
  * WhatsApp Sender Service
@@ -176,49 +172,8 @@ export async function sendTemplateMessage(phoneNumberId, token, recipientPhone, 
  *  -application voip otimiza pra fala humana
  *  -frame_duration 60 frame longo, mais eficiente pra voz
  */
-async function convertToOggOpus(buffer, sourceExt = 'webm') {
-  const id = randomUUID();
-  const inputPath = join(tmpdir(), `${id}_in.${sourceExt}`);
-  const outputPath = join(tmpdir(), `${id}_out.ogg`);
-
-  try {
-    await writeFile(inputPath, buffer);
-
-    const ffmpegArgs = [
-      '-y',
-      '-i', inputPath,
-      '-vn',
-      '-map', '0:a:0',
-      '-map_metadata', '-1',
-      '-c:a', 'libopus',
-      '-b:a', '24k',
-      '-ar', '48000',
-      '-ac', '1',
-      '-application', 'voip',
-      '-frame_duration', '60',
-      outputPath,
-    ];
-
-    await new Promise((resolve, reject) => {
-      execFile('ffmpeg', ffmpegArgs, { timeout: 30000 }, (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(`ffmpeg failed: ${error.message} | stderr: ${(stderr || '').slice(-500)}`));
-        } else {
-          resolve(stdout);
-        }
-      });
-    });
-
-    const oggBuffer = await readFile(outputPath);
-    if (!oggBuffer || oggBuffer.length === 0) {
-      throw new Error('ffmpeg produced empty output file');
-    }
-    return oggBuffer;
-  } finally {
-    unlink(inputPath).catch(() => {});
-    unlink(outputPath).catch(() => {});
-  }
-}
+// Conversão de áudio extraída para src/services/audio-converter.js
+// (compartilhada com meta-sender)
 
 export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) {
   const url = `${GRAPH_API_BASE}/${phoneNumberId}/media`;
@@ -227,23 +182,21 @@ export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) 
   let uploadMimeType = mimeType;
   let uploadFileName = 'file';
 
-  // --- Audio: Meta API so aceita opus em container ogg pra PTT ---
-  // Convertemos webm/opus (Chrome/Firefox MediaRecorder) pra ogg/opus.
-  // Tambem re-encodamos audio/ogg vindo do navegador pra garantir compatibilidade
-  // de header (alguns ogg gerados pelo browser tem packets que o WhatsApp rejeita).
-  const isWebmAudio = mimeType === 'audio/webm' || mimeType.startsWith('audio/webm;') || mimeType.startsWith('audio/webm ');
-  const isOggAudio = mimeType === 'audio/ogg' || mimeType.startsWith('audio/ogg;') || mimeType.startsWith('audio/ogg ');
+  // --- Audio: Meta API so reproduz consistentemente ogg/opus PTT ---
+  // Convertemos QUALQUER audio (webm/Chrome, mp4/Safari, ogg/Firefox, etc.)
+  // pra opus em container ogg, parametros otimizados pra voz (PTT).
+  // Isso evita que iOS/Android antigos exibam "audio nao disponivel".
+  const isAudio = (mimeType || '').toLowerCase().startsWith('audio/');
 
-  if (isWebmAudio || isOggAudio) {
+  if (isAudio) {
     try {
-      const sourceExt = isWebmAudio ? 'webm' : 'ogg';
-      uploadBuffer = await convertToOggOpus(buffer, sourceExt);
+      uploadBuffer = await convertToOggOpus(buffer, mimeType);
       uploadMimeType = 'audio/ogg';
       uploadFileName = 'audio.ogg';
       createLogger.info(`Audio converted to ogg/opus voip (source=${mimeType}, size=${buffer.length}->${uploadBuffer.length})`);
     } catch (err) {
       createLogger.error(`Failed to convert audio to ogg/opus: ${err.message}`);
-      // SEM FALLBACK INSEGURO: abortamos. Enviar webm rotulado como ogg corrompe o audio.
+      // SEM FALLBACK INSEGURO: abortamos. Enviar formato rotulado errado corrompe o audio.
       return { media_id: null, success: false, error: `Falha ao converter audio: ${err.message}` };
     }
   }
@@ -271,8 +224,16 @@ export async function uploadMediaToMeta(phoneNumberId, token, buffer, mimeType) 
       return { media_id: null, success: false, error: errorMsg };
     }
 
-    createLogger.info('Media uploaded to Meta', { media_id: data.id, mimeType });
-    return { media_id: data.id, success: true };
+    createLogger.info('Media uploaded to Meta', { media_id: data.id, originalMime: mimeType, uploadMime: uploadMimeType });
+    // Retornamos o mime EFETIVO enviado pra Meta + tamanho final (apos conversao)
+    // para que a rota possa registrar no DB com precisao (ajuda em diagnostico).
+    return {
+      media_id: data.id,
+      success: true,
+      uploadedMimeType: uploadMimeType,
+      uploadedSizeBytes: uploadBuffer.length,
+      uploadedFileName: uploadFileName,
+    };
   } catch (error) {
     createLogger.error('Failed to upload media to Meta', { error: error.message });
     return { media_id: null, success: false, error: error.message };

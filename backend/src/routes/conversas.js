@@ -2118,6 +2118,14 @@ export default async function conversasRoutes(fastify, opts) {
       if (!uploadResult.success) {
         return reply.code(502).send({ success: false, error: { message: `Falha ao enviar mídia para Meta: ${uploadResult.error}` } });
       }
+      // Para audio, registramos no banco o mime que efetivamente foi enviado pra Meta
+      // (apos conversao em ogg/opus PTT) — facilita diagnostico futuro.
+      const dbMimeType = (uploadResult.uploadedMimeType && mediaType === 'audio')
+        ? uploadResult.uploadedMimeType
+        : mimeType;
+      const dbSizeBytes = (uploadResult.uploadedSizeBytes && mediaType === 'audio')
+        ? uploadResult.uploadedSizeBytes
+        : saved.sizeBytes;
 
       // 2b. Resolver mensagem sendo respondida (reply/quote) — opcional
       let replyToWamid = null;
@@ -2142,7 +2150,7 @@ export default async function conversasRoutes(fastify, opts) {
          VALUES ($1, $2, 'saida', $3, 'operador', $4, $5, $6, $7, $8, $9, $10, 'sending', $11, $12)
          RETURNING *`,
         [conversaId, conversa.empresa_id, conteudo, user.id, user.nome,
-         mediaType, saved.relativePath, mimeType, fileName, saved.sizeBytes,
+         mediaType, saved.relativePath, dbMimeType, fileName, dbSizeBytes,
          replyToMessageId || null, replyToWamid]
       );
       const mensagem = msgResult.rows[0];
@@ -2188,7 +2196,7 @@ export default async function conversasRoutes(fastify, opts) {
         remetente_nome: user.nome,
         tipo_mensagem: mediaType,
         midia_url: saved.relativePath,
-        midia_mime_type: mimeType,
+        midia_mime_type: dbMimeType,
         midia_nome_arquivo: fileName,
         status_entrega: mensagem.status_entrega,
         criado_em: mensagem.criado_em,

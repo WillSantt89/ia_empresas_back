@@ -1,6 +1,7 @@
 import { logger } from '../config/logger.js';
 import { decrypt } from '../config/encryption.js';
 import { pool } from '../config/database.js';
+import { convertToOggOpus } from './audio-converter.js';
 
 /**
  * Meta Sender (canal Meta Oficial)
@@ -93,12 +94,37 @@ export async function sendMedia({ metaPhoneId, to, mediaType, mediaId, caption =
 
 /**
  * Upload de mídia para obter media_id do Meta (necessário antes do sendMedia).
+ *
+ * Para áudio, converte automaticamente pra ogg/opus PTT (mesmo padrão do
+ * canal legado). Garante reprodução em iOS/Android antigos.
  */
 export async function uploadMedia({ metaPhoneId, buffer, mimeType, filename }) {
   const { phone_number_id, token } = await resolveCredentials(metaPhoneId);
+
+  let uploadBuffer = buffer;
+  let uploadMime = mimeType;
+  let uploadName = filename || 'file';
+
+  if ((mimeType || '').toLowerCase().startsWith('audio/')) {
+    try {
+      uploadBuffer = await convertToOggOpus(buffer, mimeType);
+      uploadMime = 'audio/ogg';
+      uploadName = 'audio.ogg';
+      createLogger.info({
+        sourceMime: mimeType,
+        sourceSize: buffer.length,
+        outSize: uploadBuffer.length,
+      }, 'Audio convertido para ogg/opus PTT');
+    } catch (err) {
+      createLogger.error({ err: err.message, mimeType }, 'Conversao audio falhou');
+      return { success: false, media_id: null, error: `Falha ao converter audio: ${err.message}` };
+    }
+  }
+
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
-  form.append('file', new Blob([buffer], { type: mimeType }), filename);
+  form.append('type', uploadMime);
+  form.append('file', new Blob([uploadBuffer], { type: uploadMime }), uploadName);
 
   const response = await fetch(`${GRAPH_URL}/${phone_number_id}/media`, {
     method: 'POST',
@@ -111,7 +137,13 @@ export async function uploadMedia({ metaPhoneId, buffer, mimeType, filename }) {
     const msg = data?.error?.message || `HTTP ${response.status}`;
     return { success: false, media_id: null, error: msg };
   }
-  return { success: true, media_id: data.id };
+  return {
+    success: true,
+    media_id: data.id,
+    uploadedMimeType: uploadMime,
+    uploadedSizeBytes: uploadBuffer.length,
+    uploadedFileName: uploadName,
+  };
 }
 
 export async function markMessageRead({ metaPhoneId, wamid }) {
