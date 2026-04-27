@@ -60,7 +60,7 @@ const apiKeysRoutes = async (fastify) => {
    * Create new API key
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -128,7 +128,7 @@ const apiKeysRoutes = async (fastify) => {
    * Update API key info (name, priority, gemini key)
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -188,7 +188,7 @@ const apiKeysRoutes = async (fastify) => {
    * Revoke API key
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -236,7 +236,7 @@ const apiKeysRoutes = async (fastify) => {
    * Rotate API key
    */
   fastify.post('/:id/rotate', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -288,7 +288,7 @@ const apiKeysRoutes = async (fastify) => {
    * Update Gemini API key
    */
   fastify.put('/:id/gemini-key', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',

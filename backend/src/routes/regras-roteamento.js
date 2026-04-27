@@ -12,7 +12,7 @@ const regrasRoteamentoRoutes = async (fastify) => {
    * Lista regras da empresa (com nome da fila destino)
    */
   fastify.get('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const isMaster = request.user.role === 'master';
@@ -44,7 +44,7 @@ const regrasRoteamentoRoutes = async (fastify) => {
    * Cria nova regra
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -100,7 +100,7 @@ const regrasRoteamentoRoutes = async (fastify) => {
    * PUT /api/regras-roteamento/:id
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -167,7 +167,7 @@ const regrasRoteamentoRoutes = async (fastify) => {
    * PATCH /api/regras-roteamento/:id/toggle
    */
   fastify.patch('/:id/toggle', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;
@@ -189,7 +189,7 @@ const regrasRoteamentoRoutes = async (fastify) => {
    * DELETE /api/regras-roteamento/:id
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;
@@ -212,7 +212,7 @@ const regrasRoteamentoRoutes = async (fastify) => {
    * Simula uma frase contra as regras ativas (sem persistir nada)
    */
   fastify.post('/testar', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',

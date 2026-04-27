@@ -166,7 +166,7 @@ const toolsRoutes = async (fastify) => {
    * Create new tool
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -352,7 +352,7 @@ const toolsRoutes = async (fastify) => {
    * Update tool
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -473,7 +473,7 @@ const toolsRoutes = async (fastify) => {
    * Delete tool
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',

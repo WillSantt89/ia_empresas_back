@@ -130,7 +130,7 @@ const usuariosRoutes = async (fastify) => {
    * Create a new user
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin', 'supervisor'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin', 'supervisor'])],
     schema: {
       body: {
         type: 'object',
@@ -528,7 +528,7 @@ const usuariosRoutes = async (fastify) => {
    * Deactivate user
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -624,7 +624,7 @@ const usuariosRoutes = async (fastify) => {
    * Ativar/desativar usuario (soft delete reversivel)
    */
   fastify.patch('/:id/toggle', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin', 'supervisor'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin', 'supervisor'])],
     schema: {
       params: {
         type: 'object',

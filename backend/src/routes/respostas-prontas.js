@@ -33,7 +33,7 @@ const respostasProntasRoutes = async (fastify) => {
    * Criar nova resposta pronta
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -70,7 +70,7 @@ const respostasProntasRoutes = async (fastify) => {
    * Atualizar resposta pronta
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -123,7 +123,7 @@ const respostasProntasRoutes = async (fastify) => {
    * Excluir resposta pronta
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const { empresa_id } = request.user;
     const { id } = request.params;

@@ -746,7 +746,7 @@ const contatosRoutes = async (fastify) => {
    * Soft-delete (ativo=false) — só master/admin
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',

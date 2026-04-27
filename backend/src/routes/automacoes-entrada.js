@@ -11,7 +11,7 @@ const automacoesEntradaRoutes = async (fastify) => {
    * Lista todas as automações da empresa
    */
   fastify.get('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const isMaster = request.user.role === 'master';
@@ -51,7 +51,7 @@ const automacoesEntradaRoutes = async (fastify) => {
    * Criar nova automação
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -104,7 +104,7 @@ const automacoesEntradaRoutes = async (fastify) => {
    * Atualizar automação
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -169,7 +169,7 @@ const automacoesEntradaRoutes = async (fastify) => {
    * Ativar/desativar automação
    */
   fastify.patch('/:id/toggle', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;
@@ -192,7 +192,7 @@ const automacoesEntradaRoutes = async (fastify) => {
    * Excluir automação
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;
@@ -215,7 +215,7 @@ const automacoesEntradaRoutes = async (fastify) => {
    * Testar automação com um telefone
    */
   fastify.post('/:id/testar', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',

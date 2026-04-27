@@ -11,7 +11,7 @@ const chatbotFluxosRoutes = async (fastify) => {
    * Lista todos os fluxos da empresa
    */
   fastify.get('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const isMaster = request.user.role === 'master';
@@ -46,7 +46,7 @@ const chatbotFluxosRoutes = async (fastify) => {
    * Detalhes de um fluxo (incluindo JSON completo)
    */
   fastify.get('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const isMaster = request.user.role === 'master';
@@ -68,7 +68,7 @@ const chatbotFluxosRoutes = async (fastify) => {
    * Criar novo fluxo
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -110,7 +110,7 @@ const chatbotFluxosRoutes = async (fastify) => {
    * Atualizar fluxo
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -168,7 +168,7 @@ const chatbotFluxosRoutes = async (fastify) => {
    * Excluir fluxo
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const isMaster = request.user.role === 'master';
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
@@ -204,7 +204,7 @@ const chatbotFluxosRoutes = async (fastify) => {
    * Duplicar um fluxo
    */
   fastify.post('/:id/duplicar', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
   }, async (request, reply) => {
     const empresa_id = request.headers['x-empresa-id'] || request.user.empresa_id;
     const { id } = request.params;

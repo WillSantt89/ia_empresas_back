@@ -180,7 +180,7 @@ const agentesRoutes = async (fastify) => {
    * Create new agent
    */
   fastify.post('/', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       body: {
         type: 'object',
@@ -446,7 +446,7 @@ const agentesRoutes = async (fastify) => {
    * Update agent
    */
   fastify.put('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -571,7 +571,7 @@ const agentesRoutes = async (fastify) => {
    * Deactivate agent
    */
   fastify.delete('/:id', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -652,7 +652,7 @@ const agentesRoutes = async (fastify) => {
    * Assign tools to agent
    */
   fastify.post('/:id/tools', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -980,7 +980,7 @@ const agentesRoutes = async (fastify) => {
    * Create context cache for agent
    */
   fastify.post('/:id/cache', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
@@ -1118,7 +1118,7 @@ const agentesRoutes = async (fastify) => {
    * Delete context cache for agent
    */
   fastify.delete('/:id/cache', {
-    preHandler: [fastify.authenticate, checkPermission(['master', 'admin'])],
+    preHandler: [fastify.authenticate, checkPermission(['master', 'admin_suporte', 'admin'])],
     schema: {
       params: {
         type: 'object',
