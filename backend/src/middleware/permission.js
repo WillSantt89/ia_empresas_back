@@ -63,12 +63,16 @@ const PERMISSION_MATRIX = {
     read: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE, USER_ROLES.SUPERVISOR]
   },
   inboxes: {
+    // admin (cliente) precisa LER inboxes para o chat funcionar; gestao continua admin_suporte
     read: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE, USER_ROLES.ADMIN, USER_ROLES.OPERADOR, USER_ROLES.VIEWER],
     write: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE],
     delete: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE]
   },
   'whatsapp-numbers': {
-    read: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE, USER_ROLES.SUPERVISOR, USER_ROLES.OPERADOR, USER_ROLES.VIEWER],
+    // admin (cliente) precisa LER conexoes WhatsApp para fluxos operacionais do chat
+    // (templates, msg em lote, fechar+template em expirados, reabrir ticket).
+    // Gestao das conexoes (criar/editar/excluir) continua restrita a admin_suporte.
+    read: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE, USER_ROLES.ADMIN, USER_ROLES.SUPERVISOR, USER_ROLES.OPERADOR, USER_ROLES.VIEWER],
     write: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE],
     delete: [USER_ROLES.MASTER, USER_ROLES.ADMIN_SUPORTE]
   },
