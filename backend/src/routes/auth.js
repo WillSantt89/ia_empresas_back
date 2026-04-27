@@ -345,10 +345,13 @@ export default async function authRoutes(fastify, opts) {
         role: user.role,
         criado_em: user.criado_em,
         ultimo_login: user.ultimo_login,
-        is_master: user.role === 'master'
+        is_master: user.role === 'master',
+        // Campos flat (compatibilidade com layout/login)
+        empresa_id: user.empresa_id,
+        empresa_nome: user.empresa_nome
       };
 
-      // Add company info for non-master users
+      // Add company info for non-master users (formato aninhado, ja consumido em outras telas)
       if (user.empresa_id) {
         response.empresa = {
           id: user.empresa_id,
